@@ -1,0 +1,303 @@
+# Implementation Plan
+
+> 本 MVP はプラットフォーム基盤と複数機能領域を含むため leaf タスクが 10 件を超えるが、
+> design.md の Components の構造に沿って親タスク 14 件（+ deferrable テスト親 1 件）/ leaf 約 38 件に分解する。
+> 規模が過大な場合の spec 分割候補は design.md 末尾「Note: Spec Split Recommendation」を参照。
+> 並列実行可能なタスクには `(P)` を付け `_Boundary:_` で担当 Components を明示する。
+> deferrable なテスト追加は `- [ ]*` で表現する。
+> Web フロントエンドは **tenant-console**（顧客 IT 管理者向け）と **admin-console**（SaaS 運用者向け）の
+> 2 SPA + 共通基盤 `frontend/shared/` で構成される（design.md「Web フロント構成（2 コンソール）」参照）。
+
+- [ ] 1. プロジェクト骨格と開発環境のセットアップ
+- [ ] 1.1 リポジトリ scaffold（Go module / Vite React × 2 SPA + shared / Makefile / .env.example / .gitignore）
+  - `backend/go.mod` の初期化（モジュール名 `github.com/<org>/ae-mdm`）と最低限の dependency（chi, pgx, sqlc, golang-migrate, cloud.google.com/go/pubsub, googleapis/androidmanagement, coreos/go-oidc, zap）
+  - `frontend/shared/`, `frontend/tenant-console/`, `frontend/admin-console/` の 3 ディレクトリと workspace 設定（pnpm workspaces or npm workspaces）
+  - 各 SPA の `package.json` 初期化（React 19, Vite, TypeScript, Tailwind, shadcn/ui, TanStack Query, React Router, RHF + Zod, oidc-client-ts）。`shared` は library 形式で他 2 SPA から import 可能にする
+  - ルートに `Makefile`（`build`, `test`, `lint`, `migrate-up`, `migrate-down`, `up`, `down`）
+  - `.env.example` に全環境変数の placeholder（DB / OIDC × 2 クライアント / Pub/Sub / AMAPI / セッション秘密鍵 / 保持期間 / 同期遅延閾値）
+  - _Requirements: 1.1, 1.4, 2.1_
+- [ ] 1.2 Docker Compose 構成（api / worker / tenant-console / admin-console / postgres / keycloak / pubsub-emulator）
+  - `docker-compose.yml` に 7 サービス、health check、`depends_on` ordering
+  - `backend/Dockerfile.api` / `Dockerfile.worker`（multi-stage build、distroless ベース）
+  - `frontend/tenant-console/Dockerfile`, `frontend/admin-console/Dockerfile`（Vite build → nginx 配信、各 `nginx.conf` で SPA fallback + 対応する backend ルート群へのリバースプロキシ）
+  - `infra/keycloak/realm-export.json`（dev realm: **tenant-console / admin-console の 2 つの OIDC クライアント**、4 ロールのグループ定義）
+  - `docs/runbook/local-dev.md` に起動・migrate・seed 手順
+  - _Requirements: 2.1, 8.1_
+
+- [ ] 2. プラットフォーム共通基盤（config / db / RLS / logger / errors）
+- [ ] 2.1 設定・ロガー・エラー型の共通基盤 (P)
+  - `internal/config/config.go`: 環境変数から構造体読み込み、未設定値の fail-fast
+  - `internal/logger/logger.go`: zap 構造化ログのファクトリ、`tenant_id` / `request_id` / `message_id` を field 化するヘルパ
+  - `internal/errors/errors.go`: 独自 Error 型（Code, Message, Cause, HTTPStatus, IsTransient）、`errors.Is/As` 互換
+  - _Requirements: 1.3, 2.2, 8.6_
+  - _Boundary: Logger, ErrorsPackage, Config_
+- [ ] 2.2 PostgreSQL 接続プールと Tenant Context Middleware
+  - `internal/platform/db/pool.go`: pgx pool 構築、接続文字列・最大接続数を config から
+  - `internal/platform/db/txmanager.go`: トランザクション境界管理、リトライ、`BeginTxFunc(ctx, fn)` 形式
+  - `internal/platform/db/rls.go`: tx 内で `SET LOCAL app.tenant_id` / `SET LOCAL app.is_superadmin` を発行するヘルパ、tenant context が無い場合 panic ガード
+  - `internal/platform/httpserver/middleware.go`: `TenantContextMiddleware` を chi middleware として実装。request context に `TenantContext` を埋める
+  - `internal/platform/httpserver/server.go`: chi router 構築、recover / request_id / logger / tenant_context / auth の登録順序を確定、**`/api` と `/api/admin` の 2 サブルータを mount**
+  - _Requirements: 1.4, 1.5, 4.7, 5.5, 6.5, 7.4, 9.3_
+  - _Boundary: TenantContextMiddleware, DBPool, TxManager_
+  - _Depends: 2.1_
+- [ ] 2.3 マイグレーション骨格と RLS / append-only ポリシー
+  - `db/migrations/0001_create_tenants.up.sql` ～ `0009_create_notification_dedupe_and_unassigned.up.sql`: design.md の Logical Data Model に従い全テーブル作成
+  - `0010_enable_rls.up.sql`: 全 tenant_id 持ちテーブルに `ENABLE ROW LEVEL SECURITY` + `tenant_isolation_*` ポリシー
+  - `0011_audit_log_immutability.up.sql`: `audit_logs` の SELECT/INSERT ポリシーのみ、UPDATE/DELETE は `REVOKE` + `FORCE ROW LEVEL SECURITY`
+  - 全 migration に対して `*.down.sql` を作成（reversible）
+  - `sqlc.yaml` の設定（queries ディレクトリ、generated package 配置）
+  - _Requirements: 1.4, 1.5, NFR 2.1, NFR 4.3_
+  - _Depends: 2.2_
+
+- [ ] 3. 認証認可基盤（OIDC / Session / RBAC）
+- [ ] 3.1 OIDC Verifier とセッション管理（2 クライアント対応）
+  - `internal/platform/oidc/verifier.go`: `coreos/go-oidc` で JWKS 取得・キャッシュ、`VerifyIDToken` で iss/aud/exp/signature 検証。**aud は `tenant-console` / `admin-console` の 2 値を許容**し、どちらの SPA から発行された ID トークンかを Claims に保持
+  - `internal/auth/session.go`: opaque session token 発行、`sessions` テーブルへの永続化、cookie 発行（HttpOnly/Secure/SameSite=Lax）、idle 30 分 / absolute 8 時間の管理
+  - `internal/auth/handler.go`: `/api/auth/login`, `/callback`, `/logout`, `/session` および `/api/admin/auth/login`, `/callback` エンドポイント（OIDC クライアント分離に対応）
+  - `internal/auth/repository.go`: sqlc 生成の admin_users / sessions クエリラッパ
+  - _Requirements: 2.1, 2.2, 2.8, NFR 5.1, NFR 5.2, NFR 5.3_
+  - _Boundary: OIDCVerifier, SessionManager, AuthService_
+  - _Depends: 2.3_
+- [ ] 3.2 RBAC Authorizer + /api/admin ルート群ガード (P)
+  - `internal/platform/authz/roles.go`: Role enum（SuperAdmin / TenantAdmin / Operator / Viewer）と OIDC groups クレームのマッピング
+  - `internal/platform/authz/permissions.go`: action × resource の許可マトリクスを定数テーブルで実装。`Authorize(tc, action, resource)` で許可/不許可判定
+  - 各 endpoint guard を chi middleware として `Require(action, resource)` ヘルパで提供
+  - **`internal/platform/httpserver/admin_middleware.go`**: `/api/admin/*` 配下に固定で挟む `RequireSuperAdmin()` ガード。aud=tenant-console の token / SuperAdmin 以外のロールは 403 で弾く
+  - _Requirements: 2.3, 2.4, 2.5, 2.6, 2.7, 6.4, 7.4, 9.2, 9.5_
+  - _Boundary: Authorizer, PermissionsMatrix, AdminRouteGuard_
+  - _Depends: 2.1_
+- [ ] 3.3 Auth Service の単体テスト
+  - 表駆動テストで 4 ロール × 主要 Action（read/create/update/delete/lock/reboot/wipe）の許可/拒否を検証
+  - OIDC verify の正常系・異常系（署名不正・exp 切れ・iss 不一致、aud=tenant-console / aud=admin-console の識別）
+  - セッション idle timeout の境界（29 分・30 分・31 分）
+  - `/api/admin/*` への aud=tenant-console token の拒否
+  - _Requirements: 2.3, 2.4, 2.5, 2.6, 2.7, 6.4, NFR 5.2, NFR 5.3_
+
+- [ ] 4. Tenant ドメイン（マルチテナント基盤）
+- [ ] 4.1 AMAPI Client の薄いラッパ
+  - `internal/platform/amapi/client.go`: サービスアカウント認証、token キャッシュ、429/5xx exponential backoff（最大 3 回）、エラーマッピング
+  - `enterprises.go` / `policies.go` / `devices.go` / `enrollment_tokens.go` / `webtokens.go` に各 API メソッド
+  - 全メソッドに `enterpriseName` 引数を必須化（テナント分離の物理担保）
+  - mock 用 interface を切り出し（テスト用 stub 実装も同 package 内）
+  - _Requirements: 1.1, 1.2, 3.1, 3.2, 4.1, 4.3, 6.1, 6.2, 7.1, NFR 1.1_
+  - _Boundary: AMAPIClient_
+- [ ] 4.2 Tenant Service（admin-console 専用、Enterprise バインド・状態管理）
+  - `internal/tenant/handler.go`: **`/api/admin/tenants` 配下のエンドポイント**（`POST /api/admin/tenants`, `POST /api/admin/tenants/{id}/bind`, `GET /api/admin/tenants`, `GET /api/admin/tenants/{id}`, `DELETE /api/admin/tenants/{id}`（二段階確認））
+  - `internal/tenant/service.go`: `signupUrls.create` → `enterprises.create` フロー、`pending_bind` / `bound` / `disabled` の状態遷移
+  - `internal/tenant/repository.go`: sqlc 生成の tenants クエリラッパ
+  - `/api/admin` 配下なので SuperAdmin ルートガードで自動的に保護される、テナント削除は二段階確認 token 検証
+  - _Requirements: 1.1, 1.2, 1.3, 1.4, NFR 4.1_
+  - _Boundary: TenantService, AMAPIClient_
+  - _Depends: 4.1, 3.2_
+- [ ] 4.3 テナント分離 + /api/admin authz 分離の結合テスト
+  - 実 PostgreSQL を起動し、テナント A の context でテナント B の devices/policies/audit_logs に対する SELECT/UPDATE 試行が 0 行返却 / 0 行更新で終わることを検証
+  - SuperAdmin context で全テナント横断 SELECT が成功すること
+  - `app_user` ロールで audit_logs に UPDATE/DELETE 試行 → 拒否されることを DB レベルで verify
+  - aud=tenant-console の token で `/api/admin/tenants` を叩くと 403、aud=admin-console + SuperAdmin role なら 200
+  - _Requirements: 1.4, 1.5, 2.7, 9.3, NFR 2.1, NFR 4.3_
+
+- [ ] 5. 監査ログ（Audit Service）
+- [ ] 5.1 Audit Service（append-only 書込み + 2 経路閲覧） (P)
+  - `internal/audit/service.go`: `Record(ctx, event)` 型付き API、Event 構造体に EventType enum を定義
+  - `internal/audit/handler.go`: `GET /api/audit-logs` エンドポイント（tenant-console 向け、TenantAdmin 以上、自テナントのみ）、絞り込み（event_type, actor_id, resource_id, from, to）
+  - `internal/audit/admin_handler.go`: `GET /api/admin/audit-logs` エンドポイント（admin-console 向け、SuperAdmin、cross-tenant 可、tenant_id 絞り込みあり）
+  - `internal/audit/repository.go`: INSERT-only クエリ、保持期間（180 日、設定可能）に基づくクエリ範囲制限
+  - _Requirements: 2.9, 3.7, 4.8, 6.8, 6.9, 9.4, 9.5, NFR 4.2_
+  - _Boundary: AuditService_
+  - _Depends: 3.2_
+
+- [ ] 6. Pub/Sub 通知処理基盤（Worker）
+- [ ] 6.1 Pub/Sub クライアントと Worker エントリ
+  - `internal/platform/pubsub/client.go`: Pub/Sub client 構築、emulator 接続切替（環境変数 `PUBSUB_EMULATOR_HOST`）
+  - `internal/platform/pubsub/subscriber.go`: pull subscription、`MaxOutstandingMessages` config、dead-letter topic への送信、`ack` / `nack` 抽象化
+  - `cmd/worker/main.go`: graceful shutdown、signal handler、dispatcher への dependency injection
+  - _Requirements: 8.1, 8.5, NFR 3.1_
+  - _Boundary: PubSubClient, PubSubSubscriber_
+  - _Depends: 2.1_
+- [ ] 6.2 Notification Dispatcher と冪等処理・未割当退避（+ admin-console 向け閲覧 API）
+  - `internal/notification/dispatcher.go`: 受信ループ、Envelope へのパース、handler dispatch
+  - `internal/notification/verifier.go`: 送信元・整合性チェック、失敗時 dead-letter
+  - `internal/notification/dedupe.go`: `notification_dedupe` テーブルベースの MessageID チェック
+  - `internal/notification/unassigned.go`: enterprise_name → tenant_id 解決失敗時の `unassigned_notifications` 退避
+  - `internal/notification/admin_handler.go`: `GET /api/admin/notifications/unassigned`（admin-console から退避キュー閲覧、SuperAdmin 専用）
+  - tenant_id 解決成功時に `SET LOCAL app.tenant_id` を tx に注入
+  - _Requirements: 3.5, 8.1, 8.5, 8.6, 8.7, NFR 2.2, NFR 2.3_
+  - _Boundary: NotificationDispatcher, NotificationVerifier, NotificationDedupe, UnassignedQueue_
+  - _Depends: 6.1, 4.2_
+- [ ] 6.3 通知処理の結合テスト
+  - Pub/Sub emulator に同一 MessageID を 2 回 publish → 1 回しか handler が呼ばれないこと
+  - 未登録 enterprise_name の通知 → `unassigned_notifications` に INSERT され ack されること、`/api/admin/notifications/unassigned` で取得可能
+  - 検証失敗（不正 envelope）→ dead-letter topic に転送されること
+  - _Requirements: 8.6, 8.7, NFR 2.3_
+
+- [ ] 7. エンロール（Requirement 3）
+- [ ] 7.1 Enrollment Service（トークン発行 + QR データ生成） (P)
+  - `internal/enrollment/handler.go`: `POST /api/enrollment-tokens`, `GET /api/enrollment-tokens`
+  - `internal/enrollment/service.go`: mode (FULLY_MANAGED / DEDICATED) で `allowPersonalUsage=PERSONAL_USAGE_DISALLOWED` 固定、Dedicated は Kiosk policy を `policyName` に紐付け、`additionalData` に tenant_id + admin_user_id を JSON encode
+  - `internal/enrollment/repository.go`: enrollment_tokens テーブル
+  - 発行ごとに `audit.Record(token_issue)`
+  - _Requirements: 3.1, 3.2, 3.3, 3.6, 3.7_
+  - _Boundary: EnrollmentService, AMAPIClient, AuditService_
+  - _Depends: 4.1, 5.1_
+- [ ] 7.2 ENROLLMENT 通知ハンドラ
+  - `internal/notification/enrollment_handler.go`: ENROLLMENT 通知の payload から enterprise + additionalData を抽出
+  - additionalData 内 tenant_id と enterprise_name lookup の tenant_id を突合、一致時 `devices` テーブルに INSERT / UPDATE
+  - 不一致 / additionalData 欠落時は `unassigned_notifications` に退避
+  - Android 10 未満で AMAPI/ADP に拒否された場合の応答を受けて `devices.compliance_status='unsupported'` で記録
+  - _Requirements: 3.4, 3.5, 8.2, NFR 1.2, NFR 2.2_
+  - _Boundary: EnrollmentNotificationHandler, NotificationDispatcher_
+  - _Depends: 6.2, 7.1_
+- [ ] 7.3 エンロールフローの結合テスト
+  - Enrollment token 発行 → 模擬 ENROLLMENT 通知 publish → devices テーブルに INSERT → `GET /api/devices` で確認
+  - additionalData の tenant_id と enterprise lookup の tenant_id 不一致時に unassigned に退避すること
+  - _Requirements: 3.3, 3.4, 3.5, 8.2_
+
+- [ ] 8. ポリシー（Requirement 4）
+- [ ] 8.1 Policy Validator（5 領域のバリデーション） (P)
+  - `internal/policy/validator.go`: 3,000 アプリ上限、パスワード桁数の数値範囲、Kiosk パッケージ名の形式、必須項目欠落の検出
+  - Validator は table-driven な rule struct で構成し、ユニットテスト容易性を確保
+  - 5 領域（アプリ / パスワード / セキュリティ / 更新 / Kiosk）の field set を定義
+  - _Requirements: 4.2, 4.5, 4.6_
+  - _Boundary: PolicyValidator_
+  - _Depends: 2.1_
+- [ ] 8.2 Policy Service（ポリシー upsert / 端末への割当 / AMAPI patch）
+  - `internal/policy/handler.go`: `GET/POST /api/policies`, `PUT/DELETE /api/policies/{id}`, `PUT /api/devices/{id}/policy`
+  - `internal/policy/service.go`: validator 適用 → AMAPI `policies.patch` → DB snapshot 更新、変更ごとに `audit.Record(policy_change)`
+  - `internal/policy/repository.go`: policies テーブル CRUD（version 管理含む）
+  - TenantAdmin のみ write、Operator/Viewer は read
+  - _Requirements: 4.1, 4.2, 4.3, 4.4, 4.7, 4.8_
+  - _Boundary: PolicyService, PolicyValidator, AMAPIClient, AuditService_
+  - _Depends: 8.1, 4.1, 5.1_
+- [ ] 8.3 Policy Validator の単体テスト
+  - 3,000 アプリ上限（2,999 / 3,000 / 3,001）
+  - パスワード桁数の境界値、Kiosk パッケージ名のフォーマット不正、必須項目欠落の各エラーケース
+  - _Requirements: 4.5, 4.6_
+
+- [ ] 9. デバイス（Requirement 5）
+- [ ] 9.1 Device Service（一覧・詳細・コンプライアンス分類・同期遅延判定 + 横断 overview） (P)
+  - `internal/device/handler.go`: `GET /api/devices`（query: compliance, mode, sync_state, page）, `GET /api/devices/{id}`（tenant-console 向け）
+  - `internal/device/admin_handler.go`: `GET /api/admin/devices/overview`（admin-console 向け、全テナント横断サマリ）
+  - `internal/device/service.go`: `last_status_at` と現在時刻の差分から同期遅延判定（閾値は config から、既定 24 時間）、`appliedState` + `nonComplianceDetails` から「準拠 / 非準拠 / 未確認 / サポート対象外」に分類、admin-console 向けはテナント別サマリを集計
+  - `internal/device/repository.go`: devices テーブルクエリ
+  - HTTP からの直接書込みは提供しない（更新は notification 経由のみ）
+  - _Requirements: 5.1, 5.2, 5.3, 5.4, 5.5, 5.6, 7.5, NFR 1.2, NFR 3.2_
+  - _Boundary: DeviceService_
+  - _Depends: 2.3_
+- [ ] 9.2 STATUS_REPORT 通知ハンドラ
+  - `internal/notification/status_handler.go`: STATUS_REPORT 通知の payload から devices の `last_status_at`, `compliance_status`, `applied_policy_name`, `non_compliance_details`, `hardware_info`, `software_info`, `installed_apps` を更新
+  - 非準拠詳細（nonComplianceDetails）を jsonb 列に保持
+  - _Requirements: 8.3, 5.3, 7.5_
+  - _Boundary: StatusNotificationHandler, NotificationDispatcher, DeviceService_
+  - _Depends: 6.2, 9.1_
+
+- [ ] 10. コマンド（Requirement 6）
+- [ ] 10.1 Command State Machine と Service（LOCK/WIPE/REBOOT 発行） (P)
+  - `internal/command/state.go`: `issued → succeeded/failed/timed_out` の遷移マシン、不正遷移を拒否
+  - `internal/command/handler.go`: `POST /api/devices/{id}/commands`（type 別ガード）、`POST /api/devices/{id}/commands/confirm`（WIPE 用 5 分寿命 token 発行）
+  - `internal/command/service.go`: Authz チェック（Operator は LOCK/REBOOT のみ、WIPE は TenantAdmin）、WIPE は confirmation_token 検証 → AMAPI `devices.issueCommand` → `device_commands` に issued 記録
+  - 発行ごとに `audit.Record(command_issue)`、WIPE は `audit.Record(command_wipe)` を別 EventType で記録
+  - _Requirements: 6.1, 6.2, 6.3, 6.4, 6.5, 6.6, 6.8, 6.9, NFR 4.1_
+  - _Boundary: CommandService, CommandStateMachine, AMAPIClient, AuditService_
+  - _Depends: 4.1, 5.1, 9.1_
+- [ ] 10.2 COMMAND 通知ハンドラ + Timeout Sweeper
+  - `internal/notification/command_handler.go`: COMMAND 通知の payload から `device_commands.status` を 'succeeded' / 'failed' に更新、`result_detail` を jsonb に保持
+  - worker の定期 sweeper（独立 goroutine、24h 周期）で 24 時間以上 issued のままのコマンドを timed_out に遷移
+  - 状態変更ごとに `audit.Record(command_completed)` を記録
+  - _Requirements: 6.7, 8.4_
+  - _Boundary: CommandNotificationHandler, NotificationDispatcher, CommandService_
+  - _Depends: 6.2, 10.1_
+- [ ] 10.3 コマンドライフサイクルの結合テスト
+  - WIPE confirmation token 発行 → 本リクエストで token 提示 → AMAPI モックで accept → device_commands に issued 記録 → 模擬 COMMAND 通知で succeeded 遷移 → audit_logs に WIPE イベント 2 件（issue / completion）確認
+  - Operator が WIPE を試行 → 403 / 422 で拒否されること
+  - WIPE で confirmation_token 未提示 → 422 `wipe_requires_confirmation`
+  - _Requirements: 6.3, 6.4, 6.6, 6.7, 6.8_
+
+- [ ] 11. アプリ配信（Requirement 7）
+- [ ] 11.1 App Service（webTokens 発行・カタログ管理・ポリシー連携） (P)
+  - `internal/app/handler.go`: `POST /api/play-tokens`, `GET /api/apps`, `POST /api/apps/sync`
+  - `internal/app/service.go`: webToken 発行（iframe 表示用）、AMAPI からカタログ取得 → `tenant_apps` に upsert、Policy Service と連携してポリシーの applications[] に installType=FORCE_INSTALLED / AVAILABLE を反映
+  - `internal/app/repository.go`: tenant_apps テーブル
+  - _Requirements: 7.1, 7.2, 7.3, 7.4_
+  - _Boundary: AppService, AMAPIClient, PolicyService_
+  - _Depends: 4.1, 8.2_
+
+- [ ] 12. tenant-console（顧客 IT 管理者向け SPA）
+- [ ] 12.1 共通基盤 frontend/shared と tenant-console scaffold + OIDC ログイン
+  - `frontend/shared/src/lib/oidc.ts`: oidc-client-ts のラッパ、PKCE 設定、`client_id` を引数化（tenant-console / admin-console どちらの SPA からも利用可能）
+  - `frontend/shared/src/lib/api-client.ts`: fetch ラッパ、401 で再ログイン、エラーレスポンスのパース、baseURL は SPA ごとに差し替え可
+  - `frontend/shared/src/lib/queryClient.ts`: TanStack Query 設定（staleTime=30s）
+  - `frontend/shared/src/auth/{LoginPage, CallbackPage, useSession}.tsx`: ログインフローとセッション state（共通）
+  - `frontend/shared/src/components/RoleGate.tsx`: 引数 `roles` に応じて子コンポーネントを非活性化 or 非表示
+  - `frontend/shared/src/components/ConfirmDialog.tsx`: 二段階確認共通コンポーネント（明示的な確認入力）
+  - `frontend/shared/src/types/api.ts`: API 型定義（OpenAPI / 手書き）
+  - `frontend/tenant-console/src/{main.tsx, App.tsx, routes/index.tsx}`: tenant-console の bootstrap、ルート定義（**SuperAdmin 専用ルートは含まない**）、OIDC は `client_id=tenant-console` を使用
+  - _Requirements: 2.1, 2.2, 6.3, 9.1, 9.2, NFR 4.1_
+  - _Boundary: SharedAuth, SharedComponents, TenantConsoleApp_
+- [ ] 12.2 tenant-console: ダッシュボード・デバイス・コマンド (P)
+  - `src/features/dashboard/`: 自テナント全体の端末数 / コンプライアンス内訳 / 同期遅延サマリ
+  - `src/features/devices/`: 一覧（フィルタ: compliance, mode, sync_state）、詳細（HW / SW / applied policy / nonComplianceDetails / installed apps）、同期遅延バッジ
+  - `src/features/commands/`: LOCK / WIPE / REBOOT 発行 UI、WIPE は ConfirmDialog で二段階確認、Operator では WIPE を RoleGate で非表示
+  - _Requirements: 5.1, 5.2, 5.3, 5.4, 5.6, 6.1, 6.2, 6.3, 6.4, 7.5, 9.1, 9.2_
+  - _Boundary: DeviceService, CommandService_
+  - _Depends: 12.1_
+- [ ] 12.3 tenant-console: エンロール・ポリシー (P)
+  - `src/features/enrollment/`: モード選択（Fully Managed / Dedicated）・トークン発行 + QR 表示（`react-qr-code` 等）
+  - `src/features/policies/`: 5 領域タブ（アプリ / パスワード / セキュリティ / 更新 / Kiosk）、Zod スキーマでクライアント側検証
+  - _Requirements: 3.1, 3.2, 4.1, 4.2, 9.1, 9.2_
+  - _Boundary: EnrollmentService, PolicyService_
+  - _Depends: 12.1_
+- [ ] 12.4 tenant-console: アプリ配信・監査ログ・管理者&ロール (P)
+  - `src/features/apps/`: Managed Google Play iframe 埋め込み（webToken 取得 → iframe src 構築）、承認済みアプリ一覧、ポリシーへの紐付け UI
+  - `src/features/audit/`: 自テナントの監査ログ一覧（時系列、絞り込み: event_type / actor / resource / from-to）、TenantAdmin 以上
+  - `src/features/admins/`: テナント内管理者一覧・ロール変更（TenantAdmin 以上、role_change 監査ログを契機）
+  - _Requirements: 2.9, 7.1, 7.2, 7.3, 9.1, 9.4_
+  - _Boundary: AppService, AuditService, AuthService_
+  - _Depends: 12.1_
+
+- [ ] 13. admin-console（SaaS 運用者向け SPA、SuperAdmin 専用）
+- [ ] 13.1 admin-console scaffold + OIDC ログイン（client_id=admin-console）
+  - `frontend/admin-console/src/{main.tsx, App.tsx, routes/index.tsx}`: admin-console の bootstrap、ルート定義（**テナント業務 UI は含まない**）、OIDC は `client_id=admin-console` を使用
+  - `frontend/shared/*` を re-use（auth / api-client / RoleGate / ConfirmDialog / types）
+  - api-client の baseURL を `/api/admin` 基準にし、tenant-console とは別のルート群に向ける
+  - SuperAdmin 以外がログインしても画面に到達できないことを画面側でも確認（最終防御は backend の SuperAdmin ガード）
+  - _Requirements: 2.1, 2.2, 2.7, 9.5_
+  - _Boundary: AdminConsoleApp, SharedAuth_
+  - _Depends: 12.1_
+- [ ] 13.2 admin-console: テナント管理（一覧・作成・bind・無効化） (P)
+  - `src/features/tenants/`: テナント一覧、新規作成（POST `/api/admin/tenants`）、Enterprise バインド（signupUrl 提示 → bind 完了通知）、無効化（DELETE、ConfirmDialog で二段階確認）
+  - tenants.status の pending_bind / bound / disabled をバッジ表示
+  - _Requirements: 1.1, 1.2, 1.3, NFR 4.1_
+  - _Boundary: TenantService_
+  - _Depends: 13.1_
+- [ ] 13.3 admin-console: 横断ダッシュボード・未割当退避・横断監査ログ (P)
+  - `src/features/overview/`: 全テナント横断ダッシュボード（テナント別端末数 / コンプライアンス内訳 / 同期遅延件数）。GET `/api/admin/devices/overview` を消費
+  - `src/features/unassigned/`: 未割当通知・端末の退避キュー可視化。GET `/api/admin/notifications/unassigned` を消費、payload を JSON viewer で表示
+  - `src/features/audit/`: 全テナント横断監査ログ（時系列、絞り込み: tenant_id / event_type / actor / resource / from-to）。GET `/api/admin/audit-logs` を消費
+  - _Requirements: 5.1, 5.3, 5.6, 9.5, NFR 2.3_
+  - _Boundary: DeviceService, AuditService, NotificationDispatcher_
+  - _Depends: 13.1_
+
+- [ ] 14. NFR 横断・運用・観測性
+- [ ] 14.1 構造化ログ・request_id ミドルウェア・ヘルスチェック
+  - `internal/platform/httpserver/middleware.go` に request_id middleware、recover、structured access log
+  - `cmd/api/main.go` と `cmd/worker/main.go` に `/healthz`（liveness）と `/readyz`（DB/Pub/Sub 疎通）
+  - zap で全ログに tenant_id / request_id / message_id を field 化
+  - _Requirements: 8.6, NFR 3.1_
+- [ ] 14.2 admin-seed CLI と初期データ投入
+  - `backend/cmd/admin-seed/main.go`: 環境変数の OIDC subject から初期 SuperAdmin を作成
+  - `docs/runbook/local-dev.md` に seed 実行手順
+  - _Requirements: 2.3, 2.7_
+
+- [ ]* 15. テスト追加（deferrable）
+- [ ]* 15.1 E2E テスト（Playwright、ゴールデンパス）
+  - SuperAdmin が **admin-console** でテナント作成・bind → TenantAdmin として **tenant-console** に再ログイン
+  - TenantAdmin が tenant-console でポリシー作成・端末詳細で適用確認
+  - TenantAdmin が tenant-console で WIPE を二段階確認で発行 → 監査ログ反映
+  - Operator が tenant-console で WIPE を試行 → UI 上で非活性化されていること
+  - Viewer が tenant-console の監査ログ画面にアクセスできない
+  - TenantAdmin が admin-console URL を直接踏んでも、tenant-console token では 403
+  - _Requirements: 1.1, 2.7, 2.9, 4.1, 6.3, 6.4, 9.2, 9.4, 9.5_
+- [ ]* 15.2 性能テスト（通知レイテンシ・端末リスト p95）
+  - Pub/Sub に 1,000 件/分の STATUS_REPORT を流して 60s 未満で API GET に反映されることを測定
+  - 1 テナント 5,000 端末で `GET /api/devices?compliance=non_compliant` p95 < 1s
+  - _Requirements: NFR 3.1, NFR 3.2_

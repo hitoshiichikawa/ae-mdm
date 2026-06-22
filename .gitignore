@@ -1,0 +1,30 @@
+# --- Claude Code (local only) ---
+.claude/settings.local.json
+
+# --- Env / secrets ---
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# --- Go ---
+/bin/
+*.exe
+*.test
+*.out
+coverage.*
+vendor/
+
+# --- Node / frontend ---
+node_modules/
+dist/
+.vite/
+*.local
+
+# --- OS / editor ---
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
