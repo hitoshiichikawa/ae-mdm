@@ -5,8 +5,8 @@
 > 各ドメインの handler / service / repository 実装は後続 Issue（A3 以降）で行う。
 > 並列実行可能なタスクには `(P)` を付け `_Boundary:_` で担当 Components を明示する。
 
-- [ ] 1. 設定・ロガー・エラー型の共通基盤
-- [ ] 1.1 Config Loader（env → Config struct + fail-fast）(P)
+- [x] 1. 設定・ロガー・エラー型の共通基盤
+- [x] 1.1 Config Loader（env → Config struct + fail-fast）(P)
   - `backend/internal/config/config.go` に `Config` struct（DatabaseURL / OIDC × 2 / Pub/Sub /
     AMAPI / SessionSecret / AuditLogRetentionDays / DeviceSyncDelayThresholdHours /
     LogLevel / LogFormat / LogOutput / HTTPListenAddr 等）を定義
@@ -18,7 +18,7 @@
     ユニットテストを `t.Setenv` ベースで配置
   - _Requirements: 1.1, 1.2, 1.3, 1.4, 1.5_
   - _Boundary: Config_
-- [ ] 1.2 Structured Logger（zap ラッパ + redaction）(P)
+- [x] 1.2 Structured Logger（zap ラッパ + redaction）(P)
   - `backend/internal/logger/logger.go` に `Logger` interface（Debug/Info/Warn/Error/With/Sync）
     と `NewLogger(cfg)` ファクトリを実装。zap の core を `cfg.LogLevel` / `cfg.LogFormat`
     （json|console）/ `cfg.LogOutput`（stderr|stdout|path）で構築
@@ -31,7 +31,7 @@
     の閾値）のユニットテストを配置
   - _Requirements: 2.1, 2.2, 2.3, 2.4, 2.5_
   - _Boundary: Logger_
-- [ ] 1.3 Domain Error 型 + HTTP マッピング (P)
+- [x] 1.3 Domain Error 型 + HTTP マッピング (P)
   - `backend/internal/errors/codes.go` に `Code` 型と定数（`invalid_request` / `unauthenticated`
     / `forbidden` / `not_found` / `conflict` / `business_rule_violation` / `internal_error` /
     `amapi_upstream_error` / `service_unavailable` / `config_invalid` /
@@ -55,8 +55,8 @@
   - _Boundary: Errors_
   - _Depends: 1.2_
 
-- [ ] 2. DB 接続プール + Tenant Context + RLS Helper
-- [ ] 2.1 pgxpool 構築と起動時 Ping
+- [x] 2. DB 接続プール + Tenant Context + RLS Helper
+- [x] 2.1 pgxpool 構築と起動時 Ping
   - `backend/internal/platform/db/pool.go` に `NewPool(ctx, cfg) (*pgxpool.Pool, error)` を
     実装。`cfg.DatabaseURL` を `pgxpool.ParseConfig` → `pgxpool.NewWithConfig` で構築し、
     `Pool.Ping(ctx)` で疎通確認。失敗時は `*errors.Error{Code: "service_unavailable"}` を返す
@@ -66,7 +66,7 @@
   - _Requirements: 4.1, NFR 3.1, NFR 3.2_
   - _Boundary: DBPool_
   - _Depends: 1.1, 1.3_
-- [ ] 2.2 TenantContext 型 + TxManager + RLS Helper + panic ガード
+- [x] 2.2 TenantContext 型 + TxManager + RLS Helper + panic ガード
   - `backend/internal/platform/db/context.go` に `TenantContext` struct（TenantID /
     AdminUserID / Roles / IsSuperAdmin）と `WithTenantContext(ctx, tc)` /
     `FromContext(ctx) (TenantContext, error)` を実装。未設定時は
@@ -87,8 +87,8 @@
   - _Boundary: TxManager, RLSHelper, TenantContext_
   - _Depends: 2.1_
 
-- [ ] 3. マイグレーション（DDL + RLS + audit_logs append-only）+ sqlc 配置確保
-- [ ] 3.1 全 12 テーブルの up/down マイグレーション + sqlc query 配置先確保
+- [x] 3. マイグレーション（DDL + RLS + audit_logs append-only）+ sqlc 配置確保
+- [x] 3.1 全 12 テーブルの up/down マイグレーション + sqlc query 配置先確保
   - `backend/db/migrations/0001_create_tenants.{up,down}.sql` 〜
     `0010_create_notification_dedupe_and_unassigned.{up,down}.sql` までの 10 ペア（20 ファイル）を
     umbrella design.md の Logical Data Model 通りに作成
@@ -104,7 +104,7 @@
     が本マイグレーションで揃う」ことを保証）
   - _Requirements: 4.6, 6.1, 6.2, NFR 2.1, NFR 2.2_
   - _Depends: 2.2_
-- [ ] 3.2 RLS 有効化マイグレーション
+- [x] 3.2 RLS 有効化マイグレーション
   - `backend/db/migrations/0011_enable_rls.up.sql` に、tenant_id カラムを持つ table
     （`admin_users` / `admin_role_assignments` / `enrollment_tokens` / `policies` /
     `devices` / `device_commands` / `tenant_apps`）に対して `ENABLE ROW LEVEL SECURITY` +
@@ -121,7 +121,7 @@
     POLICY ...` のイディオムを使う
   - _Requirements: 6.3, 6.4, NFR 1.1, NFR 1.2_
   - _Depends: 3.1_
-- [ ] 3.3 audit_logs append-only マイグレーション + ロール定義 SQL
+- [x] 3.3 audit_logs append-only マイグレーション + ロール定義 SQL
   - `backend/db/migrations/0012_audit_log_immutability.up.sql` に `ALTER TABLE audit_logs ENABLE
     ROW LEVEL SECURITY` + `FORCE ROW LEVEL SECURITY` + SELECT 用ポリシー（tenant_isolation +
     SuperAdmin 横断）+ INSERT 用ポリシー（**`WITH CHECK (tenant_id = current_setting('app.tenant_id',
@@ -139,7 +139,7 @@
     別系統で適用）であることを冒頭コメントに明記
   - _Requirements: 6.5, 7.1, 7.2, 7.3, 7.4_
   - _Depends: 3.2_
-- [ ] 3.4 Makefile target / runbook / `.env.example` の整備
+- [x] 3.4 Makefile target / runbook / `.env.example` の整備
   - リポジトリルートの `Makefile` に `migrate-up` / `migrate-down` / `db-init-roles` の 3 target
     を追加（`golang-migrate` CLI を `go run -modfile=...` または別途インストール手順を採る
     かは Developer に委ねるが、`MIGRATE_DATABASE_URL` → `DATABASE_URL` の fallback を実装する）
@@ -152,8 +152,8 @@
   - _Requirements: 6.5, NFR 2.1, NFR 2.2, NFR 3.1_
   - _Depends: 3.3_
 
-- [ ] 4. HTTP サブルータ + middleware chain
-- [ ] 4.1 chi router + 2 サブルータ mount + middleware chain
+- [x] 4. HTTP サブルータ + middleware chain
+- [x] 4.1 chi router + 2 サブルータ mount + middleware chain
   - `backend/internal/platform/httpserver/middleware.go` に recover / request_id（uuid v4）/
     structured access log（method / path / status / duration / request_id / tenant_id を field
     化）を実装。panic を recover した場合 `errors.WriteHTTP` 経由で 500 を返し ERROR ログを
@@ -189,8 +189,8 @@
   - _Boundary: HTTPServer, TenantContextMiddleware, AdminRouteGuard, MiddlewareChain_
   - _Depends: 1.2, 1.3, 2.2_
 
-- [ ] 5. cmd/api / cmd/worker / depspin のリプレース
-- [ ] 5.1 cmd/api を bootstrap に置換
+- [x] 5. cmd/api / cmd/worker / depspin のリプレース
+- [x] 5.1 cmd/api を bootstrap に置換
   - `backend/cmd/api/main.go` の `net/http.ServeMux` 実装を撤去し、`config.Load()` →
     `logger.NewLogger(cfg)` → `db.NewPool(ctx, cfg)` → `httpserver.NewServer(cfg, log, pool)` →
     `srv.ListenAndServe()` → SIGTERM で graceful shutdown（5s）の bootstrap に置換。`/healthz`
@@ -202,7 +202,7 @@
   - _Requirements: NFR 3.1, NFR 3.2, NFR 4.1_
   - _Boundary: cmd-api_
   - _Depends: 4.1_
-- [ ] 5.2 cmd/worker を bootstrap に置換 + depspin 整理
+- [x] 5.2 cmd/worker を bootstrap に置換 + depspin 整理
   - `backend/cmd/worker/main.go` に `config.Load()` + `logger.NewLogger(cfg)` を導入。Pub/Sub
     subscriber 実装は後続 Issue（umbrella tasks 6.x）に委ねるが、本 Issue では config と logger
     だけは正しく初期化された状態にして、後続 Issue が `internal/platform/pubsub` を `import`
@@ -216,8 +216,8 @@
   - _Boundary: cmd-worker, depspin_
   - _Depends: 5.1_
 
-- [ ] 6. 結合テスト（実 PostgreSQL）
-- [ ] 6.1 RLS テナント分離 + panic ガード + audit_logs append-only の結合テスト
+- [x] 6. 結合テスト（実 PostgreSQL）
+- [x] 6.1 RLS テナント分離 + panic ガード + audit_logs append-only の結合テスト
   - `backend/test/integration/db_tenant_isolation_test.go` を新規追加。`docker compose up -d
     postgres` 前提（CI / ローカルで `DATABASE_URL` から接続可能、無ければ test を skip）
   - テストシナリオ:
@@ -250,7 +250,7 @@
   - _Requirements: 4.5, 5.5, 6.3, 6.4, 7.1, 7.2, 7.3, 7.4, NFR 1.1, NFR 1.2_
   - _Boundary: TxManager, RLSHelper, HTTPServer, AdminRouteGuard, Migrations_
   - _Depends: 3.4, 4.1, 5.2_
-- [ ] 6.2 マイグレーション可逆性テスト
+- [x] 6.2 マイグレーション可逆性テスト
   - `backend/test/integration/migrations_reversible_test.go` を新規追加。`make migrate-up` 相当 →
     `make migrate-down` 相当を Go テスト側で実行し、(a) down 後に主要テーブルが消失する、
     (b) 再度 up すると同じ最終状態に到達する（NFR 2.1）、(c) 2 回目の up が冪等に no-op で
