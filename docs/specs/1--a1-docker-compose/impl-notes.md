@@ -88,7 +88,7 @@ umbrella spec の Task 1.1 / 1.2 を統合した本 Issue は、後続全 Issue 
 | 5.3 | 5 サービスに `healthcheck` 定義（`api`, `worker`, `postgres`, `keycloak`, `pubsub-emulator`） |
 | 5.4 | `api` / `worker` の `depends_on` に postgres / keycloak / pubsub-emulator を `condition: service_healthy` で指定 |
 | 5.5 | tenant-console は `${TENANT_CONSOLE_HOST_PORT:-5173}:80`、admin-console は `${ADMIN_CONSOLE_HOST_PORT:-5174}:80` で別 listen |
-| 5.6 | `frontend/{tenant,admin}-console/nginx.conf` で SPA fallback (`try_files $uri $uri/ /index.html;`) + `/api/` または `/api/admin/` を backend へリバースプロキシ |
+| 5.6 | `frontend/{tenant,admin}-console/nginx.conf` で SPA fallback (`try_files $uri $uri/ /index.html;`) + `/api/` を backend へ catch-all proxy。admin-console は `/api/admin/` と `/api/auth/` の specific rule（longest prefix match）に加え、その他 `/api/*` を backend へ素通しさせる catch-all `location /api/` を備える（PR #29 iteration round 2 で追加。AC 5.6 の「/api から始まるパスを backend api サービスへリバースプロキシ」文言に準拠） |
 | 5.7 | depends_on `service_healthy` により、依存サービスが healthy になるまで他サービス起動を待機 |
 | 5.8 | `docker-compose.yml` 内に実認証情報を埋め込まず、すべて `${VAR}` 展開で .env から注入 |
 | 6.1 | `backend/Dockerfile.api` と `backend/Dockerfile.worker` を配置 |
@@ -111,7 +111,7 @@ umbrella spec の Task 1.1 / 1.2 を統合した本 Issue は、後続全 Issue 
 | 8.5 | 詳細手順「5. 初期 SuperAdmin の seed」+ umbrella task 14.2 への参照リンク |
 | 8.6 | クイックスタート節「サービス一覧」表 + 「エンドポイント参照表」節 |
 | NFR 1.1 | 全サービスでデータは環境変数経由で注入。状態は volume（postgres-data）のみ |
-| NFR 1.2 | 認証情報は `${...}` 展開で .env 経由（docker-compose.yml / Dockerfile / realm-export.json に実値を含まない） |
+| NFR 1.2 | 認証情報は `${...}` 展開で .env 経由（docker-compose.yml / Dockerfile / realm-export.json に実値を含まない）。ルート `.dockerignore`（PR #29 iteration round 2 で追加）で `.env` / `.env.*` / `*.pem` / `*.key` / `amapi-sa.json` / `secrets/` 等を frontend build context（`context: .`）から除外し、ローカル secret が image build 経路へ混入することを防止 |
 | NFR 2.1 | tenant-console / admin-console は別 clientId・別 redirect URI。aud クレームで判別可能。`.env.example` も 2 セット変数を分離 |
 | NFR 3.1 | postgres は 60 秒以内（pg_isready interval=5s retries=12 start_period=10s）、keycloak は 150 秒以内（健全性収束に時間が掛かる可能性のためチューニング可能）、pubsub-emulator は 60 秒以内に収束する設定 |
 | NFR 4.1 | backend final stage は distroless（builder stage の golang:1.22-alpine は最終 image に含まれない） |

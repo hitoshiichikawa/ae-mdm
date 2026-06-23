@@ -1,0 +1,56 @@
+# ae-mdm リポジトリルート .dockerignore
+#
+# docker-compose.yml の frontend/{tenant,admin}-console サービスは build context を
+# repository root に設定している（workspace ルートの package.json / package-lock.json を
+# 取り込む必要があるため）。本 .dockerignore は build context へ送信される範囲から
+# 秘密情報（.env 系）・VCS メタデータ・ローカル依存キャッシュ・ビルド成果物を除外する。
+# requirements.md NFR 1.2（認証情報は .env 経由 / Dockerfile には埋め込まない）の補強。
+
+# ---- secrets / 環境変数（最優先）----
+# 開発者が `.env.example` から `.env` を作成する運用（docs/runbook/local-dev.md 参照）の
+# ため、ローカル `.env` は build context に絶対含めない。
+.env
+.env.*
+!.env.example
+
+# サービスアカウント鍵等の secret ファイル
+*.pem
+*.key
+*-credentials.json
+amapi-sa.json
+secrets/
+
+# ---- VCS / CI / エディタ ----
+.git
+.gitignore
+.github
+.vscode
+.idea
+*.swp
+*.swo
+
+# ---- frontend ローカル依存・ビルド成果物 ----
+# 各 SPA の node_modules は Dockerfile 内 `npm ci` で再構築するため context に不要
+node_modules
+**/node_modules
+frontend/*/dist
+frontend/*/.vite
+frontend/*/coverage
+
+# ---- backend ビルド成果物（frontend context にも紛れ込まないよう）----
+backend/bin
+backend/out
+backend/*.test
+backend/*.out
+
+# ---- ローカルテスト / 一時ファイル ----
+*.log
+.DS_Store
+tmp/
+.tmp/
+.cache/
+
+# ---- docs / spec（frontend image には不要）----
+docs/
+README.md
+CLAUDE.md
