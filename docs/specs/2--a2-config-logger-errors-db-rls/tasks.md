@@ -87,7 +87,7 @@
   - _Boundary: TxManager, RLSHelper, TenantContext_
   - _Depends: 2.1_
 
-- [ ] 3. マイグレーション（DDL + RLS + audit_logs append-only）+ sqlc 配置確保
+- [x] 3. マイグレーション（DDL + RLS + audit_logs append-only）+ sqlc 配置確保
 - [x] 3.1 全 12 テーブルの up/down マイグレーション + sqlc query 配置先確保
   - `backend/db/migrations/0001_create_tenants.{up,down}.sql` 〜
     `0010_create_notification_dedupe_and_unassigned.{up,down}.sql` までの 10 ペア（20 ファイル）を
