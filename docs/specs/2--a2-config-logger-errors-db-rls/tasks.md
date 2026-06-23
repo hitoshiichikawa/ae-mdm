@@ -104,7 +104,7 @@
     が本マイグレーションで揃う」ことを保証）
   - _Requirements: 4.6, 6.1, 6.2, NFR 2.1, NFR 2.2_
   - _Depends: 2.2_
-- [ ] 3.2 RLS 有効化マイグレーション
+- [x] 3.2 RLS 有効化マイグレーション
   - `backend/db/migrations/0011_enable_rls.up.sql` に、tenant_id カラムを持つ table
     （`admin_users` / `admin_role_assignments` / `enrollment_tokens` / `policies` /
     `devices` / `device_commands` / `tenant_apps`）に対して `ENABLE ROW LEVEL SECURITY` +
