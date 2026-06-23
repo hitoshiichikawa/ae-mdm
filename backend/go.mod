@@ -7,6 +7,7 @@ require (
 	github.com/coreos/go-oidc/v3 v3.10.0
 	github.com/go-chi/chi/v5 v5.0.12
 	github.com/golang-migrate/migrate/v4 v4.17.1
+	github.com/google/uuid v1.6.0
 	github.com/jackc/pgx/v5 v5.6.0
 	github.com/sqlc-dev/sqlc v1.27.0
 	go.uber.org/zap v1.27.0
@@ -35,7 +36,6 @@ require (
 	github.com/golang/protobuf v1.5.4 // indirect
 	github.com/google/cel-go v0.21.0 // indirect
 	github.com/google/s2a-go v0.1.7 // indirect
-	github.com/google/uuid v1.6.0 // indirect
 	github.com/googleapis/enterprise-certificate-proxy v0.3.2 // indirect
 	github.com/googleapis/gax-go/v2 v2.12.5 // indirect
 	github.com/hashicorp/errwrap v1.1.0 // indirect
