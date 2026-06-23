@@ -56,7 +56,7 @@
   - _Depends: 1.2_
 
 - [ ] 2. DB 接続プール + Tenant Context + RLS Helper
-- [ ] 2.1 pgxpool 構築と起動時 Ping
+- [x] 2.1 pgxpool 構築と起動時 Ping
   - `backend/internal/platform/db/pool.go` に `NewPool(ctx, cfg) (*pgxpool.Pool, error)` を
     実装。`cfg.DatabaseURL` を `pgxpool.ParseConfig` → `pgxpool.NewWithConfig` で構築し、
     `Pool.Ping(ctx)` で疎通確認。失敗時は `*errors.Error{Code: "service_unavailable"}` を返す
