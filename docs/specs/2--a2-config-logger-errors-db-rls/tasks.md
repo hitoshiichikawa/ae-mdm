@@ -216,7 +216,7 @@
   - _Boundary: cmd-worker, depspin_
   - _Depends: 5.1_
 
-- [ ] 6. 結合テスト（実 PostgreSQL）
+- [x] 6. 結合テスト（実 PostgreSQL）
 - [x] 6.1 RLS テナント分離 + panic ガード + audit_logs append-only の結合テスト
   - `backend/test/integration/db_tenant_isolation_test.go` を新規追加。`docker compose up -d
     postgres` 前提（CI / ローカルで `DATABASE_URL` から接続可能、無ければ test を skip）
