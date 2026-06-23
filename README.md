@@ -15,12 +15,12 @@ Android Enterprise（Android Management API / AMAPI）を用いた独自 EMM（E
 ## ドキュメント
 
 - 機能カタログ（AMAPI の機能一覧）: [ae-api-feature.md](ae-api-feature.md)
-- MVP 仕様: [docs/specs/1-android-enterprise-emm-mvp/](docs/specs/1-android-enterprise-emm-mvp/)
-  - [requirements.md](docs/specs/1-android-enterprise-emm-mvp/requirements.md) — 要件定義（EARS）
-  - [design.md](docs/specs/1-android-enterprise-emm-mvp/design.md) — 設計
-  - [tasks.md](docs/specs/1-android-enterprise-emm-mvp/tasks.md) — タスク分割
-  - [ui-design-brief.md](docs/specs/1-android-enterprise-emm-mvp/ui-design-brief.md) — UI デザインブリーフ
-  - [ui-design-prompts.md](docs/specs/1-android-enterprise-emm-mvp/ui-design-prompts.md) — UI デザイン用プロンプト
+- MVP 仕様: [docs/specs/24-android-enterprise-emm-mvp/](docs/specs/24-android-enterprise-emm-mvp/)
+  - [requirements.md](docs/specs/24-android-enterprise-emm-mvp/requirements.md) — 要件定義（EARS）
+  - [design.md](docs/specs/24-android-enterprise-emm-mvp/design.md) — 設計
+  - [tasks.md](docs/specs/24-android-enterprise-emm-mvp/tasks.md) — タスク分割
+  - [ui-design-brief.md](docs/specs/24-android-enterprise-emm-mvp/ui-design-brief.md) — UI デザインブリーフ
+  - [ui-design-prompts.md](docs/specs/24-android-enterprise-emm-mvp/ui-design-prompts.md) — UI デザイン用プロンプト
 
 ## 開発
 

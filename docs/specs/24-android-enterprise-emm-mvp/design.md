@@ -6,7 +6,7 @@
 
 **Users**: SaaS 運営者（SuperAdmin）が顧客企業ごとの Enterprise を代行作成・バインドし、顧客企業の管理者（TenantAdmin / Operator / Viewer）が自テナント配下の端末・ポリシー・アプリ・コマンドを管理する。Operator は LOCK / REBOOT のみ、TenantAdmin は WIPE を含む全操作、Viewer は参照のみ。Android 10 以上を実行する Fully Managed / Dedicated 端末が対象。
 
-**Impact**: 現時点でリポジトリは要件定義のみ（`docs/specs/1-android-enterprise-emm-mvp/requirements.md` と `ae-api-feature.md`）の状態であり、本設計は **Go バックエンド（`api` / `worker` の 2 サービス） + React フロントエンド（**tenant-console** と **admin-console** の 2 SPA） + PostgreSQL（Row-Level Security 併用） + Cloud Pub/Sub（emulator は Docker Compose）** から成るマルチテナント SaaS スタックを新規に立ち上げる。EMM-bound 方式（自社 GCP プロジェクトのサービスアカウントで全テナントの Enterprise を操作）、AMAPI への REST 呼び出し集約、Pub/Sub に基づく at-least-once 非同期通知の冪等処理、12-factor 準拠の AWS Fargate 移行容易な構成、を初期から組み込む。Web フロントエンドは用途の異なる 2 つの SPA（顧客企業 IT 管理者向けの tenant-console と SaaS 運用者向けの admin-console）に分離し、backend は単一プロセスで `/api/...`（テナント系）と `/api/admin/...`（運用系）の 2 つのルート群に認可分離する。
+**Impact**: 現時点でリポジトリは要件定義のみ（`docs/specs/24-android-enterprise-emm-mvp/requirements.md` と `ae-api-feature.md`）の状態であり、本設計は **Go バックエンド（`api` / `worker` の 2 サービス） + React フロントエンド（**tenant-console** と **admin-console** の 2 SPA） + PostgreSQL（Row-Level Security 併用） + Cloud Pub/Sub（emulator は Docker Compose）** から成るマルチテナント SaaS スタックを新規に立ち上げる。EMM-bound 方式（自社 GCP プロジェクトのサービスアカウントで全テナントの Enterprise を操作）、AMAPI への REST 呼び出し集約、Pub/Sub に基づく at-least-once 非同期通知の冪等処理、12-factor 準拠の AWS Fargate 移行容易な構成、を初期から組み込む。Web フロントエンドは用途の異なる 2 つの SPA（顧客企業 IT 管理者向けの tenant-console と SaaS 運用者向けの admin-console）に分離し、backend は単一プロセスで `/api/...`（テナント系）と `/api/admin/...`（運用系）の 2 つのルート群に認可分離する。
 
 ### Goals
 - **MVP 機能網羅**: requirements.md の Requirement 1〜9（テナント / 認証認可 / エンロール / ポリシー / デバイス / コマンド / アプリ / 通知 / Web コンソール）を、NFR 1〜5 の制約下で実装可能な粒度に設計分解する。
@@ -30,7 +30,7 @@
 
 ### Existing Architecture Analysis
 
-現時点のリポジトリは要件定義（`docs/specs/1-android-enterprise-emm-mvp/requirements.md`）と機能カタログ（`ae-api-feature.md`）のみ。実装コードは存在しない。したがって既存コードベースへの統合制約はなく、本設計は新規プロジェクトの初期アーキテクチャを定義する。
+現時点のリポジトリは要件定義（`docs/specs/24-android-enterprise-emm-mvp/requirements.md`）と機能カタログ（`ae-api-feature.md`）のみ。実装コードは存在しない。したがって既存コードベースへの統合制約はなく、本設計は新規プロジェクトの初期アーキテクチャを定義する。
 
 **尊重する制約**:
 - リポジトリルートの `CLAUDE.md` のコード規約・テスト規約・禁止事項。
@@ -299,7 +299,7 @@ ae-mdm/
 │       └── realm-export.json         # ローカル Keycloak の dev realm 設定（tenant-console / admin-console の 2 クライアントを定義）
 └── docs/
     ├── specs/
-    │   └── 1-android-enterprise-emm-mvp/
+    │   └── 24-android-enterprise-emm-mvp/
     │       ├── requirements.md       # 確定済み
     │       ├── design.md             # 本ファイル
     │       └── tasks.md
@@ -308,7 +308,7 @@ ae-mdm/
 ```
 
 ### Modified Files
-- リポジトリ新規構築のため、変更対象ファイルはない（`docs/specs/1-android-enterprise-emm-mvp/requirements.md` と `ae-api-feature.md` は変更しない）。
+- リポジトリ新規構築のため、変更対象ファイルはない（`docs/specs/24-android-enterprise-emm-mvp/requirements.md` と `ae-api-feature.md` は変更しない）。
 
 ## Requirements Traceability
 

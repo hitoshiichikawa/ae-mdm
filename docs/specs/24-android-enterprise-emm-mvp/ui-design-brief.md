@@ -3,7 +3,7 @@
 > **用途**: このドキュメントは「Claude Design」など AI デザインツールにそのまま渡す**デザイン入力**です。
 > requirements.md / design.md の内容を **UI 設計の観点に再編**し、画面・データ・操作・状態・ロール可視性・
 > ビジュアル方針を 1 枚に束ねています。
-> **対象**: `docs/specs/1-android-enterprise-emm-mvp/` の MVP（P0）スコープ。
+> **対象**: `docs/specs/24-android-enterprise-emm-mvp/` の MVP（P0）スコープ。
 > **最終更新**: 2026-06-22
 
 ---
