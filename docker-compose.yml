@@ -103,8 +103,10 @@ services:
       pubsub-emulator:
         condition: service_healthy
     healthcheck:
-      # /healthz は umbrella task 14.1 で実装予定。現時点では process が走っているかを判定
-      test: ["CMD-SHELL", "pgrep -x api > /dev/null || exit 1"]
+      # 最終 stage が distroless（shell / pgrep / curl 無し）のため、binary 自身を
+      # `-healthcheck` サブコマンドとして起動し、内部 /healthz への HTTP GET 結果で
+      # readiness を判定する（exec 形式 = CMD で shell を介さない）
+      test: ["CMD", "/app/api", "-healthcheck"]
       interval: 10s
       timeout: 5s
       retries: 6
@@ -131,7 +133,8 @@ services:
       pubsub-emulator:
         condition: service_healthy
     healthcheck:
-      test: ["CMD-SHELL", "pgrep -x worker > /dev/null || exit 1"]
+      # api と同じく distroless 対応のため、binary 自身を `-healthcheck` で呼ぶ
+      test: ["CMD", "/app/worker", "-healthcheck"]
       interval: 10s
       timeout: 5s
       retries: 6
