@@ -47,21 +47,27 @@ PjM）は、以下の方針で **内部思考言語と出力言語を使い分�
 
 ## 技術スタック
 
-> このセクションは各プロジェクトで書き換えてください。以下は例です。
+Android Enterprise（Android Management API / AMAPI）ベースのマルチテナント EMM SaaS。
+自前 DPC は持たず、Google 製 Android Device Policy へポリシーを配信する。
+詳細は `docs/specs/1-android-enterprise-emm-mvp/design.md` の Technology Stack を参照。
 
-- Backend: Node.js 20 + TypeScript
-- Frontend: React 19 + Vite
-- テスト: Vitest / Playwright
-- Lint / Format: ESLint + Prettier
-- CI: GitHub Actions
-- パッケージマネージャ: pnpm
+- **Backend**: Go 1.22+ / 単一 module・2 binary（`api` = REST + OIDC + AMAPI クライアント / `worker` = Pub/Sub pull subscriber）
+  - `chi`（HTTP router） / `pgx/v5`（DB driver） / `sqlc`（型安全 SQL 生成） / `golang-migrate`（マイグレーション） / `coreos/go-oidc`（OIDC 検証） / `go.uber.org/zap`（構造化ログ）
+- **Frontend**: React 19 + TypeScript + Vite の **2 SPA**（`tenant-console` = 顧客 IT 管理者向け / `admin-console` = SaaS 運用者向け）。共通 UI / 型 / api-client / oidc ラッパは `frontend/shared/`
+  - Tailwind CSS + shadcn/ui / TanStack Query / React Router / React Hook Form + Zod / oidc-client-ts
+- **Data**: PostgreSQL 16（Row-Level Security 強制、append-only audit テーブル）
+- **Messaging**: Cloud Pub/Sub（本番） / Pub/Sub emulator（ローカル Docker Compose）
+- **Auth**: OIDC（ローカル Keycloak / 本番ジェネリック OIDC）+ RBAC 4 ロール（SuperAdmin / TenantAdmin / Operator / Viewer）。OIDC クライアントは 2 コンソールで分離
+- **External**: Android Management API v1 / Managed Google Play iframe（EMM-bound、サービスアカウント鍵）
+- **テスト**: Go `testing`（表駆動）+ 実 PostgreSQL / Pub/Sub emulator による結合テスト / Vitest（フロント単体）/ Playwright（主要 user flow の E2E）
+- **Build / Lint**: `Makefile` に build / test / migrate / lint を集約。フロントは pnpm / npm workspaces
+- **Runtime**: Docker Compose（`api` / `worker` / `tenant-console` / `admin-console` / `postgres` / `keycloak` / `pubsub-emulator`）。12-factor 構成で将来 AWS Fargate へ移行可能
 
 ---
 
 ## コード規約
 
-> **2 段構成**: 「共通（言語非依存・必ず守る）」と「TypeScript プロジェクトの例（参考・要書き換え）」。
-> Python / Go / Rust など他言語を使う場合は、例ブロックを自プロジェクトの慣習に沿って書き換えてください。
+> **2 段構成**: 「共通（言語非依存・必ず守る）」と、本プロジェクトの言語別規約（Go バックエンド / TypeScript フロントエンド）。
 
 ### 共通（言語非依存・必ず守る）
 
@@ -73,22 +79,30 @@ PjM）は、以下の方針で **内部思考言語と出力言語を使い分�
 - **非同期処理は直線的に書く**: 深いネストやチェーンよりも直線的に読める書き方を優先（言語の慣習に合わせる）
 - **テストは対象コードの近傍に配置する**: 離れた場所に散らさない。具体的なディレクトリ規約は言語慣習に従う
 
-### TypeScript プロジェクトの例（参考・要書き換え）
+### Go（backend）
 
-> 他の言語を使う場合、このブロックを丸ごと削除／置換してください。
+- 関数は単一責務・**60 行以内**を目安とする（超える場合は切り出しを検討）
+- エラーは `platform/errors` の独自 `Error` 型（`Code` / `Message` / `Cause`）で扱う。`fmt.Errorf("...: %w", err)` で原因を保持し、最外層（HTTP handler / worker handler）で `errors.As` により HTTP status・Pub/Sub の ack/nack にマップする。silent fail を作らない
+- 公開関数・型には godoc コメントを付与する（シグネチャから意図が自明な場合を除く）
+- `context.Context` は第 1 引数で受け渡し、goroutine の生存期間を context に紐付ける
+- SQL は `sqlc` 生成コードを使い、生 SQL の手書きは避ける。DB アクセスは repository 層に閉じる
+- ログは `zap` の構造化ログ。秘匿値（トークン / 鍵 / PII）はログに出さない
+- 整形は `gofmt` / `goimports`、静的解析は `golangci-lint` に従う
 
-- 関数は単一責務・**40 行以内**を目安とする
-- 公開 API には **JSDoc / TSDoc** を必ず付与する
-- エラーは独自 Error クラスで wrap し、呼び出し側でログ出力する
-- 非同期処理は `async/await` を優先し、Promise チェーンは避ける
-- テストは対象コードの近傍に配置する（`__tests__/` または同一ディレクトリの `*.test.ts`）
+### TypeScript（frontend）
+
+- 関数・コンポーネントは単一責務・**40 行以内**を目安とする
+- 共有モジュール（`frontend/shared/`）の公開 API には JSDoc / TSDoc を付与する
+- `any` を避け、API 境界は Zod スキーマで検証する
+- 非同期処理は `async/await` を優先し、Promise チェーンは避ける。サーバ状態は TanStack Query で扱う
+- テストは対象コードの近傍に配置する（`__tests__/` または同一ディレクトリの `*.test.ts(x)`）
 
 ---
 
 ## テスト規約
 
-> **2 段構成**: ほぼすべての規約は言語非依存で共通。TS / Jest / Vitest 固有の
-> 命名記法と fixture パスだけ末尾の「TypeScript プロジェクトの例」に分離しています。
+> **2 段構成**: ほぼすべての規約は言語非依存で共通。Go / TypeScript 固有の
+> 命名記法と fixture パスだけ末尾の「言語別の規約」に分離しています。
 
 ### 共通（言語非依存・必ず守る）
 
@@ -122,19 +136,19 @@ PjM）は、以下の方針で **内部思考言語と出力言語を使い分�
 - **テストデータ fixture** は言語・フレームワーク慣習に沿った場所に集約し、テスト間で共有する
 - **Red → Green → Refactor**: 新規テストは一度失敗することを確認してから実装で通す（書いた瞬間に pass するテストは観点不備を疑う）
 
-### TypeScript プロジェクトの例（参考・要書き換え）
+### Go（backend）
 
-> 他の言語を使う場合、このブロックを自プロジェクトのテストフレームワーク慣習で置き換えてください。
+- **配置**: `*_test.go` を対象パッケージ内に置く。fixture は `testdata/` ディレクトリに集約
+- **命名**: `TestXxx` 関数 + サブテスト `t.Run("<条件>のとき<期待結果>", ...)`。表駆動テスト（table-driven）を基本とする
+- **結合テスト**: 実 PostgreSQL + Pub/Sub emulator を使う（モックより実物優先）。RLS・マイグレーション挙動は実 DB で検証する
+- 例: `authz.Authorizer.Authorize` の 4 ロール × Action マトリクス、`policy.Validator` の境界値、`command.StateMachine` の不正遷移拒否
 
-- **命名**: `describe('対象') > it('<条件>のとき<期待結果>')` 形式（Jest / Vitest / Mocha 共通の BDD スタイル）
-- **fixture 配置**: `__fixtures__/` または `test/fixtures/` に集約
-- **Snapshot**: 差分が出た時は実装変更の意図と一致しているかを必ず確認してから更新する。盲目的な `-u` は禁止（本規約は禁止事項にも記載）
+### TypeScript（frontend）
 
-他言語の目安:
-
-- **Python**: pytest の `test_*.py` / `tests/` ディレクトリ、`pytest.fixture` / `conftest.py`
-- **Go**: `*_test.go` をパッケージ内に配置、`testdata/` ディレクトリ
-- **Rust**: `#[cfg(test)] mod tests` インラインまたは `tests/` ディレクトリ、`tests/common/fixtures/`
+- **命名**: `describe('対象') > it('<条件>のとき<期待結果>')` 形式（Vitest の BDD スタイル）
+- **配置 / fixture**: テストは対象近傍、fixture は `__fixtures__/` または `test/fixtures/` に集約
+- **E2E**: Playwright で主要 user flow（QR エンロール / ポリシー保存 / 端末コマンド）のゴールデンパスのみ。網羅は狙わない
+- **Snapshot**: 差分が出た時は実装変更の意図と一致しているか必ず確認してから更新する。盲目的な `-u` は禁止（禁止事項にも記載）
 
 ---
 
@@ -222,9 +236,9 @@ PjM 専用のチェックリストは `.claude/agents/project-manager.md` の
 
 ## 機密情報の扱い
 
-- 本リポジトリでは以下の情報を扱わない
-  - 顧客個人情報（氏名・契約番号・保険証券番号など）
-  - 本番環境の認証情報
+- 本リポジトリ（コード / Issue / PR / spec）では以下の実値を扱わない
+  - 顧客個人情報・実テナントの端末識別子（IMEI / シリアル番号 / 実利用者情報）
+  - AMAPI サービスアカウント鍵・OIDC クライアントシークレット・本番 DB 認証情報などの Secrets（環境変数 / Secret Manager 経由のみ。コード・spec への直書き禁止）
   - 社内機密情報（M&A・人事情報など）
 - もし Issue 本文に機密情報が含まれていた場合、PM エージェントは実装を進めず
   `needs-decisions` で人間にエスカレーションすること
