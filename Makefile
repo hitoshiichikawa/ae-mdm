@@ -16,7 +16,7 @@
 #   - migrate-up / migrate-down は `go run` 経由で実行することで、ホストに golang-migrate
 #     CLI を別途インストールしなくても動作する
 
-.PHONY: help build test lint migrate-up migrate-down up down clean fmt
+.PHONY: help build test lint migrate-up migrate-down db-init-roles up down clean fmt
 
 # DATABASE_URL は .env から取得（migrate ターゲットでのみ参照）
 ifneq (,$(wildcard .env))
@@ -33,6 +33,7 @@ help:
 	@echo "  lint          backend (go vet) と frontend (npm lint) を実行"
 	@echo "  migrate-up    DB migration を順方向適用"
 	@echo "  migrate-down  DB migration を 1 ステップ巻き戻し"
+	@echo "  db-init-roles app_user / migration_user ロールを初期セットアップ"
 	@echo "  up            docker compose で 7 サービスを起動"
 	@echo "  down          docker compose 停止 + コンテナ・ネットワーク除去"
 	@echo "  fmt           gofmt / prettier 相当を実行"
@@ -98,6 +99,32 @@ migrate-down:
 	fi
 	cd backend && GOTOOLCHAIN=local go run -tags 'postgres' github.com/golang-migrate/migrate/v4/cmd/migrate \
 		-path db/migrations -database "$(MIGRATE_DB_URL)" down 1
+
+# db-init-roles: app_user / migration_user ロールを初期セットアップする
+# （Issue #2 / task 3.3 + 3.4 / Req 6.5 / NFR 3.1）
+#
+# 注意:
+#   - 本ターゲットは golang-migrate の管轄外。schema_migrations テーブルに記録されない
+#     初期セットアップ SQL (backend/db/roles/0001_create_app_and_migration_roles.sql) を
+#     postgres superuser 接続経由で適用する
+#   - psql CLI を使う前提のレシピ。ホストに psql 未インストールの場合は runbook
+#     (docs/runbook/local-dev.md) に記載の手動手順 (docker compose exec postgres psql ...) を参照
+#   - POSTGRES_INIT_URL は postgres superuser (compose の POSTGRES_USER / POSTGRES_PASSWORD)
+#     接続用。未設定時は MIGRATE_DATABASE_URL → DATABASE_URL の fallback
+#   - パスワード placeholder (<REPLACE_ME_*>) は事前に sed / envsubst で実値に置換するか、
+#     SQL ファイルを編集してから適用する想定（運用判断 / 本 SQL の冒頭コメント参照）
+ROLES_PATH := backend/db/roles/0001_create_app_and_migration_roles.sql
+POSTGRES_INIT_URL ?= $(or $(MIGRATE_DATABASE_URL),$(DATABASE_URL))
+
+db-init-roles:
+	@echo "==> db-init-roles: $(ROLES_PATH)"
+	@if [ -z "$(POSTGRES_INIT_URL)" ]; then \
+		echo "error: POSTGRES_INIT_URL / MIGRATE_DATABASE_URL / DATABASE_URL いずれも未設定"; exit 1; \
+	fi
+	@if ! command -v psql >/dev/null 2>&1; then \
+		echo "error: psql CLI が見つかりません。runbook (docs/runbook/local-dev.md) の手動手順を参照してください"; exit 1; \
+	fi
+	psql "$(POSTGRES_INIT_URL)" -v ON_ERROR_STOP=1 -f $(ROLES_PATH)
 
 up:
 	@echo "==> docker compose up -d"
