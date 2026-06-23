@@ -31,7 +31,7 @@
     の閾値）のユニットテストを配置
   - _Requirements: 2.1, 2.2, 2.3, 2.4, 2.5_
   - _Boundary: Logger_
-- [ ] 1.3 Domain Error 型 + HTTP マッピング (P)
+- [x] 1.3 Domain Error 型 + HTTP マッピング (P)
   - `backend/internal/errors/codes.go` に `Code` 型と定数（`invalid_request` / `unauthenticated`
     / `forbidden` / `not_found` / `conflict` / `business_rule_violation` / `internal_error` /
     `amapi_upstream_error` / `service_unavailable` / `config_invalid` /
