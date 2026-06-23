@@ -96,6 +96,64 @@ func TestLoad_InvalidIntFormat_ReturnsConfigInvalid(t *testing.T) {
 	}
 }
 
+// TestLoad_InvalidURL_ReturnsConfigInvalid は Req 1.3 のうち「不正フォーマット」検出を
+// URL 形式の env で確認する（PR #31 round-3 review 由来）。scheme / host 欠落および
+// 許可されない scheme のいずれも fail-fast で `CodeConfigInvalid` を返す。
+func TestLoad_InvalidURL_ReturnsConfigInvalid(t *testing.T) {
+	cases := []struct {
+		name     string
+		key      string
+		value    string
+		wantHint string
+	}{
+		{
+			name:     "DATABASE_URL: scheme なし",
+			key:      "DATABASE_URL",
+			value:    "app_user:pw@localhost:5432/ae_mdm",
+			wantHint: "DATABASE_URL",
+		},
+		{
+			name:     "DATABASE_URL: 許可されない scheme",
+			key:      "DATABASE_URL",
+			value:    "mysql://app_user:pw@localhost:5432/ae_mdm",
+			wantHint: "DATABASE_URL",
+		},
+		{
+			name:     "OIDC_TENANT_ISSUER_URL: host なし",
+			key:      "OIDC_TENANT_ISSUER_URL",
+			value:    "http://",
+			wantHint: "OIDC_TENANT_ISSUER_URL",
+		},
+		{
+			name:     "OIDC_ADMIN_REDIRECT_URL: 許可されない scheme",
+			key:      "OIDC_ADMIN_REDIRECT_URL",
+			value:    "ftp://example.com/cb",
+			wantHint: "OIDC_ADMIN_REDIRECT_URL",
+		},
+	}
+	for _, c := range cases {
+		c := c
+		t.Run(c.name, func(t *testing.T) {
+			// Arrange
+			env := validEnv()
+			env[c.key] = c.value
+			// Act
+			_, err := loadFrom(envGetterFromMap(env))
+			// Assert
+			if err == nil {
+				t.Fatalf("%s=%q を渡したが error なし", c.key, c.value)
+			}
+			var de *internalerrors.Error
+			if !stdErrors.As(err, &de) || de.Code != internalerrors.CodeConfigInvalid {
+				t.Fatalf("expected CodeConfigInvalid, got %v", err)
+			}
+			if !strings.Contains(de.Message, c.wantHint) {
+				t.Fatalf("message should mention %q; got %q", c.wantHint, de.Message)
+			}
+		})
+	}
+}
+
 func TestLoad_SessionSecretTooShort_ReturnsConfigInvalid(t *testing.T) {
 	// Arrange
 	env := validEnv()

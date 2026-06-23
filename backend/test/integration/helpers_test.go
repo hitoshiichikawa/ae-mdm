@@ -19,8 +19,13 @@ import (
 	"time"
 
 	"github.com/golang-migrate/migrate/v4"
-	// pgx v5 driver for golang-migrate（postgres スキーマで pgxv5 を使用する）
+	// `postgres://` スキームの URL は `database/postgres` driver が処理する。
+	// `.env.example` の `DATABASE_URL` / `MIGRATE_DATABASE_URL` は `postgres://...` で
+	// 書かれているため、pgx/v5 driver（scheme: `pgx5://`）だけでは migrate.New が
+	// "unknown driver postgres" で失敗する（PR #31 round-3 review 由来）。両 driver を
+	// blank import することで `postgres://` / `pgx5://` どちらの URL でも動く構成にする。
 	_ "github.com/golang-migrate/migrate/v4/database/pgx/v5"
+	_ "github.com/golang-migrate/migrate/v4/database/postgres"
 	_ "github.com/golang-migrate/migrate/v4/source/file"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"

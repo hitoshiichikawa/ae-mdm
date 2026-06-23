@@ -16,9 +16,11 @@ import (
 	"context"
 	stdErrors "errors"
 	"fmt"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -29,10 +31,10 @@ import (
 )
 
 const (
-	healthURL       = "http://127.0.0.1:8080/healthz"
-	healthCheckArg  = "-healthcheck"
-	shutdownTimeout = 5 * time.Second
-	healthTimeout   = 3 * time.Second
+	defaultHealthPort = "8080"
+	healthCheckArg    = "-healthcheck"
+	shutdownTimeout   = 5 * time.Second
+	healthTimeout     = 3 * time.Second
 )
 
 func main() {
@@ -44,9 +46,15 @@ func main() {
 
 // runHealthcheck は同一プロセスバイナリを healthcheck CLI として呼んだとき用。
 // distroless 最終 stage には curl / wget が存在しないため、binary を再利用する。
+//
+// 接続先 URL は HTTP_LISTEN_ADDR env から導出する（PR #31 round-1 / round-2 / round-3
+// review 由来）。`:9090` のような non-default に切り替えても healthcheck が同じ port を
+// 叩けるようにするための運用対応。HTTP_LISTEN_ADDR が未設定 / 解析不能のときは
+// 既定 :8080 にフォールバックする。
 func runHealthcheck() int {
 	client := &http.Client{Timeout: healthTimeout}
-	resp, err := client.Get(healthURL)
+	url := healthcheckURL(os.Getenv("HTTP_LISTEN_ADDR"))
+	resp, err := client.Get(url)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "ae-mdm api healthcheck: request failed:", err)
 		return 1
@@ -57,6 +65,20 @@ func runHealthcheck() int {
 		return 1
 	}
 	return 0
+}
+
+// healthcheckURL は HTTP_LISTEN_ADDR env から /healthz の loopback URL を組み立てる。
+//   - `":8080"` `"0.0.0.0:8080"` のような listen addr → `http://127.0.0.1:8080/healthz`
+//   - `"127.0.0.1:9090"` の場合は host をそのまま loopback として再利用
+//   - 未設定 / 解析失敗時は :8080 フォールバック
+func healthcheckURL(listenAddr string) string {
+	port := defaultHealthPort
+	if listenAddr != "" {
+		if _, p, err := net.SplitHostPort(strings.TrimSpace(listenAddr)); err == nil && p != "" {
+			port = p
+		}
+	}
+	return "http://127.0.0.1:" + port + "/healthz"
 }
 
 // runBootstrap は cmd/api の起動時 bootstrap。順序:

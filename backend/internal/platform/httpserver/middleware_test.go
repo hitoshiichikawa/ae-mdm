@@ -454,6 +454,46 @@ func TestTenantContextMiddleware_SuperAdminClaims_PassesIsSuperAdmin(t *testing.
 	}
 }
 
+// TestAccessLog_PropagatesTenantIDFromInnerMiddleware は AccessLog の外側に
+// 配置された AccessLog が、内側の TenantContextMiddleware で確立された tenant_id を
+// access log に乗せることを確認する（PR #31 round-1 / round-3 review 由来 / Req 2.2 / 5.6）。
+//
+// `AccessLog → TenantContextMiddleware → handler` の典型 chain で、TenantContextMiddleware が
+// `r.WithContext(ctx)` で差し替えた新しい context は AccessLog の外側 r からは見えない。
+// 共有 state pointer 経由で tenant_id を伝播する実装が機能していることを検証する。
+func TestAccessLog_PropagatesTenantIDFromInnerMiddleware(t *testing.T) {
+	// Arrange
+	log := &fakeLogger{}
+	tenantID := uuid.New()
+	adminID := uuid.New()
+	chain := AccessLog(log)(TenantContextMiddleware(log)(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})))
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/api/foo", nil)
+	req = req.WithContext(withAuthClaims(req.Context(), authClaims{
+		TenantID:     tenantID,
+		AdminUserID:  adminID,
+		Roles:        []string{"TenantAdmin"},
+		IsSuperAdmin: false,
+	}))
+
+	// Act
+	chain.ServeHTTP(rec, req)
+
+	// Assert
+	if len(log.infoCalls) != 1 {
+		t.Fatalf("AccessLog の INFO は 1 回出ること; got %d", len(log.infoCalls))
+	}
+	v, ok := fieldValue(log.infoCalls[0].fields, "tenant_id")
+	if !ok {
+		t.Fatalf("access log に tenant_id field が無い（state pointer 伝播失敗）")
+	}
+	if s, _ := v.(string); s != tenantID.String() {
+		t.Errorf("tenant_id = %v; want %s", v, tenantID.String())
+	}
+}
+
 // TestRequestIDFromContext_Nil は nil ctx でも空文字を返し panic しないこと。
 func TestRequestIDFromContext_Nil(t *testing.T) {
 	if got := RequestIDFromContext(nil); got != "" {

@@ -186,6 +186,69 @@ func TestLogger_RedactsSecretFieldValues(t *testing.T) {
 	}
 }
 
+// TestLogger_RedactsFreeTextCauseField は kv pair として "cause" / "error_cause" / "err" /
+// "error" キーに渡された string 値に対して、causePatternReplacers の正規表現が部分置換
+// されることを確認する（PR #31 round-2 / round-3 review 由来 / Req 2.5）。
+//
+// http_mapping.go / worker_mapping.go が `"cause", causeMessage(cause)` 形式で raw cause を
+// log に渡す経路で、cause 文字列に upstream の OIDC token / cookie / Authorization 値が
+// 含まれた場合の平文流出を防ぐ。
+func TestLogger_RedactsFreeTextCauseField(t *testing.T) {
+	cases := []struct {
+		name        string
+		key         string
+		value       string
+		wantContain string
+		wantNotHave string
+	}{
+		{
+			name:        "cause: JWT (eyJ...) は redact",
+			key:         "cause",
+			value:       "oidc verify failed: eyJhbGciOiJIUzI1NiJ9.payload.sig",
+			wantContain: "<redacted_jwt>",
+			wantNotHave: "eyJhbGciOiJIUzI1NiJ9.payload.sig",
+		},
+		{
+			name:        "error_cause: Bearer は redact",
+			key:         "error_cause",
+			value:       `upstream 401: Authorization: Bearer abc.def.ghi`,
+			wantContain: "<redacted>",
+			wantNotHave: "abc.def.ghi",
+		},
+		{
+			name:        "err: Cookie 値は redact",
+			key:         "err",
+			value:       "lookup failed: Cookie: sid=secret-abc",
+			wantContain: "<redacted>",
+			wantNotHave: "sid=secret-abc",
+		},
+		{
+			name:        "通常 cause メッセージは残る",
+			key:         "cause",
+			value:       "row not found",
+			wantContain: "row not found",
+			wantNotHave: "",
+		},
+	}
+	for _, c := range cases {
+		c := c
+		t.Run(c.name, func(t *testing.T) {
+			// Arrange
+			l, buf := newTestLogger(t, "info")
+			// Act
+			l.Error("emit", c.key, c.value)
+			// Assert
+			s := buf.String()
+			if c.wantContain != "" && !strings.Contains(s, c.wantContain) {
+				t.Errorf("log = %q, want substring %q", s, c.wantContain)
+			}
+			if c.wantNotHave != "" && strings.Contains(s, c.wantNotHave) {
+				t.Errorf("log = %q, should NOT contain %q", s, c.wantNotHave)
+			}
+		})
+	}
+}
+
 func TestLogger_With_PreservesFields(t *testing.T) {
 	// Arrange
 	l, buf := newTestLogger(t, "info")

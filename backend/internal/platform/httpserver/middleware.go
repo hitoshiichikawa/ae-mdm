@@ -86,6 +86,37 @@ func authClaimsFromContext(ctx context.Context) (authClaims, bool) {
 	return c, ok
 }
 
+// accessLogState は AccessLog が確保する状態オブジェクト。inner middleware
+// （TenantContextMiddleware）が tenant_id を書き戻すための共有スロットを 1 件持ち、
+// next.ServeHTTP が返った後で AccessLog から読み戻す。
+//
+// PR #31 round-1 / round-3 review 由来: AccessLog は middleware chain の外側に位置し、
+// TenantContextMiddleware が `next.ServeHTTP(w, r.WithContext(ctx))` で差し替えた新しい
+// request context は AccessLog の外側 r からは見えないため、`r.Context()` 経由だけだと
+// tenant_id を access log に乗せられない（Req 2.2 / 5.6 未達）。共有 state pointer を
+// 経由することで、middleware chain の外側に位置する AccessLog からも内側で確立された
+// tenant_id を読み出せる。
+type accessLogState struct {
+	tenantID uuid.UUID
+}
+
+// accessLogStateCtxKey は accessLogState を request context に格納する private な key 型。
+type accessLogStateCtxKey struct{}
+
+// accessLogStateFromContext は request context から *accessLogState を取り出す。
+// 未設定なら nil。AccessLog が確保した state を inner middleware から書き戻すために使う。
+func accessLogStateFromContext(ctx context.Context) *accessLogState {
+	if ctx == nil {
+		return nil
+	}
+	if v := ctx.Value(accessLogStateCtxKey{}); v != nil {
+		if s, ok := v.(*accessLogState); ok {
+			return s
+		}
+	}
+	return nil
+}
+
 // statusRecorder は ResponseWriter をラップし、書き込まれたステータスコードを捕捉する。
 // access log の status field と recover middleware の panic 後のステータス判定に用いる。
 type statusRecorder struct {
@@ -192,12 +223,26 @@ func RequestID() func(http.Handler) http.Handler {
 // で捕捉する（handler が WriteHeader を呼ばずに完了した場合は 200 default）。
 //
 // log が nil の場合 INFO 出力は no-op（handler 実行は通常通り）。
+//
+// tenant_id 取得は 2 経路を順に試す（PR #31 round-1 / round-3 review 由来）:
+//  1. accessLogState pointer 経由: inner TenantContextMiddleware が claims から確立した
+//     tenant_id を書き戻す。これにより AccessLog が middleware chain の外側にあっても
+//     access log に tenant_id が乗る（Req 2.2 / 5.6）。
+//  2. r.Context() 経由の TenantContext: テスト fixture や直接 db.WithTenantContext で
+//     pre-inject される経路（test compat）。
+//
+// statusRecorder は `internalerrors.WriteHTTP` の sentinel sync.Map にエントリされうるため、
+// defer ClearWriter(rec) で必ず除去する（PR #31 round-1 / round-3 review: 401/403/404
+// 応答ごとに rec が leak し sync.Map が増え続ける問題への対処）。
 func AccessLog(log logger.Logger) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			start := time.Now()
 			rec := &statusRecorder{ResponseWriter: w}
-			next.ServeHTTP(rec, r)
+			defer internalerrors.ClearWriter(rec)
+			state := &accessLogState{}
+			ctx := context.WithValue(r.Context(), accessLogStateCtxKey{}, state)
+			next.ServeHTTP(rec, r.WithContext(ctx))
 			if log == nil {
 				return
 			}
@@ -208,8 +253,14 @@ func AccessLog(log logger.Logger) func(http.Handler) http.Handler {
 				"duration_ms", time.Since(start).Milliseconds(),
 				"request_id", RequestIDFromContext(r.Context()),
 			}
-			if tc, err := db.FromContext(r.Context()); err == nil && tc.TenantID != uuid.Nil {
-				fields = append(fields, "tenant_id", tc.TenantID.String())
+			tenantID := state.tenantID
+			if tenantID == uuid.Nil {
+				if tc, err := db.FromContext(r.Context()); err == nil {
+					tenantID = tc.TenantID
+				}
+			}
+			if tenantID != uuid.Nil {
+				fields = append(fields, "tenant_id", tenantID.String())
 			}
 			log.Info("http_access", fields...)
 		})
@@ -260,6 +311,13 @@ func TenantContextMiddleware(log logger.Logger) func(http.Handler) http.Handler 
 				AdminUserID:  claims.AdminUserID,
 				Roles:        append([]string(nil), claims.Roles...),
 				IsSuperAdmin: claims.IsSuperAdmin,
+			}
+			// AccessLog が確保した state pointer に tenant_id を書き戻す。AccessLog は
+			// middleware chain の外側にあり、`r.WithContext(ctx)` で差し替えた context は
+			// 外側から見えないため、共有 state pointer 経由で tenant_id を伝播させる
+			// （PR #31 round-1 / round-3 review 由来）。
+			if s := accessLogStateFromContext(ctx); s != nil {
+				s.tenantID = tc.TenantID
 			}
 			ctx = db.WithTenantContext(ctx, tc)
 			next.ServeHTTP(w, r.WithContext(ctx))

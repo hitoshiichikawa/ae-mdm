@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"net/url"
 	"os"
 	"strconv"
 	"strings"
@@ -90,9 +91,44 @@ func loadFrom(get envGetter) (Config, error) {
 	requiredStr("GOOGLE_APPLICATION_CREDENTIALS", &cfg.GoogleApplicationCredentials)
 	requiredStr("SESSION_SECRET", &cfg.SessionSecret)
 
+	// URL 形式バリデーション（PR #31 round-3 review 由来 / Req 1.3）。
+	// scheme + host を持つ URL を要求する。OIDC 系は http(s) スキームを要求し、
+	// DATABASE_URL / MIGRATE_DATABASE_URL は postgres / postgresql / pgx5 を許容する。
+	validateURL := func(key, value string, allowSchemes map[string]struct{}) {
+		if value == "" {
+			return // missing 側で既にエラー化されている
+		}
+		u, err := url.Parse(value)
+		if err != nil {
+			invalid = append(invalid, fmt.Sprintf("%s (URL parse failed: %v)", key, err))
+			return
+		}
+		if u.Scheme == "" || u.Host == "" {
+			invalid = append(invalid, fmt.Sprintf("%s (scheme/host が欠落: %q)", key, value))
+			return
+		}
+		if allowSchemes != nil {
+			if _, ok := allowSchemes[strings.ToLower(u.Scheme)]; !ok {
+				schemes := make([]string, 0, len(allowSchemes))
+				for s := range allowSchemes {
+					schemes = append(schemes, s)
+				}
+				invalid = append(invalid, fmt.Sprintf("%s (許可されない scheme %q; expected one of %v)", key, u.Scheme, schemes))
+			}
+		}
+	}
+	httpSchemes := map[string]struct{}{"http": {}, "https": {}}
+	dbSchemes := map[string]struct{}{"postgres": {}, "postgresql": {}, "pgx5": {}}
+	validateURL("DATABASE_URL", cfg.DatabaseURL, dbSchemes)
+	validateURL("OIDC_TENANT_ISSUER_URL", cfg.OIDCTenantIssuerURL, httpSchemes)
+	validateURL("OIDC_TENANT_REDIRECT_URL", cfg.OIDCTenantRedirectURL, httpSchemes)
+	validateURL("OIDC_ADMIN_ISSUER_URL", cfg.OIDCAdminIssuerURL, httpSchemes)
+	validateURL("OIDC_ADMIN_REDIRECT_URL", cfg.OIDCAdminRedirectURL, httpSchemes)
+
 	// optional / default 付き
 	if v, ok := get("MIGRATE_DATABASE_URL"); ok && strings.TrimSpace(v) != "" {
 		cfg.MigrateDatabaseURL = v
+		validateURL("MIGRATE_DATABASE_URL", cfg.MigrateDatabaseURL, dbSchemes)
 	} else {
 		// fallback to DATABASE_URL (Makefile target との整合)。空でも整合性は維持される。
 		cfg.MigrateDatabaseURL = cfg.DatabaseURL
