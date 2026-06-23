@@ -18,7 +18,7 @@
     ユニットテストを `t.Setenv` ベースで配置
   - _Requirements: 1.1, 1.2, 1.3, 1.4, 1.5_
   - _Boundary: Config_
-- [ ] 1.2 Structured Logger（zap ラッパ + redaction）(P)
+- [x] 1.2 Structured Logger（zap ラッパ + redaction）(P)
   - `backend/internal/logger/logger.go` に `Logger` interface（Debug/Info/Warn/Error/With/Sync）
     と `NewLogger(cfg)` ファクトリを実装。zap の core を `cfg.LogLevel` / `cfg.LogFormat`
     （json|console）/ `cfg.LogOutput`（stderr|stdout|path）で構築
