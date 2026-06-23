@@ -6,7 +6,7 @@
 > 並列実行可能なタスクには `(P)` を付け `_Boundary:_` で担当 Components を明示する。
 
 - [ ] 1. 設定・ロガー・エラー型の共通基盤
-- [ ] 1.1 Config Loader（env → Config struct + fail-fast）(P)
+- [x] 1.1 Config Loader（env → Config struct + fail-fast）(P)
   - `backend/internal/config/config.go` に `Config` struct（DatabaseURL / OIDC × 2 / Pub/Sub /
     AMAPI / SessionSecret / AuditLogRetentionDays / DeviceSyncDelayThresholdHours /
     LogLevel / LogFormat / LogOutput / HTTPListenAddr 等）を定義
