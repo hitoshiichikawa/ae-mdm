@@ -202,7 +202,7 @@
   - _Requirements: NFR 3.1, NFR 3.2, NFR 4.1_
   - _Boundary: cmd-api_
   - _Depends: 4.1_
-- [ ] 5.2 cmd/worker を bootstrap に置換 + depspin 整理
+- [x] 5.2 cmd/worker を bootstrap に置換 + depspin 整理
   - `backend/cmd/worker/main.go` に `config.Load()` + `logger.NewLogger(cfg)` を導入。Pub/Sub
     subscriber 実装は後続 Issue（umbrella tasks 6.x）に委ねるが、本 Issue では config と logger
     だけは正しく初期化された状態にして、後続 Issue が `internal/platform/pubsub` を `import`
