@@ -98,12 +98,16 @@
   - _Requirements: 4.6, 6.1, 6.2, NFR 2.1, NFR 2.2_
   - _Depends: 2.2_
 - [ ] 3.2 RLS 有効化マイグレーション
-  - `backend/db/migrations/0011_enable_rls.up.sql` に、tenant_id カラムを持つ全 table
-    （`admin_users` / `admin_role_assignments` / `sessions`（admin_user_id 経由）/
-    `enrollment_tokens` / `policies` / `devices` / `device_commands` / `tenant_apps` /
-    `audit_logs`）に対して `ENABLE ROW LEVEL SECURITY` + `tenant_isolation_<table>` ポリシー
-    （USING / WITH CHECK 双方）を定義。`tenants` 自体は SuperAdmin のみ全行可視に倒すポリシー
+  - `backend/db/migrations/0011_enable_rls.up.sql` に、tenant_id カラムを持つ table
+    （`admin_users` / `admin_role_assignments` / `enrollment_tokens` / `policies` /
+    `devices` / `device_commands` / `tenant_apps`）に対して `ENABLE ROW LEVEL SECURITY` +
+    `tenant_isolation_<table>` ポリシー（USING / WITH CHECK 双方: `tenant_id =
+    current_setting('app.tenant_id', true)::uuid OR current_setting('app.is_superadmin', true)::boolean`）を定義。
+    `tenants` 自体は SuperAdmin のみ全行可視に倒すポリシー
     （USING で `current_setting('app.is_superadmin', true)::boolean` を true 時のみ通す）
+  - **`audit_logs` は本マイグレーションの対象外**（append-only 要件のため 0012 で SELECT/INSERT のみ個別定義する。タスク 3.3 参照）
+  - **`sessions` は tenant_id を持たない認証インフラテーブル**（`token_hash` でテナント文脈確立前に lookup される）ため、汎用 tenant RLS の対象外とする（Req 6.3 はテナント識別子カラムを持つ table が対象）。token_hash の秘匿とアプリ層で保護する
+  - **`notification_dedupe` / `unassigned_notifications`（tenant_id 無しの infra テーブル）** には SuperAdmin のみ可視の RLS ポリシー（USING で `current_setting('app.is_superadmin', true)::boolean`）を定義する（design.md「物理制約」節と整合）
   - `0011_enable_rls.down.sql` に対応する `DROP POLICY` + `ALTER TABLE ... DISABLE ROW LEVEL
     SECURITY` を順番に発行
   - 既存 policy がある場合に冪等で適用できるよう、up は `DROP POLICY IF EXISTS ... ; CREATE
@@ -111,10 +115,13 @@
   - _Requirements: 6.3, 6.4, NFR 1.1, NFR 1.2_
   - _Depends: 3.1_
 - [ ] 3.3 audit_logs append-only マイグレーション + ロール定義 SQL
-  - `backend/db/migrations/0012_audit_log_immutability.up.sql` に `ALTER TABLE audit_logs FORCE
-    ROW LEVEL SECURITY` + SELECT 用ポリシー（tenant_isolation + SuperAdmin 横断）+ INSERT 用
-    ポリシー（`WITH CHECK (true)`）を定義。UPDATE / DELETE 用ポリシーは **意図的に未定義**
-    とし、追加で `REVOKE UPDATE, DELETE ON audit_logs FROM app_user` を発行
+  - `backend/db/migrations/0012_audit_log_immutability.up.sql` に `ALTER TABLE audit_logs ENABLE
+    ROW LEVEL SECURITY` + `FORCE ROW LEVEL SECURITY` + SELECT 用ポリシー（tenant_isolation +
+    SuperAdmin 横断）+ INSERT 用ポリシー（**`WITH CHECK (tenant_id = current_setting('app.tenant_id',
+    true)::uuid OR current_setting('app.is_superadmin', true)::boolean)`** — 任意 tenant_id / NULL の
+    挿入を防ぎ二重防御にする）を定義。UPDATE / DELETE 用ポリシーは **意図的に未定義**（0011 の汎用
+    ポリシーも audit_logs には作らないため許可されない）とし、追加で `REVOKE UPDATE, DELETE ON
+    audit_logs FROM app_user` を発行
   - `0012_*.down.sql` に対応する `GRANT` + `DROP POLICY` を発行
   - `backend/db/roles/0001_create_app_and_migration_roles.sql` に `migration_user`（DDL 用）と
     `app_user`（DML 用、`audit_logs` の UPDATE/DELETE は本マイグレーションで REVOKE 済）の
