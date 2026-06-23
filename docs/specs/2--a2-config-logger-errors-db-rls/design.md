@@ -160,8 +160,9 @@ backend/
 │   ├── errors/                          # Req 3（独自 Error 型）
 │   │   ├── errors.go                    # Error{Code, Message, Cause, HTTPStatus, IsTransient}
 │   │   ├── http_mapping.go              # WriteHTTP(w, err): HTTP ステータス + JSON 応答
+│   │   ├── worker_mapping.go            # ShouldAck(err, log): Pub/Sub worker の ack/nack 判定（Req 3.4）
 │   │   ├── codes.go                     # Code 定数（invalid_request, forbidden, ...）
-│   │   └── errors_test.go               # errors.Is/As 互換 / HTTP マッピング
+│   │   └── errors_test.go               # errors.Is/As 互換 / HTTP マッピング / ack-nack 判定
 │   ├── platform/
 │   │   ├── db/                          # Req 4（DB プール + Tenant Context 強制）
 │   │   │   ├── pool.go                  # pgxpool.New(ctx, cfg.DatabaseURL)、接続検証
@@ -259,7 +260,7 @@ backend/
 | 3.1 | Code / Message / Cause を持つ Error 型 | Errors | `internal/errors/errors.go` | struct Error |
 | 3.2 | errors.Is / As 互換 | Errors | `errors.go` の `Unwrap()` | Go 標準 errors 互換 |
 | 3.3 | HTTP ステータスマッピング | Errors | `http_mapping.go` の WriteHTTP | Code → HTTP status |
-| 3.4 | worker ack/nack 判定 | Errors | `errors.go` の `IsTransient` フィールド | ack / nack 振り分け |
+| 3.4 | worker 最外層で ack/nack 判定を platform が決定する | Errors | `errors.go` の `IsTransient` フィールド + `worker_mapping.go` の `ShouldAck(err, log) bool` | nil/恒常失敗→ack、IsTransient→nack、独自型外は default 経路で判定 |
 | 3.5 | 予期しないエラーは 5xx + 構造化ログ | Errors, Logger | `WriteHTTP` default branch | 500 + ERROR ログ |
 | 4.1 | pgx 接続プール構築 | DB Pool | `platform/db/pool.go` | pgxpool.New |
 | 4.2 | tx 境界を単一ヘルパで管理 | TxManager | `platform/db/txmanager.go` | `BeginTxFunc(ctx, fn)` |
@@ -275,15 +276,15 @@ backend/
 | 5.6 | recover / request_id / access log 登録 | HTTP middleware chain | `platform/httpserver/middleware.go` | chi.Use() 連鎖 |
 | 6.1 | 12 テーブル作成マイグレーション | Migrations | `db/migrations/0001-0010_*.up.sql` | DDL |
 | 6.2 | up / down ペア | Migrations | 全マイグレーションに `*.down.sql` | reversible |
-| 6.3 | 全 tenant_id 持ち table に RLS + ポリシー | Migrations | `0011_enable_rls.up.sql` | ENABLE RLS + policy |
-| 6.4 | app ロールで他テナント行に SELECT/UPDATE/DELETE 不可 | Migrations + RLS Helper | `0011_*` + `rls.go` の `SET LOCAL` | 結合テストで verify |
+| 6.3 | 全 tenant_id 持ち table に RLS + ポリシー（`sessions` は `admin_user_id` 経由の subselect で分離） | Migrations | `0011_enable_rls.up.sql` | ENABLE RLS + policy（汎用 + sessions 専用） |
+| 6.4 | app ロールで他テナント行に SELECT/UPDATE/DELETE 不可（`sessions` 含む） | Migrations + RLS Helper | `0011_*`（汎用 + sessions 専用）+ `rls.go` の `SET LOCAL` | 結合テストで verify |
 | 6.5 | DDL 用ロールと app ロールを分離 | DB Roles | `backend/db/roles/0001_create_app_and_migration_roles.sql` | runbook で記述 |
 | 7.1 | audit_logs INSERT のみ許可 | Migrations | `0012_audit_log_immutability.up.sql` の REVOKE | REVOKE UPDATE/DELETE |
 | 7.2 | app ロールから UPDATE/DELETE 拒否 | Migrations | `0012_*.up.sql` | DB レベル拒否 |
 | 7.3 | audit_logs SELECT も RLS 分離 | Migrations | `0011_*.up.sql` + `0012_*.up.sql` の SELECT ポリシー | tenant_isolation + superadmin |
 | 7.4 | FORCE ROW LEVEL SECURITY 強制 | Migrations | `0012_*.up.sql` の `FORCE ROW LEVEL SECURITY` | owner も回避不可 |
 | NFR 1.1 | アプリ層 + RLS の両方有効 | TenantContext + RLS Helper + Migrations | `middleware.go` + `rls.go` + `0011_*` | 二重防御 |
-| NFR 1.2 | テナント A セッションがテナント B 行に到達不可 | RLS Helper + Migrations | `rls.go` + `0011_*` | integration test |
+| NFR 1.2 | テナント A セッションがテナント B 行に到達不可（`tenants` を除く全テーブル＝ `sessions` 含む） | RLS Helper + Migrations | `rls.go` + `0011_*`（`tenant_isolation_sessions` 含む）| integration test |
 | NFR 2.1 | up シーケンス冪等 | Migrations | `golang-migrate` の version 管理 | 再適用しても no-op |
 | NFR 2.2 | up に対応する down 提供 | Migrations | 全 12 ペア | down → up 1 サイクル |
 | NFR 3.1 | 初期化失敗で exit != 0 + 判別可能ログ | Config, DB Pool, cmd/api | `cmd/api/main.go` の bootstrap 順 | fail-fast |
@@ -496,11 +497,24 @@ type ErrLogger interface {
 // WriteHTTP は HTTP ハンドラ最外層で err を JSON 応答に変換し、必要なら ERROR ログを出す。
 // err が *Error でない場合は CodeInternal として包む。
 func WriteHTTP(w http.ResponseWriter, r *http.Request, err error, log ErrLogger)
+
+// ShouldAck は worker（Pub/Sub subscriber 等）の最外層で err を ack / nack 判定に
+// 写像する（Req 3.4）。戻り値が true なら ack（再配信しない）、false なら nack（再配信させる）。
+// 判定規則:
+//   * err == nil                       → ack
+//   * *Error で IsTransient=true       → nack（一時的失敗、再試行を期待）
+//   * *Error で IsTransient=false      → ack（恒常的失敗、再配信しても結果は変わらない）
+//   * 独自 Error 型でない error        → ack（default: CodeInternal/IsTransient=true として
+//                                          wrap される場合は WriteHTTP 側と整合する経路で
+//                                          ShouldAck(*Error{IsTransient:true}) を経由させる）
+// log が非 nil の場合、判定結果と cause を WARN（nack）/ ERROR（ack-on-error）で構造化記録する。
+func ShouldAck(err error, log ErrLogger) (ack bool)
 ```
 
-- Preconditions: w が未書込みの ResponseWriter であること
-- Postconditions: `WriteHTTP` は同じ w に 2 回書き込まない（called-once 契約）
-- Invariants: Code 定数と HTTP status の対応は test で網羅される
+- Preconditions: w が未書込みの ResponseWriter であること（WriteHTTP）
+- Postconditions: `WriteHTTP` は同じ w に 2 回書き込まない（called-once 契約）。
+  `ShouldAck` は副作用として log を 1 回呼ぶ（err == nil 時は呼ばない）
+- Invariants: Code 定数と HTTP status の対応 / `ShouldAck` の判定マトリクスは test で網羅される
 
 #### DB Connection Pool
 
@@ -728,8 +742,8 @@ func RequireSuperAdmin(log logger.Logger) func(http.Handler) http.Handler
 | `0008_create_tenant_apps` | `tenant_apps` (id, tenant_id, package_name, title, icon_url, approved_at, UNIQUE(tenant_id, package_name)) |
 | `0009_create_audit_logs` | `audit_logs` (id, tenant_id nullable, actor_id, event_type, resource_id, detail jsonb, result enum, occurred_at) |
 | `0010_create_notification_dedupe_and_unassigned` | `notification_dedupe` (message_id PK, ...) + `unassigned_notifications` |
-| `0011_enable_rls` | **`audit_logs` を除く**全 tenant_id 持ち table に `ENABLE ROW LEVEL SECURITY` + `tenant_isolation_*` ポリシー（USING/WITH CHECK で `tenant_id = current_setting('app.tenant_id', true)::uuid OR current_setting('app.is_superadmin', true)::boolean`）。`audit_logs` は append-only 要件のため本マイグレーションの汎用 FOR ALL ポリシー対象から除外し、0012 で SELECT/INSERT のみ個別定義する |
-| `0012_audit_log_immutability` | `audit_logs` に `ENABLE`+`FORCE ROW LEVEL SECURITY`、SELECT ポリシー + INSERT ポリシー（**WITH CHECK でテナント分離: `tenant_id = current_setting('app.tenant_id', true)::uuid OR current_setting('app.is_superadmin', true)::boolean`**。任意 tenant_id / NULL の挿入を防ぐ）、UPDATE/DELETE は **ポリシー未定義**（0011 の汎用ポリシーを audit_logs に作らないため許可されない）+ **`REVOKE UPDATE, DELETE ON audit_logs FROM app_user`** の二重防御 |
+| `0011_enable_rls` | **`audit_logs` を除く**全 tenant_id 持ち table に `ENABLE ROW LEVEL SECURITY` + `tenant_isolation_*` ポリシー（USING/WITH CHECK で `tenant_id = current_setting('app.tenant_id', true)::uuid OR current_setting('app.is_superadmin', true)::boolean`）。**`sessions` は `tenant_id` カラムを持たないが、`admin_user_id` を `admin_users.id` 経由で参照しテナント分離する専用ポリシー `tenant_isolation_sessions` を本マイグレーションで定義**（NFR 1.1 / 1.2 で `tenants` を除く全テーブルが二重防御対象のため）。`audit_logs` は append-only 要件のため本マイグレーションの汎用 FOR ALL ポリシー対象から除外し、0012 で SELECT/INSERT のみ個別定義する |
+| `0012_audit_log_immutability` | `audit_logs` に `ENABLE`+`FORCE ROW LEVEL SECURITY`、SELECT ポリシー + INSERT ポリシー（**WITH CHECK: `tenant_id = current_setting('app.tenant_id', true)::uuid OR current_setting('app.is_superadmin', true)::boolean`**。通常テナント文脈では tenant_id mismatch / NULL の挿入を物理的に拒否し、SuperAdmin はシステム監査ログ〔tenant_id NULL 含む〕および cross-tenant 操作監査を挿入可能にする〔Req 7.3 / 7.4 と整合〕）、UPDATE/DELETE は **ポリシー未定義**（0011 の汎用ポリシーを audit_logs に作らないため許可されない）+ **`REVOKE UPDATE, DELETE ON audit_logs FROM app_user`** の二重防御 |
 
 #### RLS ポリシー（テンプレート）
 
@@ -746,6 +760,31 @@ CREATE POLICY tenant_isolation_devices ON devices
         OR current_setting('app.is_superadmin', true)::boolean
     );
 
+-- sessions は tenant_id カラムを持たないが、admin_user_id 経由で admin_users.tenant_id を参照
+-- することでテナント分離する。NFR 1.1 / 1.2 で `tenants` を除く全テーブルが二重防御対象のため、
+-- sessions も DB レベルの RLS でカバーする。
+-- 注意: 認証 lookup（token_hash でセッションを引く経路）は TenantContext 確立前に動くため、
+-- 該当経路は本 Issue では SuperAdmin / system 接続経由で実行する前提（後続 Issue で Session
+-- Manager 実装時に確定。詳細は本節下の「sessions の認証 lookup 経路」散文を参照）。
+ALTER TABLE sessions ENABLE ROW LEVEL SECURITY;
+CREATE POLICY tenant_isolation_sessions ON sessions
+    USING (
+        EXISTS (
+            SELECT 1 FROM admin_users
+            WHERE admin_users.id = sessions.admin_user_id
+              AND admin_users.tenant_id = current_setting('app.tenant_id', true)::uuid
+        )
+        OR current_setting('app.is_superadmin', true)::boolean
+    )
+    WITH CHECK (
+        EXISTS (
+            SELECT 1 FROM admin_users
+            WHERE admin_users.id = sessions.admin_user_id
+              AND admin_users.tenant_id = current_setting('app.tenant_id', true)::uuid
+        )
+        OR current_setting('app.is_superadmin', true)::boolean
+    );
+
 -- audit_logs の改竄防止（0012_audit_log_immutability.up.sql）
 ALTER TABLE audit_logs ENABLE ROW LEVEL SECURITY;
 ALTER TABLE audit_logs FORCE ROW LEVEL SECURITY;
@@ -754,8 +793,11 @@ CREATE POLICY audit_logs_select ON audit_logs FOR SELECT
         tenant_id = current_setting('app.tenant_id', true)::uuid
         OR current_setting('app.is_superadmin', true)::boolean
     );
--- INSERT は現在のテナント context に紐づく行のみ許可（任意 tenant_id / NULL の挿入を防ぐ）。
--- SuperAdmin はシステム監査ログ（tenant_id NULL 含む）を挿入できる。
+-- INSERT の意図:
+--   * 通常テナント文脈（IsSuperAdmin=false、app.tenant_id=<uuid>）: tenant_id mismatch / NULL の
+--     挿入を WITH CHECK で物理的に拒否し、他テナント宛 / 無テナント監査ログの混入を防ぐ
+--   * SuperAdmin 文脈（IsSuperAdmin=true）: cross-tenant 操作の監査やシステム監査ログ
+--     （tenant_id NULL 含む）を挿入できるよう OR 句で素通りさせる（Req 7.3 と整合）
 CREATE POLICY audit_logs_insert ON audit_logs FOR INSERT WITH CHECK (
     tenant_id = current_setting('app.tenant_id', true)::uuid
     OR current_setting('app.is_superadmin', true)::boolean
@@ -764,6 +806,23 @@ CREATE POLICY audit_logs_insert ON audit_logs FOR INSERT WITH CHECK (
 -- 追加で REVOKE で物理拒否（二重防御）
 REVOKE UPDATE, DELETE ON audit_logs FROM app_user;
 ```
+
+#### sessions の認証 lookup 経路
+
+`sessions` を RLS 対象にしたことで、`token_hash` でセッションを引く認証 lookup（TenantContext
+確立 **前**に動く必要がある経路）は通常の `app.tenant_id` 設定では `tenant_isolation_sessions`
+のサブクエリが NULL を返し 0 行になる。本 Issue ではこの経路の実装本体（OIDC Verifier / Session
+Manager）は提供しないが、後続 Issue で Session Manager を実装する際は以下の経路を採用する
+前提とする:
+
+- 認証 lookup（pre-tenant）: `app.is_superadmin=true` で SuperAdmin 文脈として lookup し、
+  hit した admin_user_id から `admin_users.tenant_id` を取り、それを以降の TenantContext として
+  establish する
+- tenant-scoped session 操作（post-tenant）: 通常の `app.tenant_id=<uuid>` 文脈で 0011 の RLS が
+  そのまま分離する
+
+本 Issue では lookup ヘルパまでを実装しないため、上記方針は design.md と integration test で
+担保し、認証経路の実装本体は **Out of Scope**（umbrella tasks 3.1 / 後続 Issue）として送る。
 
 `current_setting(..., true)` の第 2 引数 `true` は missing_ok=true で「未設定なら NULL を返す」
 意味。NULL は uuid キャストで失敗するため、RLS チェックは false に倒れ default deny になる
@@ -785,6 +844,10 @@ umbrella design.md の `## Data Models` テーブルを正本とする。本 Iss
 - `audit_logs.tenant_id` のみ NULL 許容（SuperAdmin の cross-tenant 操作を記録するため）
 - `notification_dedupe` `unassigned_notifications` は tenant_id を持たない infra テーブル
   （RLS は SuperAdmin のみ可視に倒す）
+- `sessions` は `tenant_id` カラムを持たない認証インフラテーブルだが、`admin_user_id` を
+  `admin_users.id` 経由で参照することで `admin_users.tenant_id` ベースの分離ポリシーが定義可能。
+  本 Issue では 0011 で `tenant_isolation_sessions` ポリシーを subselect で定義し、NFR 1.1 / 1.2
+  の二重防御対象に含める（`tenants` を除く全テーブル分離の要件を物理化）
 
 ## Error Handling
 
@@ -847,6 +910,9 @@ flowchart TD
    google sa json）が `***` に置換され、それ以外の field は通過すること
 3. `errors.WriteHTTP`: 各 Code に対応する HTTP status / JSON body / 独自 Error 型でない error
    の default 500 / 同じ writer に 2 回書かない契約
+3a. `errors.ShouldAck`: nil / `*Error{IsTransient:true}` / `*Error{IsTransient:false}` / 独自型外
+    error の 4 ケース判定マトリクスと、log 副作用（nil 時に呼ばない、それ以外で WARN または ERROR
+    が 1 回呼ばれる）。Req 3.4 の「worker 最外層で ack/nack 判定を platform が決定する」を担保
 4. `db.SetLocalTenant`: SuperAdmin / 通常 tenant / TenantID=uuid.Nil + IsSuperAdmin=false の各
    組み合わせで発行される SQL（または引数バインド）が期待通りであること（mock pgx.Tx で検証）
 5. `httpserver.RequireSuperAdmin`: TenantContext 未確立 → 401、TenantContext あるが
@@ -856,13 +922,23 @@ flowchart TD
 1. **RLS によるテナント分離**: テナント A のコンテキストでテナント B の `devices` /
    `policies` / `audit_logs` に SELECT / UPDATE / DELETE を試行 → 0 行返却・0 行更新（Req 6.4,
    NFR 1.2）
-2. **SuperAdmin の cross-tenant 可視性**: `app.is_superadmin=true` で全テナントの `devices` /
-   `audit_logs` が SELECT 可能（Req 6.3）
-3. **audit_logs append-only**: `app_user` ロールで `audit_logs` に INSERT 成功 →
+2. **sessions の subselect 分離**: テナント A のコンテキストで B 配下の `admin_user_id` を
+   持つ `sessions` 行に SELECT / UPDATE / DELETE を試行 → 0 行（`tenant_isolation_sessions` が
+   `admin_users` 経由で分離 / Req 6.4, NFR 1.2）。`app.is_superadmin=true` では全 sessions が
+   返ること
+3. **SuperAdmin の cross-tenant 可視性**: `app.is_superadmin=true` で全テナントの `devices` /
+   `audit_logs` / `sessions` が SELECT 可能（Req 6.3）
+4. **audit_logs append-only**: `app_user` ロールで `audit_logs` に INSERT 成功 →
    UPDATE / DELETE → `permission denied` または `policy violation`（Req 7.1, 7.2, 7.4）
-4. **panic ガード**: TenantContext を put しない ctx で `BeginTxFunc` を呼ぶと panic →
+5. **audit_logs INSERT の二重防御 WITH CHECK**:
+   - 通常テナント文脈（IsSuperAdmin=false / app.tenant_id=A）で `tenant_id=B` または NULL の
+     audit_logs を INSERT → policy violation（cross-tenant / 無テナント挿入を物理的に拒否 /
+     Req 7.4）
+   - SuperAdmin 文脈（IsSuperAdmin=true）で `tenant_id=NULL` および任意の `tenant_id` の
+     INSERT → 成功（cross-tenant 操作監査 / システム監査ログ用途、Req 7.3 と整合）
+6. **panic ガード**: TenantContext を put しない ctx で `BeginTxFunc` を呼ぶと panic →
    HTTP recover middleware が 500 + `Code=tenant_context_missing` を構造化ログに記録（Req 4.5）
-5. **マイグレーション可逆性**: `make migrate-up` → `make migrate-down` を 1 サイクル実行して
+7. **マイグレーション可逆性**: `make migrate-up` → `make migrate-down` を 1 サイクル実行して
    スキーマが空に戻る、続いて再 `migrate-up` で同じ最終状態に到達（NFR 2.1, NFR 2.2）
 
 ### E2E/UI Tests（該当なし）
@@ -909,6 +985,7 @@ flowchart LR
 | 観点 | 採用案 | 代替案 | 理由 |
 |---|---|---|---|
 | RLS 強制方法 | `SET LOCAL app.tenant_id` + `current_setting()` + RLS USING/WITH CHECK | アプリ層 WHERE 句のみ / Postgres ロールをテナントごとに切替 | アプリ層のみでは漏れが残る、ロール切替は接続プール再利用と相性悪い。GUC + RLS が umbrella と整合 |
+| `sessions` のテナント分離手段 | `admin_user_id → admin_users.tenant_id` の subselect ポリシー（0011 で定義） | (a) `sessions` 自体に `tenant_id` を denormalize / (b) アプリ層のみで保護 / (c) RLS 対象外 | (a) は umbrella の Logical Data Model 変更を伴う / (b) は NFR 1.1 の二重防御に反する / (c) は NFR 1.2 の「`tenants` を除く全テーブル分離」に反する。subselect は性能上の懸念があるが `admin_users.id` は PK で 1 行 lookup のみ・接続プールでの cache hit も期待でき、MVP の負荷では許容範囲と判断 |
 | Tx 境界 API | `BeginTxFunc(ctx, fn)` の関数包み | 手動 begin/commit/rollback | 関数包み形で commit/rollback の漏れと SET LOCAL 漏れを構造的に防げる |
 | panic ガード | TenantContext 不在で panic + recover で 500 | エラー戻り値で 500 | invariant 違反を強く可視化するため。recover middleware が 500 化するので呼び出し側は通常コードと同じ |
 | audit_logs 改竄防止 | RLS ポリシー未定義 + REVOKE UPDATE/DELETE の二重 | `RULE` で UPDATE/DELETE を no-op に書き換え / トリガで拒否 | REVOKE が PostgreSQL 標準で最も明確。FORCE RLS でテーブル所有者からも回避不可 |

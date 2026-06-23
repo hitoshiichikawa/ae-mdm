@@ -42,8 +42,15 @@
   - `backend/internal/errors/http_mapping.go` に `WriteHTTP(w, r, err, log)` を実装。独自 Error
     型でない error は `Code="internal_error"` / HTTPStatus=500 として wrap し ERROR ログ。
     同じ writer に 2 回書かない契約を守るため内部で sentinel を立てる
+  - `backend/internal/errors/worker_mapping.go` に `ShouldAck(err error, log ErrLogger) (ack bool)`
+    を実装（Req 3.4）。判定規則: `err == nil` → ack（log 呼ばない）/ `*Error` で
+    `IsTransient=true` → nack（WARN ログ）/ `*Error` で `IsTransient=false` → ack（ERROR ログ）/
+    独自 Error 型でない error → `CodeInternal/IsTransient=true` として wrap した上で nack
+    （WARN ログ）として扱う（HTTP マッピングの default 500 / IsTransient=true 経路と整合）
   - `backend/internal/errors/errors_test.go` に `errors.Is/As` 互換・各 Code → HTTP status
-    マッピング・default 500 / ERROR ログ呼び出し（fake logger で検証）のユニットテスト
+    マッピング・default 500 / ERROR ログ呼び出し（fake logger で検証）・**`ShouldAck` の 4 ケース
+    判定マトリクス**（nil / Transient=true / Transient=false / 独自型外 error）と log 副作用
+    （nil 時に呼ばない / それ以外で 1 回呼ぶ）のユニットテストを配置
   - _Requirements: 3.1, 3.2, 3.3, 3.4, 3.5_
   - _Boundary: Errors_
   - _Depends: 1.2_
@@ -106,9 +113,9 @@
     `tenants` 自体は SuperAdmin のみ全行可視に倒すポリシー
     （USING で `current_setting('app.is_superadmin', true)::boolean` を true 時のみ通す）
   - **`audit_logs` は本マイグレーションの対象外**（append-only 要件のため 0012 で SELECT/INSERT のみ個別定義する。タスク 3.3 参照）
-  - **`sessions` は tenant_id を持たない認証インフラテーブル**（`token_hash` でテナント文脈確立前に lookup される）ため、汎用 tenant RLS の対象外とする（Req 6.3 はテナント識別子カラムを持つ table が対象）。token_hash の秘匿とアプリ層で保護する
+  - **`sessions` も本マイグレーションで RLS を有効化する**（NFR 1.1 / 1.2 の `tenants` を除く全テーブル分離が二重防御対象のため）。`sessions` は `tenant_id` カラムを持たないが、`admin_user_id` を `admin_users.id` 経由で参照することで `admin_users.tenant_id` ベースの分離が可能。`tenant_isolation_sessions` ポリシー（USING / WITH CHECK 双方: `EXISTS (SELECT 1 FROM admin_users WHERE admin_users.id = sessions.admin_user_id AND admin_users.tenant_id = current_setting('app.tenant_id', true)::uuid) OR current_setting('app.is_superadmin', true)::boolean`）を定義する。**認証 lookup（token_hash でセッションを引く経路、TenantContext 確立前）は本ポリシー下で 0 行に倒れるため、後続 Issue の Session Manager で SuperAdmin / system context（`app.is_superadmin=true`）経由で lookup する前提**（design.md「sessions の認証 lookup 経路」散文と整合。本 Issue では lookup ヘルパは未実装）
   - **`notification_dedupe` / `unassigned_notifications`（tenant_id 無しの infra テーブル）** には SuperAdmin のみ可視の RLS ポリシー（USING で `current_setting('app.is_superadmin', true)::boolean`）を定義する（design.md「物理制約」節と整合）
-  - `0011_enable_rls.down.sql` に対応する `DROP POLICY` + `ALTER TABLE ... DISABLE ROW LEVEL
+  - `0011_enable_rls.down.sql` に対応する `DROP POLICY`（`tenant_isolation_sessions` 含む）+ `ALTER TABLE ... DISABLE ROW LEVEL
     SECURITY` を順番に発行
   - 既存 policy がある場合に冪等で適用できるよう、up は `DROP POLICY IF EXISTS ... ; CREATE
     POLICY ...` のイディオムを使う
@@ -118,10 +125,13 @@
   - `backend/db/migrations/0012_audit_log_immutability.up.sql` に `ALTER TABLE audit_logs ENABLE
     ROW LEVEL SECURITY` + `FORCE ROW LEVEL SECURITY` + SELECT 用ポリシー（tenant_isolation +
     SuperAdmin 横断）+ INSERT 用ポリシー（**`WITH CHECK (tenant_id = current_setting('app.tenant_id',
-    true)::uuid OR current_setting('app.is_superadmin', true)::boolean)`** — 任意 tenant_id / NULL の
-    挿入を防ぎ二重防御にする）を定義。UPDATE / DELETE 用ポリシーは **意図的に未定義**（0011 の汎用
-    ポリシーも audit_logs には作らないため許可されない）とし、追加で `REVOKE UPDATE, DELETE ON
-    audit_logs FROM app_user` を発行
+    true)::uuid OR current_setting('app.is_superadmin', true)::boolean)`**）を定義。INSERT ポリシーの
+    意図は (a) **通常テナント文脈**（IsSuperAdmin=false / app.tenant_id=<uuid>）で `tenant_id` mismatch
+    または NULL の挿入を WITH CHECK で物理的に拒否し、他テナント宛 / 無テナント監査ログの混入を
+    防ぐ。(b) **SuperAdmin 文脈**（IsSuperAdmin=true）では cross-tenant 操作監査やシステム監査ログ
+    （tenant_id NULL 含む）を挿入できるよう OR 句で素通りさせる（Req 7.3 と整合）。UPDATE / DELETE
+    用ポリシーは **意図的に未定義**（0011 の汎用ポリシーも audit_logs には作らないため許可されない）
+    とし、追加で `REVOKE UPDATE, DELETE ON audit_logs FROM app_user` を発行
   - `0012_*.down.sql` に対応する `GRANT` + `DROP POLICY` を発行
   - `backend/db/roles/0001_create_app_and_migration_roles.sql` に `migration_user`（DDL 用）と
     `app_user`（DML 用、`audit_logs` の UPDATE/DELETE は本マイグレーションで REVOKE 済）の
@@ -212,7 +222,8 @@
     postgres` 前提（CI / ローカルで `DATABASE_URL` から接続可能、無ければ test を skip）
   - テストシナリオ:
     (a) `make migrate-up` 相当を Go テスト側で適用、テナント A / B の 2 行を `tenants` に挿入、
-    各テナント配下の `devices` / `policies` / `audit_logs` にダミーレコードを挿入
+    各テナント配下の `admin_users` / `sessions`（`admin_user_id` 経由）/ `devices` / `policies` /
+    `audit_logs` にダミーレコードを挿入
     (b) TenantContext=A で `BeginTxFunc` を呼び `SELECT FROM devices` → A の行のみ、B の行は
     0 件であること（Req 6.4, NFR 1.2）
     (c) TenantContext=A で B の `devices` 行を `UPDATE` / `DELETE` → 0 rows affected
@@ -221,13 +232,22 @@
     `tenant_context_missing` を含む構造化エラーを確認 / Req 4.5）
     (f) `app_user` で `audit_logs` を UPDATE / DELETE → `permission denied` または `policy
     violation` のエラーが返ること（Req 7.1, 7.2, 7.4）
+    (g) **`audit_logs` INSERT の WITH CHECK 二重防御**: (g-1) TenantContext=A で `tenant_id=B`
+    の audit_logs を INSERT → policy violation（通常テナント文脈での cross-tenant 挿入拒否 /
+    Req 7.4）、(g-2) TenantContext=A で `tenant_id=NULL` の audit_logs を INSERT → policy
+    violation、(g-3) IsSuperAdmin=true で `tenant_id=NULL` および `tenant_id=B` の INSERT →
+    成功（cross-tenant 監査 / システム監査ログ用途、Req 7.3 と整合）
+    (h) **sessions のテナント分離**: TenantContext=A で B 配下の `admin_user_id` を持つ
+    sessions 行に対する `SELECT` / `UPDATE` / `DELETE` → 0 rows（`tenant_isolation_sessions`
+    ポリシーが subselect 経由で分離 / Req 6.4, NFR 1.2）、IsSuperAdmin=true で全 sessions が
+    返ること
   - `backend/test/integration/http_subrouter_mount_test.go` を新規追加。
     `httpserver.NewServer` で構築した *http.Server を `httptest.NewServer` 相当で起動し、
     (g) `GET /healthz` が 200 を返す、(h) `GET /api/anything` が 401（auth スタブ default deny）、
     (i) `GET /api/admin/anything` が 401 または 403（SuperAdmin ガード default deny）、
     (j) test 用 router で TenantContext を put して `IsSuperAdmin=true` の場合に next handler
     まで到達することを確認
-  - _Requirements: 4.5, 5.5, 6.3, 6.4, 7.1, 7.2, 7.4, NFR 1.1, NFR 1.2_
+  - _Requirements: 4.5, 5.5, 6.3, 6.4, 7.1, 7.2, 7.3, 7.4, NFR 1.1, NFR 1.2_
   - _Boundary: TxManager, RLSHelper, HTTPServer, AdminRouteGuard, Migrations_
   - _Depends: 3.4, 4.1, 5.2_
 - [ ] 6.2 マイグレーション可逆性テスト
