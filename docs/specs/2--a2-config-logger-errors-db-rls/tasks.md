@@ -121,7 +121,7 @@
     POLICY ...` のイディオムを使う
   - _Requirements: 6.3, 6.4, NFR 1.1, NFR 1.2_
   - _Depends: 3.1_
-- [ ] 3.3 audit_logs append-only マイグレーション + ロール定義 SQL
+- [x] 3.3 audit_logs append-only マイグレーション + ロール定義 SQL
   - `backend/db/migrations/0012_audit_log_immutability.up.sql` に `ALTER TABLE audit_logs ENABLE
     ROW LEVEL SECURITY` + `FORCE ROW LEVEL SECURITY` + SELECT 用ポリシー（tenant_isolation +
     SuperAdmin 横断）+ INSERT 用ポリシー（**`WITH CHECK (tenant_id = current_setting('app.tenant_id',
