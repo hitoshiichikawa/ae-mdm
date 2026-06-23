@@ -36,22 +36,33 @@ cp .env.example .env
 npm install
 ( cd backend && GOTOOLCHAIN=local go mod download )
 
-# 4. 全サービスをビルド + 起動
+# 4. ビルド
 make build
-make up
 
-# 5. health check が通過するまで待機（30〜60 秒）
-docker compose ps
+# 5. postgres のみ先行起動（app_user / migration_user 作成のため）
+#    api / worker は app_user で接続するため、ロール未作成の状態で
+#    `make up`（全サービス起動）すると Ping に失敗する。
+docker compose up -d postgres
 
-# 6. アプリ用ロール（app_user / migration_user）の初期セットアップ
+# 6. postgres の health check が通過するまで待機（10〜20 秒）
+docker compose ps postgres
+
+# 7. アプリ用ロール（app_user / migration_user）の初期セットアップ
 #    Issue #2 / Req 6.5 / docs/specs/2--a2-config-logger-errors-db-rls/design.md 参照。
 #    本 target は golang-migrate の管轄外（schema_migrations に記録されない）。
+#    superuser（POSTGRES_USER）接続で SQL を流すため、psql CLI が必要。
 make db-init-roles
 
-# 7. マイグレーション適用（migration_user 接続で DDL を実行）
+# 8. マイグレーション適用（migration_user 接続で DDL を実行）
 make migrate-up
 
-# 8. （後続 Issue で実装される）初期 SuperAdmin の seed
+# 9. 残り 6 サービスを起動（api / worker / keycloak / pubsub-emulator / SPA 2 枚）
+make up
+
+# 10. health check が通過するまで待機（30〜60 秒）
+docker compose ps
+
+# 11. （後続 Issue で実装される）初期 SuperAdmin の seed
 # 本 Issue 時点では admin-seed CLI は未実装。umbrella task 14.2 で実装される。
 # 暫定: Keycloak admin console (http://localhost:8081/) から手動でユーザーを作成し、
 #       SuperAdmin グループに割り当てる。
@@ -110,7 +121,15 @@ make build
 
 ### 3. サービス起動
 
+`api` / `worker` は `app_user` で `DATABASE_URL` に接続するため、ロール初期セットアップ
+（次節 4.1）の前に全サービスを起動すると Ping に失敗します。
+**postgres → ロール作成 → migration → 残りサービス起動** の順を厳守してください:
+
 ```bash
+# postgres のみ先行起動
+docker compose up -d postgres
+# 健康状態確認後、ロール作成・migration を実行（節 4 参照）
+# その後で全サービスを起動
 make up
 ```
 
@@ -146,9 +165,11 @@ make db-init-roles
 ```
 
 - 適用される SQL: `backend/db/roles/0001_create_app_and_migration_roles.sql`
-- 接続 URL の決定順: `POSTGRES_INIT_URL` → `MIGRATE_DATABASE_URL` → `DATABASE_URL`。
-  superuser 接続が必要なので、`POSTGRES_INIT_URL=postgres://ae_mdm:<superuser_pwd>@localhost:5432/ae_mdm?sslmode=disable`
-  を `.env` または CLI から明示すると安全
+- 接続 URL の決定順: `POSTGRES_INIT_URL`（明示指定）→
+  `postgres://$POSTGRES_USER:$POSTGRES_PASSWORD@localhost:$POSTGRES_HOST_PORT/$POSTGRES_DB?sslmode=disable`
+  を `.env` の値から組み立てた superuser URL。
+  app_user / migration_user はまだ未作成のため、`DATABASE_URL` / `MIGRATE_DATABASE_URL` への
+  fallback は行わない（fallback すると未作成ロールで接続を試み失敗する）
 - 前提: ホストに `psql` CLI がインストールされていること
 - 本 target は **`golang-migrate` の管轄外**（schema_migrations テーブルに記録されない）。
   そのため `make migrate-down` で巻き戻されることもなく、2 回目以降の実行は

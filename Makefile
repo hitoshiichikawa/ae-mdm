@@ -109,17 +109,23 @@ migrate-down:
 #     postgres superuser 接続経由で適用する
 #   - psql CLI を使う前提のレシピ。ホストに psql 未インストールの場合は runbook
 #     (docs/runbook/local-dev.md) に記載の手動手順 (docker compose exec postgres psql ...) を参照
-#   - POSTGRES_INIT_URL は postgres superuser (compose の POSTGRES_USER / POSTGRES_PASSWORD)
-#     接続用。未設定時は MIGRATE_DATABASE_URL → DATABASE_URL の fallback
+#   - 接続は postgres superuser（compose の POSTGRES_USER / POSTGRES_PASSWORD）で行う必要がある。
+#     app_user / migration_user はまだ未作成のため、これらのロールで接続する fallback は
+#     使えない。明示しなければ POSTGRES_HOST_PORT・POSTGRES_USER・POSTGRES_DB・POSTGRES_PASSWORD
+#     から superuser 接続 URL を組み立てる
+#   - 明示的に POSTGRES_INIT_URL を `.env` または CLI から渡せばそれが優先される
 #   - パスワード placeholder (<REPLACE_ME_*>) は事前に sed / envsubst で実値に置換するか、
 #     SQL ファイルを編集してから適用する想定（運用判断 / 本 SQL の冒頭コメント参照）
 ROLES_PATH := backend/db/roles/0001_create_app_and_migration_roles.sql
-POSTGRES_INIT_URL ?= $(or $(MIGRATE_DATABASE_URL),$(DATABASE_URL))
+POSTGRES_INIT_HOST ?= localhost
+POSTGRES_INIT_PORT ?= $(or $(POSTGRES_HOST_PORT),5432)
+POSTGRES_INIT_URL ?= postgres://$(POSTGRES_USER):$(POSTGRES_PASSWORD)@$(POSTGRES_INIT_HOST):$(POSTGRES_INIT_PORT)/$(POSTGRES_DB)?sslmode=disable
 
 db-init-roles:
 	@echo "==> db-init-roles: $(ROLES_PATH)"
-	@if [ -z "$(POSTGRES_INIT_URL)" ]; then \
-		echo "error: POSTGRES_INIT_URL / MIGRATE_DATABASE_URL / DATABASE_URL いずれも未設定"; exit 1; \
+	@if [ -z "$(POSTGRES_USER)" ] || [ -z "$(POSTGRES_PASSWORD)" ] || [ -z "$(POSTGRES_DB)" ]; then \
+		echo "error: POSTGRES_USER / POSTGRES_PASSWORD / POSTGRES_DB のいずれかが未設定"; \
+		echo "       .env をロードするか POSTGRES_INIT_URL を直接指定してください"; exit 1; \
 	fi
 	@if ! command -v psql >/dev/null 2>&1; then \
 		echo "error: psql CLI が見つかりません。runbook (docs/runbook/local-dev.md) の手動手順を参照してください"; exit 1; \
