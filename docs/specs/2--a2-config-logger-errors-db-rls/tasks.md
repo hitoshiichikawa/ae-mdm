@@ -139,7 +139,7 @@
     別系統で適用）であることを冒頭コメントに明記
   - _Requirements: 6.5, 7.1, 7.2, 7.3, 7.4_
   - _Depends: 3.2_
-- [ ] 3.4 Makefile target / runbook / `.env.example` の整備
+- [x] 3.4 Makefile target / runbook / `.env.example` の整備
   - リポジトリルートの `Makefile` に `migrate-up` / `migrate-down` / `db-init-roles` の 3 target
     を追加（`golang-migrate` CLI を `go run -modfile=...` または別途インストール手順を採る
     かは Developer に委ねるが、`MIGRATE_DATABASE_URL` → `DATABASE_URL` の fallback を実装する）
