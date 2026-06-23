@@ -180,6 +180,81 @@
     するか、`make migrate-down → migrate-up` で 0012 を再適用する。本注意点は runbook に
     明記済み。
 
+### Task 4
+
+- **採用方針**: `internal/platform/httpserver` に Recoverer / RequestID / AccessLog /
+  TenantContextMiddleware / RequireSuperAdmin の 5 middleware と、`chi.NewRouter` で
+  root + `/api` + `/api/admin` の 2 サブルータを Mount する `NewServer(cfg, log, pool)`
+  を追加し、後続 Issue が `Routers.API.Mount("/devices", ...)` で domain handler を
+  生やすだけで `/api/*` `/api/admin/*` のミドルウェアチェーン（recover → request_id →
+  access log → TenantContext (+ SuperAdmin)）が完成する状態を作る。本 task は HTTP
+  層の純粋な配線のみで実 DB / 実 auth は触らない（auth スタブ default deny の物理化）。
+- **重要な判断**
+  - **TenantContextMiddleware が 401 を直接返す**: design.md L595（「tenant_id を持た
+    ないリクエストが `/api/...` に到達した場合 401 を返す」）の invariant を、本 task の
+    認証スタブ default deny 状態下で物理化するため、claims 不在のときは TenantContext を
+    確立せず `*errors.Error{Code: CodeUnauthenticated}` を WriteHTTP に渡して chain を
+    終端する設計にした。auth-stub を別 middleware に切り出さなかった理由は、本 Issue
+    では auth 実装本体が無く「claims 注入アダプタ」と「401 返却」の責務を分離する
+    必然性が薄いため。後続 Issue で OIDC verifier が実装された段階で auth-stub を
+    別 middleware（CodeUnauthenticated を返す責務）に分離し、TenantContextMiddleware は
+    claims → TenantContext 変換アダプタに純化する想定。
+  - **chi の subrouter middleware bypass を catch-all で回避**: chi v5 の `Mount` は
+    subrouter 内に matched route が無いと middleware を起動せず 404 を直接返す挙動
+    （内部実装の path-tree 上の制約）。本 Issue では `/api/*` `/api/admin/*` 配下に
+    domain handler が空のため、そのままでは middleware chain が起動せず auth スタブ
+    default deny の 401 / 403 が発火しない（404 で返る）。これを回避するため、各
+    subrouter に `r.HandleFunc("/*", notFoundHandler)` を catch-all として登録し、
+    chi の route matching が常に subrouter にマッチする状態を確保した。後続 Issue で
+    specific route が Mount されると、chi の path-tree 上で specific route が優先
+    マッチするため catch-all は通らない（後方互換）。
+  - **authClaims 型を package-private に保持**: design.md L582-585 は「auth middleware が
+    `*authClaims` を request ctx に注入する」入力契約のみを規定し、本 Issue では auth
+    middleware 本体を実装しない。`authClaims` 型と `withAuthClaims` / `authClaimsFromContext`
+    helper を `httpserver` package の private 型として保持し、外部 package からは
+    注入できない default deny 状態を物理的に成立させる。後続 Issue で `internal/auth`
+    package が切り出された段階で本型を public 化し、auth middleware から claims を
+    注入する経路を作る想定。
+  - **Recoverer の payload 型分岐**: task 2 申し送り通り `recover()` の値が `*errors.Error`
+    なら `WriteHTTP` に直接渡し、それ以外（string / 標準 error / 任意の値）は
+    `panicToError` で error 化したうえ CodeInternal で wrap してから WriteHTTP に渡す。
+    `defer errors.ClearWriter(w)` を Recoverer の最外側に置き、panic 経路でも通常終了
+    経路でも sentinel リークが起きないようにした（task 1 申し送り遵守）。
+  - **/readyz が pool=nil で 503 を返す**: cmd/api bootstrap 失敗で pool 未配線の防御
+    経路として、`pool == nil` でも panic せず 503 "not ready" を返す設計にした。本 Issue
+    のスコープでは cmd/api 配線（task 5.1）が未実装のため、unit test では pool=nil
+    経路で /readyz の応答パターンを verify する。実 DB Ping 経路の verify は task 6.1
+    の integration test に委譲する。
+  - **ReadHeaderTimeout=10s を必ず設定**: net/http の default は無限大で slowloris 攻撃
+    に脆弱になるため、cfg からの env 注入を待たずに 10s をハードコードで付与した。
+    後続 Issue で env 化（`HTTP_READ_HEADER_TIMEOUT_SEC` 等）する余地はあるが、セキュア
+    デフォルトの方が優先度が高いと判断。
+- **残存課題（次 task への申し送り）**
+  - **task 5.1（cmd/api bootstrap）への申し送り**: `httpserver.NewServer(cfg, log, pool)` の
+    シグネチャは `(*http.Server, Routers, error)`。bootstrap 側は `*http.Server` を
+    `ListenAndServe()` し、`Routers` は後続 Issue が `Mount` するため本 Issue 範囲では
+    捨ててよい（`_ = routers`）。`/healthz` `/readyz` は本パッケージで提供するため、
+    `cmd/api/main.go` 既存の `mux.HandleFunc("/healthz", ...)` は撤去すること。
+    `-healthcheck` サブコマンドの内部 HTTP GET 先 `http://127.0.0.1:8080/healthz` は
+    本 task の `/healthz` 200 応答と整合するため変更不要。
+  - **task 5.2（depspin 整理）への申し送り**: 本 task で `github.com/go-chi/chi/v5` の
+    実利用が開始したため、`internal/depspin/depspin.go` の chi blank import は削除可能
+    （tasks.md 5.2 詳細項目通り）。
+  - **後続 Issue の auth middleware 配線**: `internal/auth` package を切り出した段階で、
+    `httpserver.authClaims` を `internal/auth.Claims` に rename し、`authClaimsCtxKey` を
+    auth package に移して public 化する。auth middleware は `r.Use(authStub(log))` を
+    `r.Mount("/api", ...)` の前段（root chain の TenantContextMiddleware より前）に
+    挿入し、OIDC 検証成功時に claims を ctx に注入する。本 task の TenantContextMiddleware
+    は claims → TenantContext 変換アダプタとして互換維持。
+  - **テナント越境隠蔽 404 化**: `notFoundHandler` が `internalerrors.WriteHTTP` 経由で
+    JSON body を返す経路を確立済み。後続 Issue の domain handler が「他テナント resource
+    の存在を 404 で隠蔽」する際は、同 helper（`internalerrors.WriteHTTP(w, r, errors.New(
+    CodeNotFound, "not found"), log)`）を呼ぶことで応答フォーマットを統一できる。
+  - **AC Traceability テーブルの更新は本 Issue 完了時の Implementer が行う**: 本 task は
+    Req 5.1 / 5.2 / 5.4 / 5.5 / 5.6 をカバーする。Req 5.3 は `r.Mount("/api/admin", ...)` /
+    `r.Mount("/api", ...)` の 2 サブルータ並列 Mount で物理化済み。テーブル更新は
+    task 6.1 の integration test 完了後の取りまとめで一括反映する。
+
 ## AC Traceability（Req 1 / 2 / 3 / 4 / NFR 1.1 部分）
 
 | Requirement | テスト |
