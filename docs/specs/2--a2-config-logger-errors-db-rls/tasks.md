@@ -250,7 +250,7 @@
   - _Requirements: 4.5, 5.5, 6.3, 6.4, 7.1, 7.2, 7.3, 7.4, NFR 1.1, NFR 1.2_
   - _Boundary: TxManager, RLSHelper, HTTPServer, AdminRouteGuard, Migrations_
   - _Depends: 3.4, 4.1, 5.2_
-- [ ] 6.2 マイグレーション可逆性テスト
+- [x] 6.2 マイグレーション可逆性テスト
   - `backend/test/integration/migrations_reversible_test.go` を新規追加。`make migrate-up` 相当 →
     `make migrate-down` 相当を Go テスト側で実行し、(a) down 後に主要テーブルが消失する、
     (b) 再度 up すると同じ最終状態に到達する（NFR 2.1）、(c) 2 回目の up が冪等に no-op で
