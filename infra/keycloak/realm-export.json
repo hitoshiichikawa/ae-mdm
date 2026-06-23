@@ -1,0 +1,128 @@
+{
+  "realm": "ae-mdm",
+  "enabled": true,
+  "displayName": "ae-mdm Dev Realm",
+  "sslRequired": "none",
+  "registrationAllowed": false,
+  "loginWithEmailAllowed": true,
+  "duplicateEmailsAllowed": false,
+  "resetPasswordAllowed": true,
+  "editUsernameAllowed": false,
+  "bruteForceProtected": true,
+  "accessTokenLifespan": 1800,
+  "ssoSessionIdleTimeout": 1800,
+  "ssoSessionMaxLifespan": 28800,
+  "roles": {
+    "realm": [
+      {
+        "name": "SuperAdmin",
+        "description": "SaaS 運用者ロール。テナント作成・全テナント横断監査ログ閲覧。admin-console 専用",
+        "composite": false,
+        "clientRole": false,
+        "containerId": "ae-mdm"
+      },
+      {
+        "name": "TenantAdmin",
+        "description": "テナント管理者ロール。自テナントの全操作（WIPE 含む）・ロール変更",
+        "composite": false,
+        "clientRole": false,
+        "containerId": "ae-mdm"
+      },
+      {
+        "name": "Operator",
+        "description": "オペレータロール。LOCK / REBOOT 発行可能、WIPE 不可、ポリシー read-only",
+        "composite": false,
+        "clientRole": false,
+        "containerId": "ae-mdm"
+      },
+      {
+        "name": "Viewer",
+        "description": "閲覧専用ロール。全操作 read-only",
+        "composite": false,
+        "clientRole": false,
+        "containerId": "ae-mdm"
+      }
+    ]
+  },
+  "groups": [
+    {
+      "name": "SuperAdmin",
+      "path": "/SuperAdmin",
+      "realmRoles": ["SuperAdmin"]
+    },
+    {
+      "name": "TenantAdmin",
+      "path": "/TenantAdmin",
+      "realmRoles": ["TenantAdmin"]
+    },
+    {
+      "name": "Operator",
+      "path": "/Operator",
+      "realmRoles": ["Operator"]
+    },
+    {
+      "name": "Viewer",
+      "path": "/Viewer",
+      "realmRoles": ["Viewer"]
+    }
+  ],
+  "clients": [
+    {
+      "clientId": "tenant-console",
+      "name": "ae-mdm Tenant Console (顧客 IT 管理者向け SPA)",
+      "description": "TenantAdmin / Operator / Viewer 向けの SPA。PKCE による Public Client。",
+      "enabled": true,
+      "publicClient": true,
+      "standardFlowEnabled": true,
+      "implicitFlowEnabled": false,
+      "directAccessGrantsEnabled": false,
+      "serviceAccountsEnabled": false,
+      "frontchannelLogout": true,
+      "rootUrl": "http://localhost:5173",
+      "baseUrl": "http://localhost:5173/",
+      "redirectUris": [
+        "http://localhost:5173/*",
+        "http://tenant-console/*"
+      ],
+      "webOrigins": [
+        "http://localhost:5173",
+        "+"
+      ],
+      "attributes": {
+        "pkce.code.challenge.method": "S256",
+        "post.logout.redirect.uris": "http://localhost:5173/*"
+      },
+      "defaultClientScopes": ["web-origins", "profile", "roles", "email"],
+      "optionalClientScopes": ["address", "phone", "offline_access", "microprofile-jwt"]
+    },
+    {
+      "clientId": "admin-console",
+      "name": "ae-mdm Admin Console (SaaS 運用者向け SPA)",
+      "description": "SuperAdmin 専用 SPA。PKCE による Public Client。tenant-console とは aud / redirect URI が分離されている（NFR 2.1）。",
+      "enabled": true,
+      "publicClient": true,
+      "standardFlowEnabled": true,
+      "implicitFlowEnabled": false,
+      "directAccessGrantsEnabled": false,
+      "serviceAccountsEnabled": false,
+      "frontchannelLogout": true,
+      "rootUrl": "http://localhost:5174",
+      "baseUrl": "http://localhost:5174/",
+      "redirectUris": [
+        "http://localhost:5174/*",
+        "http://admin-console/*"
+      ],
+      "webOrigins": [
+        "http://localhost:5174",
+        "+"
+      ],
+      "attributes": {
+        "pkce.code.challenge.method": "S256",
+        "post.logout.redirect.uris": "http://localhost:5174/*"
+      },
+      "defaultClientScopes": ["web-origins", "profile", "roles", "email"],
+      "optionalClientScopes": ["address", "phone", "offline_access", "microprofile-jwt"]
+    }
+  ],
+  "users": []
+}

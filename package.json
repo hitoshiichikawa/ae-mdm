@@ -1,0 +1,21 @@
+{
+  "name": "ae-mdm",
+  "private": true,
+  "version": "0.0.0",
+  "description": "Android Enterprise EMM SaaS (ae-mdm) workspace root. See docs/specs/24-android-enterprise-emm-mvp/.",
+  "workspaces": [
+    "frontend/shared",
+    "frontend/tenant-console",
+    "frontend/admin-console"
+  ],
+  "scripts": {
+    "build": "npm run build --workspaces --if-present",
+    "lint": "npm run lint --workspaces --if-present",
+    "test": "npm run test --workspaces --if-present",
+    "build:tenant": "npm run build --workspace=@ae-mdm/tenant-console",
+    "build:admin": "npm run build --workspace=@ae-mdm/admin-console"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  }
+}
