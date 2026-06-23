@@ -230,8 +230,15 @@ backend/
   golang-migrate, zap, coreos-go-oidc）の blank import を **削除**。残る blank import は
   `cloud.google.com/go/pubsub` `google.golang.org/api/androidmanagement/v1` の 2 件のみ
   （後続 Issue で消える前提のコメントを更新）
-- `.env.example` — **編集なし**（#1 で全 placeholder を網羅済み。`AUDIT_LOG_RETENTION_DAYS` /
-  `DEVICE_SYNC_DELAY_THRESHOLD_HOURS` は config 構造体側から参照する）
+- `.env.example` — **編集あり**（Req 6.5 の DDL/app ロール分離を MVP スコープに含めた契約変更に
+  伴い）:
+  - `DATABASE_URL` の user 部分を `ae_mdm` → `app_user` に変更（RLS バインド・`audit_logs` の
+    UPDATE/DELETE が REVOKE 済の DML 用ロール）
+  - `MIGRATE_DATABASE_URL` の user 部分を `ae_mdm` → `migration_user` に変更（DDL 用ロール）
+  - 当該 2 ロールは `backend/db/roles/0001_create_app_and_migration_roles.sql` で定義され、
+    `make db-init-roles` でセットアップする旨を `.env.example` 冒頭コメントに追記
+  - 上記以外の placeholder（`AUDIT_LOG_RETENTION_DAYS` / `DEVICE_SYNC_DELAY_THRESHOLD_HOURS` 等）は
+    #1 で網羅済みのため本 Issue では編集しない
 - `docker-compose.yml` — **編集なし**（migrate は host 側 `make migrate-up` で実行。compose に
   one-shot migrate job を追加するかは本 Issue では見送り。後述「リスク・トレードオフ」参照）
 
@@ -358,11 +365,17 @@ func Load() (Config, error)
 **Responsibilities & Constraints**
 - 主責務: `NewLogger(cfg)` で zap.Logger を構築。`WithRequest(reqID)`, `WithTenant(tenantID)`,
   `WithMessageID(msgID)`, `WithActor(adminUserID)` の helper を提供
-- ドメイン境界: config だけに依存。db / errors は logger を呼ぶ側
+- ドメイン境界: config だけに依存。**`internal/logger` は `internal/errors` を import する**
+  （`Err(err error) Field` ヘルパで `*errors.Error` の Code/Message/Cause を構造化するため）。
+  逆方向（errors → logger）は **禁止**。これにより Go の import cycle を物理的に回避する
 - データ所有権: 当該 process の global default logger（必要に応じて）と、context 経由で渡される
   per-request logger
-- Invariants: 機密キー（session_secret / id_token / refresh_token / google sa json / cookie 値）は
-  field 名・値の両側で redaction される
+- Invariants:
+  - 機密キー（session_secret / id_token / refresh_token / google sa json / cookie 値）は
+    field 名・値の両側で redaction される
+  - `Logger` interface の `Warn` / `Error` メソッドは **`errors.ErrLogger` interface を暗黙的に
+    満たすシグネチャ**（`func(msg string, fields ...any)`）として定義する。これにより
+    errors.WriteHTTP に `logger.Logger` をそのまま渡せる（structural typing）
 
 **Dependencies**
 - Inbound: 全 internal package（logger は横断的）, cmd/api, cmd/worker (Critical)
@@ -375,16 +388,20 @@ func Load() (Config, error)
 
 ```go
 // Logger は process 内で使用する構造化ログのインタフェース。
+// Warn / Error のシグネチャは `errors.ErrLogger` と一致させてあり、structural typing で
+// errors.WriteHTTP に直接渡せる（cycle 回避のため errors → logger の直接依存は持たない）。
 type Logger interface {
-    Debug(msg string, fields ...Field)
-    Info(msg string, fields ...Field)
-    Warn(msg string, fields ...Field)
-    Error(msg string, fields ...Field)
-    With(fields ...Field) Logger
+    Debug(msg string, fields ...any)
+    Info(msg string, fields ...any)
+    Warn(msg string, fields ...any)
+    Error(msg string, fields ...any)
+    With(fields ...any) Logger
     Sync() error
 }
 
-// Field は logger ヘルパ生成用の薄いラッパ。
+// Field は logger ヘルパ生成用の薄いラッパ。helper の戻り値型として保持し、
+// Logger 各メソッドの可変長引数 (...any) に渡される際に内部で zap.Field として
+// type-switch される。
 type Field = zap.Field
 
 // 標準的な field ヘルパ。
@@ -416,7 +433,12 @@ func WithContext(ctx context.Context, l Logger) context.Context
 **Responsibilities & Constraints**
 - 主責務: `Error{Code, Message, Cause, HTTPStatus, IsTransient}` を提供。`WriteHTTP(w, r, err, log)`
   で HTTP ハンドラの最外層から呼ぶと、Code に応じた status と JSON body を返す
-- ドメイン境界: 全 internal package が import 可。逆方向の参照（errors → domain）は禁止
+- ドメイン境界: 全 internal package が import 可。**`internal/errors` は他の internal package を
+  import しない**（特に `internal/logger` を import しない / Go の import cycle を物理的に回避）
+- 依存解消の方針: `WriteHTTP` の `log` 引数は **`errors` パッケージ内で定義する極小 interface
+  `ErrLogger`**（後述 Service Interface 節）として受け取る。`logger.Logger` の具象実装は本
+  interface を **暗黙的に**満たす（Go の structural typing）ため、呼び出し側（HTTP ハンドラ /
+  middleware）が `logger.Logger` を渡すだけで配線が完結する
 - データ所有権: Code 定数（`invalid_request` / `unauthenticated` / `forbidden` / `not_found` /
   `conflict` / `business_rule_violation` / `internal_error` / `amapi_upstream_error` /
   `service_unavailable` / `config_invalid` / `tenant_context_missing`）
@@ -425,7 +447,7 @@ func WithContext(ctx context.Context, l Logger) context.Context
 
 **Dependencies**
 - Inbound: 全 internal package, cmd/api, cmd/worker (Critical)
-- Outbound: logger（WriteHTTP の中で）
+- Outbound: **なし**（logger には依存しない。`ErrLogger` interface 経由で呼び出し側から注入される）
 - External: なし
 
 **Contracts**: Service [x] / API [ ] / Event [ ] / Batch [ ] / State [ ]
@@ -463,9 +485,17 @@ func Wrap(code Code, message string, cause error) *Error
 func (e *Error) Error() string
 func (e *Error) Unwrap() error
 
+// ErrLogger は WriteHTTP がエラー記録に使う極小 interface。
+// internal/errors は logger を import しない（import cycle 回避）。
+// internal/logger.Logger の具象実装は本 interface を暗黙的に満たす（structural typing）。
+type ErrLogger interface {
+    Warn(msg string, fields ...any)
+    Error(msg string, fields ...any)
+}
+
 // WriteHTTP は HTTP ハンドラ最外層で err を JSON 応答に変換し、必要なら ERROR ログを出す。
 // err が *Error でない場合は CodeInternal として包む。
-func WriteHTTP(w http.ResponseWriter, r *http.Request, err error, log logger.Logger)
+func WriteHTTP(w http.ResponseWriter, r *http.Request, err error, log ErrLogger)
 ```
 
 - Preconditions: w が未書込みの ResponseWriter であること

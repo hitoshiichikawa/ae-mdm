@@ -129,10 +129,14 @@
     別系統で適用）であることを冒頭コメントに明記
   - _Requirements: 6.5, 7.1, 7.2, 7.3, 7.4_
   - _Depends: 3.2_
-- [ ] 3.4 Makefile target と runbook 整備
+- [ ] 3.4 Makefile target / runbook / `.env.example` の整備
   - リポジトリルートの `Makefile` に `migrate-up` / `migrate-down` / `db-init-roles` の 3 target
     を追加（`golang-migrate` CLI を `go run -modfile=...` または別途インストール手順を採る
     かは Developer に委ねるが、`MIGRATE_DATABASE_URL` → `DATABASE_URL` の fallback を実装する）
+  - `.env.example` の `DATABASE_URL` を `app_user`、`MIGRATE_DATABASE_URL` を `migration_user` に
+    変更（design.md 「Modified Files」節と整合）。冒頭コメントに「2 ロールは
+    `backend/db/roles/0001_create_app_and_migration_roles.sql` で定義し、`make db-init-roles` で
+    セットアップする」旨を追記
   - `docs/runbook/local-dev.md`（新規）に「(1) `cp .env.example .env` → (2) `docker compose up
     -d postgres` → (3) `make db-init-roles` → (4) `make migrate-up`」の順を明記
   - _Requirements: 6.5, NFR 2.1, NFR 2.2, NFR 3.1_
@@ -164,9 +168,13 @@
     後続 Issue 用に返す
   - `middleware_test.go` / `admin_middleware_test.go` / `server_test.go` に以下のユニットテスト:
     (a) recover middleware が panic を 500 化、(b) request_id が応答ヘッダに乗る、
-    (c) `/healthz` `/readyz` が認証なしで 200 を返す、(d) `/api/admin/*` が default で 403、
-    (e) `/api/admin/*` で TenantContext を put したテスト用 router で IsSuperAdmin=true なら
-    next handler 到達、(f) `/api/*` 配下で TenantContext 未確立時の 401 化
+    (c) `/healthz` `/readyz` が認証なしで 200 を返す、(d) `/api/admin/*` に **TenantContext 未確立**
+    （auth スタブが claims を ctx に注入しない default 状態）で到達すると `RequireSuperAdmin` が
+    **401** を返す（同 middleware の TenantContext 不在 = 401 の契約 / 本タスク詳細項目の
+    `admin_middleware.go` 仕様と整合）、(e) `/api/admin/*` で TenantContext を put したテスト用
+    router で IsSuperAdmin=false なら **403** を返す（SuperAdmin ガード本来の 403 経路）、
+    (f) `/api/admin/*` で TenantContext を put して IsSuperAdmin=true なら next handler 到達、
+    (g) `/api/*` 配下で TenantContext 未確立時の 401 化
   - _Requirements: 5.1, 5.2, 5.3, 5.4, 5.5, 5.6_
   - _Boundary: HTTPServer, TenantContextMiddleware, AdminRouteGuard, MiddlewareChain_
   - _Depends: 1.2, 1.3, 2.2_
@@ -234,11 +242,12 @@
 ## Verify
 
 本 spec の実装後、watcher（stage-a-verify gate）が再実行すべき verify コマンドを構造化ブロックで宣言する。
-PostgreSQL を要する integration test（`backend/test/integration/...`）は CI 環境に DB が無い場合
-当該テスト内で skip される前提のため、本ブロックでは `go build` `go vet` `go test ./...` で
-build と純粋ロジックの test を verify する（test ファイル自身が DB 不在を判定して skip）。
+integration test（`backend/test/integration/...`）は Req 6 / 7 / NFR 1 / NFR 2 の受入基準を担う
+唯一の検証経路のため、**verify 対象に含める**。CI / ローカルで `DATABASE_URL` 接続が確立できない
+場合は各 integration test が自身で `t.Skip` する設計（`tasks.md` 6.1 / 6.2 詳細参照）であり、
+DB 不在の環境でも verify は false-fail しない。
 
 <!-- stage-a-verify -->
 ```sh
-cd backend && go build ./... && go vet ./... && go test ./internal/...
+cd backend && go build ./... && go vet ./... && go test ./...
 ```
