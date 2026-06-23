@@ -1,0 +1,173 @@
+name: 機能要望・改善（idd-claude 自動開発）
+description: Claude Code に自動開発を依頼する Issue テンプレート。PM エージェントが誤解なくキャッチできる順序で質問を並べています
+title: ""
+labels: ["auto-dev"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        ## このテンプレートを使うと何が起きるか
+
+        1. `auto-dev` ラベルが自動で付きます
+        2. 数分以内に idd-claude の Product Manager (PM) エージェントが Triage（要件精査 + モード判定）
+        3. 以下のいずれかに分岐:
+           - **impl モード**: PM → Developer → PjM が実装 PR を作成（~10〜30 分）
+           - **design モード**: PM → Architect → PjM が設計 PR を作成（人間レビュー後に実装 PR）
+           - **needs-decisions**: 判断が必要な論点を Issue コメントで質問、人間の回答待ち
+
+        ## PM に誤解されないコツ
+
+        - **問題（WHY）を先に書く**。解決策（HOW）は最後の任意フィールドに。PM は問題を起点に最善の解を探すので、解決策先行で書くと書かれた案に引きずられがち
+        - **観察可能な結果で書く**。「〜を実装する」ではなく「〜という操作でこう返る／こう見える」。ユーザや呼び出し側の視点で書くと受入基準の粒度が揃います
+        - **迷ったら「判断を委ねたい点」に書く**。PM に推測させるより、`needs-decisions` でエスカレーションして一緒に決めた方が安全で速い
+
+        ---
+
+  - type: dropdown
+    id: kind
+    attributes:
+      label: 種別
+      description: Issue の性質。PM のアプローチが種別で変わります
+      options:
+        - 機能追加（新規）
+        - 既存機能の拡張・改善
+        - 不具合修正
+        - リファクタ・技術債返済
+        - 仕様変更（既存挙動の置き換え）
+        - ドキュメント更新
+    validations:
+      required: true
+
+  - type: textarea
+    id: background
+    attributes:
+      label: 背景・課題（なぜ必要か）
+      description: |
+        解決したい問題・困りごとを書いてください。**解決策ではなく問題を書く**のがコツ。
+        具体的な事象・数値・頻度があると PM の精度が上がります
+      placeholder: |
+        例（悪い書き方・解決策先行）:
+        - 「issue-watcher.sh で PATH を export するようにしたい」
+
+        例（良い書き方・問題先行）:
+        - cron から watcher が起動されると `claude が見つかりません` エラーで全 Issue が処理されない状態
+        - 過去 3 日間、毎 2 分のログに同じエラーが 1000 件以上記録
+        - 結果として dogfooding 運用が停止している
+    validations:
+      required: true
+
+  - type: textarea
+    id: current-behavior
+    attributes:
+      label: 現状の挙動（不具合修正 / 既存機能変更の場合は必須）
+      description: |
+        今どう動いているか。再現手順・ログ・エラーメッセージを添えられるとなお良い
+      placeholder: |
+        例:
+        - `issue-watcher.sh` 冒頭の `command -v claude` が失敗し exit 1 で終了
+        - cron.log: "Error: claude が見つかりません。PATH を確認してください。"
+        - 再現: `env -i HOME=$HOME PATH=/usr/bin:/bin $HOME/bin/issue-watcher.sh`
+
+  - type: textarea
+    id: expected-behavior
+    attributes:
+      label: 期待する挙動・ゴール
+      description: |
+        完了したらどうなっていて欲しいか、**ユーザや呼び出し側から見た観察可能な結果**で書いてください。
+        「内部をこう実装すべき」ではなく「この操作でこうなる」の粒度で
+      placeholder: |
+        例:
+        - cron から起動した watcher でも `claude` / `gh` / `jq` 等の依存が解決される
+        - cron.log に PATH 関連エラーが出なくなる
+        - 標準インストール先以外に `claude` がある場合のワークアラウンドが README に書かれている
+    validations:
+      required: true
+
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: 受入基準の候補
+      description: |
+        箇条書きでも Given/When/Then でも OK。PM が EARS 形式（`When ..., the system shall ...`）に整形します。
+        **「この条件を満たせば完了」**と言えるレベルで具体的に
+      placeholder: |
+        例:
+        - 最小 PATH 環境（`/usr/bin:/bin`）で起動しても依存が解決される
+        - 既存の cron/launchd エントリを変更せず動作する
+        - README のトラブルシューティング節が現状を反映している
+        - 後方互換性: 既存 env var 名・ラベル名・exit code を変えない
+    validations:
+      required: true
+
+  - type: textarea
+    id: out-of-scope
+    attributes:
+      label: スコープ外（今回は含めたくないこと）
+      description: 「ついでにやって欲しくない」ことを書くと scope creep 予防になります
+      placeholder: |
+        例:
+        - systemd timer 等、cron 以外の起動経路対応
+        - 新しい依存コマンド（`yq` 等）の追加
+        - GUI/TUI 化
+
+  - type: textarea
+    id: affected-areas
+    attributes:
+      label: 影響範囲のヒント（任意）
+      description: |
+        触りそうなファイル・モジュール・機能。PM が規模感を測るのに使います。
+        不明なら空欄で OK
+      placeholder: |
+        例:
+        - `local-watcher/bin/issue-watcher.sh` の冒頭
+        - `README.md` のトラブルシューティング節
+
+  - type: textarea
+    id: constraints
+    attributes:
+      label: 制約・非機能要件（任意）
+      description: |
+        明示しないと壊されがちなもの: 後方互換性 / 性能 / セキュリティ / コーディング規約 / 依存制限 / デプロイ要件
+      placeholder: |
+        例:
+        - 既に稼働中の cron/launchd 登録文字列を壊さない
+        - env var 名（`REPO`, `REPO_DIR` 等）を変えない
+        - root 権限を要求する手順を追加しない（ユーザースコープ前提）
+
+  - type: textarea
+    id: references
+    attributes:
+      label: 参考資料（任意）
+      description: 関連 Issue / PR / 外部 URL / スクリーンショット / ログ抜粋
+      placeholder: |
+        例:
+        - 関連 PR: #11
+        - cron.log 抜粋（Gist 等）: https://...
+        - 外部ドキュメント: https://...
+
+  - type: textarea
+    id: proposed-solution
+    attributes:
+      label: 仮案・判断を委ねたい点（任意）
+      description: |
+        - **仮案**: 思いつく解決案があれば（commit ではない参考。PM が別案を出すこともある）
+        - **判断を委ねたい点**: 決めきれない選択肢があれば「どう迷っているか」を書く。
+          PM が `needs-decisions` ラベルを付けて人間エスカレーションしてから実装に入ります
+      placeholder: |
+        例:
+        - 仮案A: crontab の先頭に PATH 記述（repo 変更不要、全ユーザ周知が必要）
+        - 仮案B: スクリプト冒頭で PATH prepend（repo 1 ファイル変更で完結）
+        - 判断を委ねたい点: launchd は plist の EnvironmentVariables で済む。
+          スクリプト側で統一する vs 起動方式ごとに分ける、迷っている
+
+  - type: dropdown
+    id: priority
+    attributes:
+      label: 優先度
+      description: 参考値。実際の着手順は依存関係と in-flight 状況で PjM が判断します
+      options:
+        - High（数日以内）
+        - Mid（今スプリント内）
+        - Low（時間があれば）
+    validations:
+      required: true
