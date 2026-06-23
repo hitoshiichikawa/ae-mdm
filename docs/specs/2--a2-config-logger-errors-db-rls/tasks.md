@@ -153,7 +153,7 @@
   - _Depends: 3.3_
 
 - [ ] 4. HTTP サブルータ + middleware chain
-- [ ] 4.1 chi router + 2 サブルータ mount + middleware chain
+- [x] 4.1 chi router + 2 サブルータ mount + middleware chain
   - `backend/internal/platform/httpserver/middleware.go` に recover / request_id（uuid v4）/
     structured access log（method / path / status / duration / request_id / tenant_id を field
     化）を実装。panic を recover した場合 `errors.WriteHTTP` 経由で 500 を返し ERROR ログを
