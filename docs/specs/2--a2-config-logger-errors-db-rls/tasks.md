@@ -190,7 +190,7 @@
   - _Depends: 1.2, 1.3, 2.2_
 
 - [ ] 5. cmd/api / cmd/worker / depspin のリプレース
-- [ ] 5.1 cmd/api を bootstrap に置換
+- [x] 5.1 cmd/api を bootstrap に置換
   - `backend/cmd/api/main.go` の `net/http.ServeMux` 実装を撤去し、`config.Load()` →
     `logger.NewLogger(cfg)` → `db.NewPool(ctx, cfg)` → `httpserver.NewServer(cfg, log, pool)` →
     `srv.ListenAndServe()` → SIGTERM で graceful shutdown（5s）の bootstrap に置換。`/healthz`
