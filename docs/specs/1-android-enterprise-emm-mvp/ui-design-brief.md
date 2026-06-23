@@ -138,6 +138,8 @@
 
 ## 7. 画面別仕様
 
+> **実装済みデザイン**: 各画面の HTML は `docs/design/{tenant-console,admin-console}/` に配置済み（対応表 [docs/design/README.md](../../design/README.md) / トークン [docs/design/design-system.md](../../design/design-system.md)）。実装時は React + shadcn/ui へ移植する。
+
 各ブロックを 1 画面ずつ Claude Design に渡す。書式: **目的 / 主要データ / 主要アクション / ロール可視性 / 状態 / 構成要素 / 制約**。
 
 ### 7.1 ログイン / コールバック（`auth`）— Req 2 / NFR 5

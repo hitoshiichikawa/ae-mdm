@@ -1,0 +1,433 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Noto+Sans+JP:wght@400;500;700&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+  :root{
+    --bg:#ffffff; --surface:#f7f8fa; --surface-2:#eef0f4; --elevated:#ffffff;
+    --border:#e4e7ec; --border-strong:#d3d8e0;
+    --text:#1b1f27; --text-secondary:#5a616e; --text-muted:#8a909c;
+    --primary:#4f46e5; --primary-hover:#4338ca; --primary-fg:#ffffff; --primary-bg:#eef0fe; --primary-border:#c9cdfa;
+    --success:#16a34a; --success-bg:#e8f6ed; --success-fg:#15803d; --success-border:#bfe6cc;
+    --danger:#dc2626; --danger-bg:#fdeaea; --danger-fg:#b91c1c; --danger-border:#f5c6c6;
+    --warning:#d97706; --warning-bg:#fdf2e0; --warning-fg:#b45309; --warning-border:#f2dbab;
+    --neutral:#6b7280; --neutral-bg:#eef0f3; --neutral-fg:#4b5563; --neutral-border:#dde1e7;
+    --info:#2563eb; --info-bg:#e8f0fe; --info-fg:#1d4ed8; --info-border:#c3d6fb;
+    --purple:#7c3aed; --purple-bg:#f1ebfd; --purple-fg:#6d28d9; --purple-border:#ddcdfa;
+    --pale-bg:#f3f4f6; --pale-fg:#9ca3af; --pale-border:#e6e8ec;
+    --shadow:0 1px 2px rgba(16,20,30,.04), 0 1px 3px rgba(16,20,30,.06);
+    --shadow-pop:0 4px 16px rgba(16,20,30,.12), 0 1px 3px rgba(16,20,30,.08);
+  }
+  :root[data-theme="dark"]{
+    --bg:#0d1017; --surface:#151922; --surface-2:#1b212c; --elevated:#171c25;
+    --border:#262d3a; --border-strong:#323a49;
+    --text:#e7eaf0; --text-secondary:#9aa2b1; --text-muted:#6b7480;
+    --primary:#6366f1; --primary-hover:#7c80f7; --primary-fg:#ffffff; --primary-bg:rgba(99,102,241,.16); --primary-border:rgba(99,102,241,.42);
+    --success:#22c55e; --success-bg:rgba(34,197,94,.14); --success-fg:#4ade80; --success-border:rgba(34,197,94,.32);
+    --danger:#ef4444; --danger-bg:rgba(239,68,68,.14); --danger-fg:#f87171; --danger-border:rgba(239,68,68,.34);
+    --warning:#f59e0b; --warning-bg:rgba(245,158,11,.14); --warning-fg:#fbbf24; --warning-border:rgba(245,158,11,.32);
+    --neutral:#94a3b8; --neutral-bg:rgba(148,163,184,.14); --neutral-fg:#cbd5e1; --neutral-border:rgba(148,163,184,.26);
+    --info:#3b82f6; --info-bg:rgba(59,130,246,.16); --info-fg:#60a5fa; --info-border:rgba(59,130,246,.34);
+    --purple:#8b5cf6; --purple-bg:rgba(139,92,246,.16); --purple-fg:#a78bfa; --purple-border:rgba(139,92,246,.34);
+    --pale-bg:rgba(148,163,184,.07); --pale-fg:#7b8494; --pale-border:rgba(148,163,184,.16);
+    --shadow:0 1px 2px rgba(0,0,0,.4); --shadow-pop:0 8px 28px rgba(0,0,0,.55);
+  }
+  *{box-sizing:border-box;}
+  body{margin:0; background:var(--bg); color:var(--text); font-family:"Noto Sans JP", system-ui, sans-serif; font-size:14px; line-height:1.45; -webkit-font-smoothing:antialiased; font-feature-settings:"palt"; transition:background .18s ease, color .18s ease;}
+  ::selection{background:var(--primary-bg);}
+  @keyframes shimmer{0%{background-position:-180% 0;}100%{background-position:180% 0;}}
+  @keyframes spin{to{transform:rotate(360deg);}}
+</style>
+</helmet>
+
+<div style="display:flex; min-height:100vh; background:var(--bg);">
+
+  <!-- ============ SIDEBAR ============ -->
+  <aside style="width: {{ sidebarWidth }}; flex:none; background:var(--surface); border-right:1px solid var(--border); display:flex; flex-direction:column; position:sticky; top:0; height:100vh; transition:width .16s ease;">
+    <div style="height:52px; display:flex; align-items:center; gap:10px; padding:0 16px; border-bottom:1px solid var(--border);">
+      <div style="width:26px; height:26px; flex:none; border-radius:7px; background:var(--primary); display:flex; align-items:center; justify-content:center; color:#fff; font-weight:700; font-size:13px;">M</div>
+      <sc-if value="{{ showLabels }}" hint-placeholder-val="{{ true }}"><div style="font-weight:700; font-size:14px; white-space:nowrap;">MobiGuard</div></sc-if>
+    </div>
+    <nav style="flex:1; padding:10px 10px; display:flex; flex-direction:column; gap:2px; overflow-y:auto;">
+      <div style="display:flex; align-items:center; gap:11px; padding:8px 10px; border-radius:8px; color:var(--text-secondary); white-space:nowrap; cursor:pointer;" style-hover="background:var(--surface-2); color:var(--text);">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" style="flex:none;"><rect x="3" y="3" width="7" height="7" rx="1.3"/><rect x="14" y="3" width="7" height="7" rx="1.3"/><rect x="14" y="14" width="7" height="7" rx="1.3"/><rect x="3" y="14" width="7" height="7" rx="1.3"/></svg>
+        <sc-if value="{{ showLabels }}" hint-placeholder-val="{{ true }}"><span>ダッシュボード</span></sc-if>
+      </div>
+      <div style="display:flex; align-items:center; gap:11px; padding:8px 10px; border-radius:8px; color:var(--text-secondary); white-space:nowrap; cursor:pointer;" style-hover="background:var(--surface-2); color:var(--text);">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" style="flex:none;"><rect x="7" y="2.5" width="10" height="19" rx="2.5"/><line x1="10.5" y1="18.4" x2="13.5" y2="18.4"/></svg>
+        <sc-if value="{{ showLabels }}" hint-placeholder-val="{{ true }}"><span>デバイス</span></sc-if>
+      </div>
+      <div style="display:flex; align-items:center; gap:11px; padding:8px 10px; border-radius:8px; color:var(--text-secondary); white-space:nowrap; cursor:pointer;" style-hover="background:var(--surface-2); color:var(--text);">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" style="flex:none;"><path d="M12 3 4.5 6v5c0 4.4 3.2 7.4 7.5 9 4.3-1.6 7.5-4.6 7.5-9V6L12 3Z"/></svg>
+        <sc-if value="{{ showLabels }}" hint-placeholder-val="{{ true }}"><span>ポリシー</span></sc-if>
+      </div>
+      <div style="display:flex; align-items:center; gap:11px; padding:8px 10px; border-radius:8px; color:var(--text-secondary); white-space:nowrap; cursor:pointer;" style-hover="background:var(--surface-2); color:var(--text);">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" style="flex:none;"><rect x="3" y="3" width="7" height="7" rx="1.3"/><rect x="14" y="3" width="7" height="7" rx="1.3"/><rect x="3" y="14" width="7" height="7" rx="1.3"/><path d="M14 14h3v3M21 14v.01M17 21h.01M21 18v3h-3"/></svg>
+        <sc-if value="{{ showLabels }}" hint-placeholder-val="{{ true }}"><span>エンロール</span></sc-if>
+      </div>
+      <div style="display:flex; align-items:center; gap:11px; padding:8px 10px; border-radius:8px; color:var(--text-secondary); white-space:nowrap; cursor:pointer;" style-hover="background:var(--surface-2); color:var(--text);">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" style="flex:none;"><path d="M21 8 12 3 3 8v8l9 5 9-5V8Z"/><path d="m3 8 9 5 9-5M12 13v8"/></svg>
+        <sc-if value="{{ showLabels }}" hint-placeholder-val="{{ true }}"><span>アプリ</span></sc-if>
+      </div>
+      <div style="display:flex; align-items:center; gap:11px; padding:8px 10px; border-radius:8px; background:var(--primary-bg); color:var(--primary); font-weight:500; white-space:nowrap; cursor:pointer;">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" style="flex:none;"><path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8l-5-5Z"/><path d="M14 3v5h5"/><line x1="9" y1="13" x2="15" y2="13"/><line x1="9" y1="17" x2="15" y2="17"/></svg>
+        <sc-if value="{{ showLabels }}" hint-placeholder-val="{{ true }}"><span>監査ログ</span></sc-if>
+      </div>
+      <sc-if value="{{ canSeeAdmins }}" hint-placeholder-val="{{ true }}">
+        <div style="display:flex; align-items:center; gap:11px; padding:8px 10px; border-radius:8px; color:var(--text-secondary); white-space:nowrap; cursor:pointer;" style-hover="background:var(--surface-2); color:var(--text);">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" style="flex:none;"><circle cx="9" cy="8" r="3.1"/><path d="M3.6 20a5.4 5.4 0 0 1 10.8 0"/><path d="M16.2 5.3a3.1 3.1 0 0 1 0 5.4M20.4 20a5.4 5.4 0 0 0-3.9-5.2"/></svg>
+          <sc-if value="{{ showLabels }}" hint-placeholder-val="{{ true }}"><span>管理者</span></sc-if>
+        </div>
+      </sc-if>
+    </nav>
+    <div style="border-top:1px solid var(--border); padding:10px;">
+      <div onClick="{{ toggleCollapse }}" style="display:flex; align-items:center; gap:11px; padding:8px 10px; border-radius:8px; color:var(--text-muted); cursor:pointer; white-space:nowrap;" style-hover="background:var(--surface-2); color:var(--text);">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" style="flex:none;"><rect x="3" y="4" width="18" height="16" rx="2"/><line x1="9" y1="4" x2="9" y2="20"/></svg>
+        <sc-if value="{{ showLabels }}" hint-placeholder-val="{{ true }}"><span>サイドバーを折りたたむ</span></sc-if>
+      </div>
+    </div>
+  </aside>
+
+  <!-- ============ MAIN ============ -->
+  <main style="flex:1; min-width:0; display:flex; flex-direction:column;">
+
+    <!-- TOPBAR -->
+    <header style="height:52px; flex:none; position:sticky; top:0; z-index:30; background:color-mix(in srgb, var(--bg) 88%, transparent); backdrop-filter:blur(8px); border-bottom:1px solid var(--border); display:flex; align-items:center; gap:14px; padding:0 18px;">
+      <div style="display:flex; align-items:center; gap:8px;"><span style="font-weight:700; font-size:14.5px; white-space:nowrap;">監査ログ</span><span style="font-size:12px; color:var(--text-muted);">/audit</span></div>
+      <div style="flex:1;"></div>
+      <button onClick="{{ toggleTheme }}" title="テーマ切替" style="width:32px; height:32px; flex:none; display:flex; align-items:center; justify-content:center; border:1px solid var(--border-strong); border-radius:8px; background:var(--surface); color:var(--text-secondary); cursor:pointer;" style-hover="border-color:var(--primary); color:var(--primary);">{{ themeIcon }}</button>
+      <div style="display:flex; align-items:center; gap:6px;">
+        <span style="font-size:11px; color:var(--text-muted);">ロール</span>
+        <select value="{{ role }}" onChange="{{ onRoleChange }}" style="height:32px; padding:0 8px; border:1px solid var(--border-strong); border-radius:8px; background:var(--surface); color:var(--text); font-size:13px; font-family:inherit; cursor:pointer;">
+          <option value="SuperAdmin">SuperAdmin</option>
+          <option value="TenantAdmin">TenantAdmin</option>
+          <option value="Operator">Operator</option>
+          <option value="Viewer">Viewer</option>
+        </select>
+      </div>
+      <div style="width:1px; height:24px; background:var(--border);"></div>
+      <div style="display:flex; align-items:center; gap:9px; cursor:pointer; padding:3px 4px 3px 6px; border-radius:8px;" style-hover="background:var(--surface-2);">
+        <div style="text-align:right; line-height:1.25;"><div style="font-size:12.5px; font-weight:500;">{{ userEmail }}</div><div style="display:flex; justify-content:flex-end;"><span style="font-size:10px; font-weight:600; padding:1px 6px; border-radius:5px; background: {{ roleBadgeBg }}; color: {{ roleBadgeFg }};">{{ role }}</span></div></div>
+        <div style="width:30px; height:30px; flex:none; border-radius:50%; background:var(--primary); color:#fff; display:flex; align-items:center; justify-content:center; font-size:12px; font-weight:600;">{{ userInitials }}</div>
+      </div>
+    </header>
+
+    <div style="padding:22px 26px 80px;">
+
+      <!-- ===== 403 ===== -->
+      <sc-if value="{{ isDenied }}" hint-placeholder-val="{{ false }}">
+        <div style="border:1px solid var(--border); border-radius:12px; background:var(--elevated); padding:60px 24px; display:flex; flex-direction:column; align-items:center; text-align:center; margin-top:8px;">
+          <div style="width:52px; height:52px; border-radius:13px; background:var(--surface-2); display:flex; align-items:center; justify-content:center; margin-bottom:14px;"><svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="var(--text-secondary)" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="5" y="11" width="14" height="9" rx="2"/><path d="M8 11V8a4 4 0 0 1 8 0v3"/></svg></div>
+          <div style="font-size:12px; font-weight:700; letter-spacing:.06em; color:var(--text-muted); margin-bottom:4px;">403 FORBIDDEN</div>
+          <div style="font-size:16px; font-weight:600; margin-bottom:6px;">監査ログを表示できません</div>
+          <div style="font-size:13px; color:var(--text-secondary); max-width:440px;">監査ログの閲覧には <b style="color:var(--text);">TenantAdmin 以上</b>の権限が必要です。現在のロール（{{ role }}）には表示されません。</div>
+        </div>
+      </sc-if>
+
+      <!-- ===== MAIN ===== -->
+      <sc-if value="{{ canView }}" hint-placeholder-val="{{ true }}">
+        <div>
+          <!-- header -->
+          <div style="display:flex; align-items:flex-start; justify-content:space-between; gap:16px; flex-wrap:wrap; margin-bottom:14px;">
+            <div>
+              <h1 style="margin:0 0 3px; font-size:21px; font-weight:700; letter-spacing:-.01em;">監査ログ</h1>
+              <p style="margin:0; font-size:13px; color:var(--text-secondary);">{{ scopeLabel }}の重要操作の記録。コンプライアンス監査用。</p>
+            </div>
+            <div style="display:flex; align-items:center; gap:14px; flex-wrap:wrap;">
+              <div style="display:flex; align-items:center; gap:6px;">
+                <span style="font-size:11px; color:var(--text-muted);">状態プレビュー</span>
+                <div style="display:inline-flex; padding:2px; background:var(--surface-2); border-radius:8px; gap:2px;">
+                  <button onClick="{{ setList }}" style="height:26px; padding:0 9px; border:none; border-radius:6px; font-family:inherit; font-size:12px; cursor:pointer; background:{{ vList.bg }}; color:{{ vList.fg }}; font-weight:{{ vList.fw }};">一覧</button>
+                  <button onClick="{{ setEmpty }}" style="height:26px; padding:0 9px; border:none; border-radius:6px; font-family:inherit; font-size:12px; cursor:pointer; background:{{ vEmpty.bg }}; color:{{ vEmpty.fg }}; font-weight:{{ vEmpty.fw }};">空</button>
+                  <button onClick="{{ setLoading }}" style="height:26px; padding:0 9px; border:none; border-radius:6px; font-family:inherit; font-size:12px; cursor:pointer; background:{{ vLoad.bg }}; color:{{ vLoad.fg }}; font-weight:{{ vLoad.fw }};">読込中</button>
+                  <button onClick="{{ setError }}" style="height:26px; padding:0 9px; border:none; border-radius:6px; font-family:inherit; font-size:12px; cursor:pointer; background:{{ vError.bg }}; color:{{ vError.fg }}; font-weight:{{ vError.fw }};">エラー</button>
+                </div>
+              </div>
+              <button onClick="{{ onExport }}" style="display:inline-flex; align-items:center; gap:7px; height:36px; padding:0 14px; border:1px solid var(--border-strong); border-radius:8px; background:var(--bg); color:var(--text); font-size:13px; font-weight:500; font-family:inherit; cursor:pointer;" style-hover="border-color:var(--primary); color:var(--primary);">
+                <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v12M7 11l5 4 5-4"/><path d="M5 21h14"/></svg>CSV エクスポート
+              </button>
+            </div>
+          </div>
+
+          <!-- read-only / append-only banner -->
+          <div style="display:flex; align-items:center; gap:9px; padding:9px 13px; border:1px solid var(--border); background:var(--surface); border-radius:9px; margin-bottom:16px;">
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="var(--text-muted)" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="flex:none;"><rect x="5" y="11" width="14" height="9" rx="2"/><path d="M8 11V8a4 4 0 0 1 8 0v3"/></svg>
+            <div style="font-size:12px; color:var(--text-secondary);">監査ログは <b style="color:var(--text);">追記専用（編集・削除不可）</b>です。すべての記録は改ざん防止のため読み取り専用で保持されます。</div>
+          </div>
+
+          <!-- LOADING -->
+          <sc-if value="{{ isLoading }}" hint-placeholder-val="{{ false }}">
+            <div style="border:1px solid var(--border); border-radius:12px; background:var(--elevated); overflow:hidden;">
+              <div style="height:46px; border-bottom:1px solid var(--border); background:var(--surface);"></div>
+              <div style="padding:0 16px;">
+                <sc-for list="{{ skeletonRows }}" as="s" hint-placeholder-count="8">
+                  <div style="display:flex; align-items:center; gap:18px; padding:14px 0; border-bottom:1px solid var(--border);">
+                    <div style="height:11px; width:140px; border-radius:4px; background:linear-gradient(90deg,var(--surface-2) 25%,var(--border) 37%,var(--surface-2) 63%); background-size:200% 100%; animation:shimmer 1.4s ease-in-out infinite;"></div>
+                    <div style="height:11px; width:170px; border-radius:4px; background:linear-gradient(90deg,var(--surface-2) 25%,var(--border) 37%,var(--surface-2) 63%); background-size:200% 100%; animation:shimmer 1.4s ease-in-out infinite;"></div>
+                    <div style="height:11px; width:110px; border-radius:4px; background:linear-gradient(90deg,var(--surface-2) 25%,var(--border) 37%,var(--surface-2) 63%); background-size:200% 100%; animation:shimmer 1.4s ease-in-out infinite;"></div>
+                    <div style="flex:1;"></div>
+                    <div style="height:11px; width:60px; border-radius:4px; background:linear-gradient(90deg,var(--surface-2) 25%,var(--border) 37%,var(--surface-2) 63%); background-size:200% 100%; animation:shimmer 1.4s ease-in-out infinite;"></div>
+                  </div>
+                </sc-for>
+              </div>
+            </div>
+          </sc-if>
+
+          <!-- ERROR -->
+          <sc-if value="{{ isError }}" hint-placeholder-val="{{ false }}">
+            <div style="border:1px solid var(--border); border-radius:12px; background:var(--elevated); padding:56px 24px; display:flex; flex-direction:column; align-items:center; text-align:center;">
+              <div style="width:52px; height:52px; border-radius:13px; background:var(--danger-bg); display:flex; align-items:center; justify-content:center; margin-bottom:14px;"><svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="var(--danger-fg)" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2 2 20h20L12 2Z"/><line x1="12" y1="9" x2="12" y2="14"/><line x1="12" y1="17.5" x2="12" y2="17.51"/></svg></div>
+              <div style="font-size:16px; font-weight:600; margin-bottom:6px;">監査ログの取得に失敗しました</div>
+              <div style="font-size:13px; color:var(--text-secondary); max-width:420px; margin-bottom:18px;">ログストレージへの接続中にエラーが発生しました。時間をおいて再試行してください。</div>
+              <button onClick="{{ setList }}" style="display:inline-flex; align-items:center; gap:7px; height:36px; padding:0 16px; border:1px solid var(--border-strong); border-radius:8px; background:var(--bg); color:var(--text); font-size:13px; font-weight:500; font-family:inherit; cursor:pointer;" style-hover="border-color:var(--primary); color:var(--primary);"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-3-6.7"/><path d="M21 4v5h-5"/></svg>再試行</button>
+            </div>
+          </sc-if>
+
+          <!-- EMPTY -->
+          <sc-if value="{{ isEmpty }}" hint-placeholder-val="{{ false }}">
+            <div style="border:1px dashed var(--border-strong); border-radius:12px; background:var(--elevated); padding:60px 24px; display:flex; flex-direction:column; align-items:center; text-align:center;">
+              <div style="width:56px; height:56px; border-radius:14px; background:var(--surface-2); display:flex; align-items:center; justify-content:center; margin-bottom:16px;"><svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="var(--text-muted)" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8l-5-5Z"/><path d="M14 3v5h5"/></svg></div>
+              <div style="font-size:17px; font-weight:700; margin-bottom:6px;">監査ログがありません</div>
+              <div style="font-size:13px; color:var(--text-secondary); max-width:400px;">記録対象の操作が実行されると、ここに時系列で追記されます。</div>
+            </div>
+          </sc-if>
+
+          <!-- LIST -->
+          <sc-if value="{{ isList }}" hint-placeholder-val="{{ true }}">
+            <div>
+              <!-- FILTER BAR -->
+              <div style="display:flex; align-items:center; gap:10px; margin-bottom:14px; flex-wrap:wrap;">
+                <div style="display:flex; align-items:center; gap:7px; height:34px; flex:1; min-width:170px; max-width:240px; padding:0 10px; border:1px solid var(--border-strong); border-radius:8px; background:var(--bg);">
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="var(--text-muted)" stroke-width="2" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><path d="m20 20-3-3"/></svg>
+                  <input value="{{ actorQuery }}" onInput="{{ onActor }}" placeholder="実行者・対象で検索" style="border:none; outline:none; background:transparent; font-family:inherit; font-size:13px; color:var(--text); width:100%;" />
+                </div>
+                <select value="{{ actionFilter }}" onChange="{{ onActionFilter }}" style="height:34px; padding:0 10px; border:1px solid var(--border-strong); border-radius:8px; background:var(--bg); color:var(--text); font-size:12.5px; font-family:inherit; cursor:pointer;">
+                  <option value="all">操作種別: すべて</option>
+                  <option value="WIPE">WIPE</option>
+                  <option value="ロール変更">ロール変更</option>
+                  <option value="ポリシー変更">ポリシー変更</option>
+                  <option value="ポリシー削除">ポリシー削除</option>
+                  <option value="ロック">リモートロック</option>
+                  <option value="エンロール">エンロール</option>
+                  <option value="トークン失効">トークン失効</option>
+                  <option value="ログイン">ログイン</option>
+                </select>
+                <select value="{{ resultFilter }}" onChange="{{ onResultFilter }}" style="height:34px; padding:0 10px; border:1px solid var(--border-strong); border-radius:8px; background:var(--bg); color:var(--text); font-size:12.5px; font-family:inherit; cursor:pointer;">
+                  <option value="all">結果: すべて</option>
+                  <option value="成功">成功</option>
+                  <option value="失敗">失敗</option>
+                </select>
+                <div style="display:inline-flex; align-items:center; gap:7px; height:34px; padding:0 11px; border:1px solid var(--border-strong); border-radius:8px; background:var(--bg);">
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="var(--text-muted)" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="17" rx="2"/><path d="M3 9h18M8 2v4M16 2v4"/></svg>
+                  <select value="{{ period }}" onChange="{{ onPeriod }}" style="border:none; outline:none; background:transparent; color:var(--text); font-size:12.5px; font-family:inherit; cursor:pointer;">
+                    <option value="24h">過去 24 時間</option>
+                    <option value="7d">過去 7 日間</option>
+                    <option value="30d">過去 30 日間</option>
+                    <option value="all">全期間</option>
+                  </select>
+                </div>
+                <div style="flex:1;"></div>
+                <span style="font-size:12px; color:var(--text-muted); white-space:nowrap;"><span style="font-variant-numeric:tabular-nums;">{{ rowCount }}</span> 件</span>
+              </div>
+
+              <!-- TABLE -->
+              <div style="border:1px solid var(--border); border-radius:12px; background:var(--elevated); overflow:hidden; box-shadow:var(--shadow);">
+                <div style="overflow-x:auto;">
+                  <table style="width:100%; border-collapse:collapse; font-size:13px; min-width:860px;">
+                    <thead>
+                      <tr style="background:var(--surface);">
+                        <th style="width:30px; border-bottom:1px solid var(--border);"></th>
+                        <th style="text-align:left; font-weight:600; color:var(--text-secondary); font-size:12px; padding:10px 14px; border-bottom:1px solid var(--border); white-space:nowrap;">発生時刻</th>
+                        <th style="text-align:left; font-weight:600; color:var(--text-secondary); font-size:12px; padding:10px 14px; border-bottom:1px solid var(--border); white-space:nowrap;">実行者</th>
+                        <sc-if value="{{ isSuperAdmin }}" hint-placeholder-val="{{ false }}"><th style="text-align:left; font-weight:600; color:var(--text-secondary); font-size:12px; padding:10px 14px; border-bottom:1px solid var(--border); white-space:nowrap;">テナント</th></sc-if>
+                        <th style="text-align:left; font-weight:600; color:var(--text-secondary); font-size:12px; padding:10px 14px; border-bottom:1px solid var(--border); white-space:nowrap;">操作種別</th>
+                        <th style="text-align:left; font-weight:600; color:var(--text-secondary); font-size:12px; padding:10px 14px; border-bottom:1px solid var(--border); white-space:nowrap;">対象リソース</th>
+                        <th style="text-align:left; font-weight:600; color:var(--text-secondary); font-size:12px; padding:10px 14px; border-bottom:1px solid var(--border); white-space:nowrap;">結果</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      <sc-for list="{{ logs }}" as="lg" hint-placeholder-count="0">
+                        <tr onClick="{{ lg.onToggle }}" style="border-bottom:1px solid {{ lg.rowBorder }}; cursor:pointer;" style-hover="background:var(--surface);">
+                          <td style="padding:10px 0 10px 14px; vertical-align:top;"><span style="display:inline-flex; transform:rotate({{ lg.chevron }}); transition:transform .15s; color:var(--text-muted);"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m9 18 6-6-6-6"/></svg></span></td>
+                          <td style="padding:10px 14px; vertical-align:top; white-space:nowrap; font-variant-numeric:tabular-nums; color:var(--text-secondary); font-family:'IBM Plex Mono',monospace; font-size:12px;">{{ lg.time }}</td>
+                          <td style="padding:10px 14px; vertical-align:top;"><div style="font-weight:500; white-space:nowrap;">{{ lg.actorName }}</div><div style="font-size:11px; color:var(--text-muted); font-family:'IBM Plex Mono',monospace; white-space:nowrap;">{{ lg.actorEmail }}</div></td>
+                          <sc-if value="{{ isSuperAdmin }}" hint-placeholder-val="{{ false }}"><td style="padding:10px 14px; vertical-align:top; white-space:nowrap;"><span style="display:inline-flex; align-items:center; font-size:11.5px; font-weight:600; padding:2px 8px; border-radius:6px; background:var(--surface-2); color:var(--text-secondary); border:1px solid var(--border);">{{ lg.tenant }}</span></td></sc-if>
+                          <td style="padding:10px 14px; vertical-align:top;"><span style="display:inline-flex; align-items:center; gap:5px; font-size:11.5px; font-weight:600; padding:2px 8px; border-radius:6px; background:{{ lg.actBg }}; color:{{ lg.actFg }}; border:1px solid {{ lg.actBorder }}; white-space:nowrap;">{{ lg.action }}</span></td>
+                          <td style="padding:10px 14px; vertical-align:top;"><div style="white-space:nowrap; overflow:hidden; text-overflow:ellipsis; max-width:220px;">{{ lg.target }}</div></td>
+                          <td style="padding:10px 14px; vertical-align:top;"><span style="display:inline-flex; align-items:center; gap:5px; font-size:11.5px; font-weight:600; padding:2px 8px; border-radius:6px; background:{{ lg.resBg }}; color:{{ lg.resFg }}; border:1px solid {{ lg.resBorder }}; white-space:nowrap;"><span style="width:5px; height:5px; border-radius:50%; background:{{ lg.resDot }};"></span>{{ lg.result }}</span></td>
+                        </tr>
+                        <sc-if value="{{ lg.open }}" hint-placeholder-val="{{ false }}">
+                          <tr style="border-bottom:1px solid var(--border); background:var(--surface);">
+                            <td colspan="{{ colSpan }}" style="padding:0;">
+                              <div style="padding:16px 20px 18px 48px;">
+                                <div style="display:grid; grid-template-columns:repeat(auto-fit, minmax(220px,1fr)); gap:14px 28px; margin-bottom:14px;">
+                                  <div><div style="font-size:11px; color:var(--text-muted); margin-bottom:2px;">監査 ID</div><div style="font-size:12.5px; font-family:'IBM Plex Mono',monospace;">{{ lg.auditId }}</div></div>
+                                  <div><div style="font-size:11px; color:var(--text-muted); margin-bottom:2px;">送信元 IP</div><div style="font-size:12.5px; font-family:'IBM Plex Mono',monospace;">{{ lg.ip }}</div></div>
+                                  <div><div style="font-size:11px; color:var(--text-muted); margin-bottom:2px;">User-Agent</div><div style="font-size:12.5px;">{{ lg.ua }}</div></div>
+                                  <div><div style="font-size:11px; color:var(--text-muted); margin-bottom:2px;">対象 ID</div><div style="font-size:12.5px; font-family:'IBM Plex Mono',monospace;">{{ lg.targetId }}</div></div>
+                                </div>
+                                <div style="font-size:11px; color:var(--text-muted); margin-bottom:5px;">詳細</div>
+                                <div style="font-size:12.5px; color:var(--text-secondary); line-height:1.6; margin-bottom:12px;">{{ lg.detail }}</div>
+                                <sc-if value="{{ lg.hasDiff }}" hint-placeholder-val="{{ false }}">
+                                  <div style="font-size:11px; color:var(--text-muted); margin-bottom:5px;">変更内容</div>
+                                  <div style="font-family:'IBM Plex Mono',monospace; font-size:12px; border:1px solid var(--border); border-radius:8px; overflow:hidden;">
+                                    <div style="padding:7px 12px; background:var(--danger-bg); color:var(--danger-fg); border-bottom:1px solid var(--border);">- {{ lg.diffBefore }}</div>
+                                    <div style="padding:7px 12px; background:var(--success-bg); color:var(--success-fg);">+ {{ lg.diffAfter }}</div>
+                                  </div>
+                                </sc-if>
+                              </div>
+                            </td>
+                          </tr>
+                        </sc-if>
+                      </sc-for>
+                    </tbody>
+                  </table>
+                </div>
+                <!-- filter 0 results -->
+                <sc-if value="{{ noResults }}" hint-placeholder-val="{{ false }}">
+                  <div style="padding:48px 24px; text-align:center;">
+                    <div style="font-size:13.5px; font-weight:600; color:var(--text-secondary); margin-bottom:4px;">条件に一致する監査ログがありません</div>
+                    <div style="font-size:12.5px; color:var(--text-muted); margin-bottom:14px;">フィルタや期間を変更してください。</div>
+                    <button onClick="{{ clearFilters }}" style="height:32px; padding:0 14px; border:1px solid var(--border-strong); border-radius:8px; background:var(--bg); color:var(--text); font-size:12.5px; font-weight:500; font-family:inherit; cursor:pointer;" style-hover="border-color:var(--primary); color:var(--primary);">フィルタをクリア</button>
+                  </div>
+                </sc-if>
+              </div>
+            </div>
+          </sc-if>
+        </div>
+      </sc-if>
+
+    </div>
+  </main>
+
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props="{&quot;$preview&quot;:{&quot;width&quot;:1340,&quot;height&quot;:900},&quot;primary&quot;:{&quot;editor&quot;:&quot;color&quot;,&quot;default&quot;:&quot;#4f46e5&quot;,&quot;tsType&quot;:&quot;string&quot;},&quot;defaultTheme&quot;:{&quot;editor&quot;:&quot;enum&quot;,&quot;default&quot;:&quot;light&quot;,&quot;options&quot;:[&quot;light&quot;,&quot;dark&quot;],&quot;tsType&quot;:&quot;'light'|'dark'&quot;},&quot;defaultRole&quot;:{&quot;editor&quot;:&quot;enum&quot;,&quot;default&quot;:&quot;TenantAdmin&quot;,&quot;options&quot;:[&quot;SuperAdmin&quot;,&quot;TenantAdmin&quot;,&quot;Operator&quot;,&quot;Viewer&quot;],&quot;tsType&quot;:&quot;string&quot;}}">
+class Component extends DCLogic {
+  state = {
+    mode: this.props.defaultTheme || 'light',
+    role: this.props.defaultRole || 'TenantAdmin',
+    collapsed: false,
+    view: 'list',
+    actorQuery: '',
+    actionFilter: 'all',
+    resultFilter: 'all',
+    period: '30d',
+    openId: null,
+    skeletonRows: [1,2,3,4,5,6,7,8],
+  };
+
+  el(t,p,...k){ return React.createElement(t,p,...k); }
+  perms(){ const r=this.state.role; return { view:r==='TenantAdmin'||r==='SuperAdmin', cross:r==='SuperAdmin', admins:r==='TenantAdmin'||r==='SuperAdmin' }; }
+
+  toggleTheme=()=>this.setState(s=>({mode:s.mode==='light'?'dark':'light'}));
+  toggleCollapse=()=>this.setState(s=>({collapsed:!s.collapsed}));
+  onRoleChange=(e)=>this.setState({role:e.target.value, openId:null});
+  onActor=(e)=>this.setState({actorQuery:e.target.value});
+  onActionFilter=(e)=>this.setState({actionFilter:e.target.value});
+  onResultFilter=(e)=>this.setState({resultFilter:e.target.value});
+  onPeriod=(e)=>this.setState({period:e.target.value});
+  clearFilters=()=>this.setState({actorQuery:'', actionFilter:'all', resultFilter:'all', period:'all'});
+  seg(active){ return active ? {bg:'var(--elevated)',fg:'var(--primary)',fw:'600'} : {bg:'transparent',fg:'var(--text-secondary)',fw:'500'}; }
+
+  themeIconEl(){ if(this.state.mode==='light') return this.el('svg',{width:17,height:17,viewBox:'0 0 24 24',fill:'none',stroke:'currentColor',strokeWidth:1.9,strokeLinecap:'round',strokeLinejoin:'round'}, this.el('path',{key:'p',d:'M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8Z'})); return this.el('svg',{width:17,height:17,viewBox:'0 0 24 24',fill:'none',stroke:'currentColor',strokeWidth:1.9,strokeLinecap:'round',strokeLinejoin:'round'}, this.el('circle',{key:'c',cx:12,cy:12,r:4}), this.el('path',{key:'p',d:'M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4'})); }
+  flash(){}
+
+  actionTok(action){
+    const map={
+      'WIPE':'danger','ポリシー削除':'danger','ロール変更':'purple','テナント設定変更':'purple',
+      'ポリシー変更':'info','ロック':'info','再起動':'info','エンロール':'success','トークン失効':'warning','ログイン':'neutral',
+    };
+    const kind=map[action]||'neutral';
+    const t={ danger:['var(--danger-bg)','var(--danger-fg)','var(--danger-border)'], purple:['var(--purple-bg)','var(--purple-fg)','var(--purple-border)'], info:['var(--info-bg)','var(--info-fg)','var(--info-border)'], success:['var(--success-bg)','var(--success-fg)','var(--success-border)'], warning:['var(--warning-bg)','var(--warning-fg)','var(--warning-border)'], neutral:['var(--neutral-bg)','var(--neutral-fg)','var(--neutral-border)'] }[kind];
+    return t;
+  }
+
+  data(){
+    // [time, actorName, actorEmail, tenant, action, target, targetId, result, ip, ua, detail, diffBefore, diffAfter]
+    return [
+      ['2026-06-22 14:32:08','田中 管理','admin@acme.co.jp','Acme','WIPE','Pixel 8 Pro / 伊藤 大輔','dev_35887701','成功','203.0.113.24','Chrome 126 / macOS','紛失申告を受け、対象端末のリモートワイプを実行。二段階確認を経て承認。','',''],
+      ['2026-06-22 11:05:41','佐藤 花子','admin@acme.co.jp','Acme','ポリシー変更','営業部ポリシー (v5→v6)','pol_204','成功','203.0.113.24','Chrome 126 / Windows','パスワード最小桁数を 6→8 に変更し保存。','pwMinLength: 6','pwMinLength: 8'],
+      ['2026-06-22 09:48:13','システム','system@mobiguard.io','Acme','エンロール','Galaxy A54 / 渡辺 彩','dev_35338820','成功','—','Android Management API','QR エンロールにより新規端末を登録。標準業務ポリシーを適用。','',''],
+      ['2026-06-21 18:20:55','田中 管理','admin@acme.co.jp','Acme','ロール変更','operator@acme.co.jp','usr_88','成功','198.51.100.7','Chrome 126 / macOS','ユーザーのロールを Viewer → Operator に変更。','role: Viewer','role: Operator'],
+      ['2026-06-21 16:02:30','鈴木 一郎','operator@acme.co.jp','Acme','ロック','Pixel 7a / 鈴木 一郎','dev_35420087','失敗','198.51.100.7','Chrome 125 / Windows','リモートロックを送信したが端末オフラインのためタイムアウト。','',''],
+      ['2026-06-21 10:14:02','佐藤 花子','admin@acme.co.jp','Acme','トークン失効','エンロールトークン #A12','tok_A12','成功','203.0.113.24','Chrome 126 / Windows','未使用のエンロールトークンを手動で失効。','',''],
+      ['2026-06-20 22:41:19','高橋 グローベックス','admin@globex.co.jp','Globex','ポリシー削除','旧 BYOD ポリシー','pol_991','成功','192.0.2.55','Firefox 127 / Linux','利用を終了した BYOD ポリシーを削除。割当端末なし。','',''],
+      ['2026-06-20 14:09:50','中村 京','viewer@initech.jp','Initech','ログイン','OIDC セッション','sess_77','失敗','192.0.2.88','Safari 17 / iOS','IdP のトークン検証に失敗。セッションは発行されなかった。','',''],
+      ['2026-06-20 08:33:27','プラットフォーム','platform-ops@mobiguard.io','Initech','テナント設定変更','Initech / データ保持期間','ten_initech','成功','203.0.113.9','Chrome 126 / macOS','監査ログの保持期間を 90 日 → 365 日に変更。','retentionDays: 90','retentionDays: 365'],
+      ['2026-06-19 19:55:11','高橋 グローベックス','admin@globex.co.jp','Globex','WIPE','Galaxy Tab S9 / Kiosk-C7','dev_99001','成功','192.0.2.55','Chrome 126 / Windows','退役端末の初期化。Kiosk 構成を解除。','',''],
+    ];
+  }
+
+  renderVals(){
+    document.documentElement.setAttribute('data-theme', this.state.mode);
+    if (this.props.primary) document.documentElement.style.setProperty('--primary', this.props.primary);
+    const r=this.state.role, p=this.perms(), v=this.state.view;
+    const emails={ SuperAdmin:'platform-ops@mobiguard.io', TenantAdmin:'admin@acme.co.jp', Operator:'operator@acme.co.jp', Viewer:'viewer@acme.co.jp' };
+    const roleKind={ SuperAdmin:['var(--purple-bg)','var(--purple-fg)'], TenantAdmin:['var(--info-bg)','var(--info-fg)'], Operator:['var(--success-bg)','var(--success-fg)'], Viewer:['var(--neutral-bg)','var(--neutral-fg)'] }[r];
+
+    let rows=this.data().map((a,i)=>({
+      time:a[0], actorName:a[1], actorEmail:a[2], tenant:a[3], action:a[4], target:a[5], targetId:a[6], result:a[7], ip:a[8], ua:a[9], detail:a[10], diffBefore:a[11], diffAfter:a[12], idx:i,
+    }));
+    // tenant scope: non-super sees only Acme
+    if (!p.cross) rows=rows.filter(x=>x.tenant==='Acme');
+    // filters
+    const q=this.state.actorQuery.trim().toLowerCase();
+    if (q) rows=rows.filter(x=>(x.actorName+x.actorEmail+x.target).toLowerCase().includes(q));
+    if (this.state.actionFilter!=='all') rows=rows.filter(x=>x.action===this.state.actionFilter);
+    if (this.state.resultFilter!=='all') rows=rows.filter(x=>x.result===this.state.resultFilter);
+
+    const logs=rows.map((x)=>{
+      const at=this.actionTok(x.action);
+      const ok=x.result==='成功';
+      const open=this.state.openId===x.idx;
+      return {
+        time:x.time, actorName:x.actorName, actorEmail:x.actorEmail, tenant:x.tenant,
+        action:x.action, target:x.target, targetId:x.targetId, result:x.result,
+        actBg:at[0], actFg:at[1], actBorder:at[2],
+        resBg: ok?'var(--success-bg)':'var(--danger-bg)', resFg: ok?'var(--success-fg)':'var(--danger-fg)', resBorder: ok?'var(--success-border)':'var(--danger-border)', resDot: ok?'var(--success)':'var(--danger)',
+        ip:x.ip, ua:x.ua, detail:x.detail, auditId:'aud_'+(100000+x.idx*137),
+        hasDiff: !!x.diffBefore, diffBefore:x.diffBefore, diffAfter:x.diffAfter,
+        open, chevron: open?'90deg':'0deg', rowBorder: open?'transparent':'var(--border)',
+        onToggle:()=>this.setState(s=>({openId:s.openId===x.idx?null:x.idx})),
+      };
+    });
+
+    return {
+      mode:this.state.mode, role:r, userEmail:emails[r], userInitials:r.slice(0,2).toUpperCase(),
+      roleBadgeBg:roleKind[0], roleBadgeFg:roleKind[1], canSeeAdmins:p.admins,
+      sidebarWidth:this.state.collapsed?'64px':'240px', showLabels:!this.state.collapsed,
+      themeIcon:this.themeIconEl(), toggleTheme:this.toggleTheme, toggleCollapse:this.toggleCollapse, onRoleChange:this.onRoleChange,
+
+      canView:p.view, isDenied:!p.view, isSuperAdmin:p.cross,
+      scopeLabel: p.cross ? '全テナント横断' : 'Acme 株式会社',
+      colSpan: p.cross ? 7 : 6,
+
+      isList:v==='list', isEmpty:v==='empty', isLoading:v==='loading', isError:v==='error',
+      setList:()=>this.setState({view:'list'}), setEmpty:()=>this.setState({view:'empty'}), setLoading:()=>this.setState({view:'loading'}), setError:()=>this.setState({view:'error'}),
+      vList:this.seg(v==='list'), vEmpty:this.seg(v==='empty'), vLoad:this.seg(v==='loading'), vError:this.seg(v==='error'),
+      skeletonRows:this.state.skeletonRows,
+      onExport:()=>{},
+
+      actorQuery:this.state.actorQuery, onActor:this.onActor,
+      actionFilter:this.state.actionFilter, onActionFilter:this.onActionFilter,
+      resultFilter:this.state.resultFilter, onResultFilter:this.onResultFilter,
+      period:this.state.period, onPeriod:this.onPeriod,
+      clearFilters:this.clearFilters,
+      rowCount:logs.length, noResults:logs.length===0,
+      logs,
+    };
+  }
+}
+</script>
+</body>
+</html>

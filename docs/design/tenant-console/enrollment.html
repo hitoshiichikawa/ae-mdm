@@ -1,0 +1,462 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Noto+Sans+JP:wght@400;500;700&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+  :root{
+    --bg:#ffffff; --surface:#f7f8fa; --surface-2:#eef0f4; --elevated:#ffffff;
+    --border:#e4e7ec; --border-strong:#d3d8e0;
+    --text:#1b1f27; --text-secondary:#5a616e; --text-muted:#8a909c;
+    --primary:#4f46e5; --primary-hover:#4338ca; --primary-fg:#ffffff; --primary-bg:#eef0fe; --primary-border:#c9cdfa;
+    --success:#16a34a; --success-bg:#e8f6ed; --success-fg:#15803d; --success-border:#bfe6cc;
+    --danger:#dc2626; --danger-bg:#fdeaea; --danger-fg:#b91c1c; --danger-border:#f5c6c6;
+    --warning:#d97706; --warning-bg:#fdf2e0; --warning-fg:#b45309; --warning-border:#f2dbab;
+    --neutral:#6b7280; --neutral-bg:#eef0f3; --neutral-fg:#4b5563; --neutral-border:#dde1e7;
+    --info:#2563eb; --info-bg:#e8f0fe; --info-fg:#1d4ed8; --info-border:#c3d6fb;
+    --purple:#7c3aed; --purple-bg:#f1ebfd; --purple-fg:#6d28d9; --purple-border:#ddcdfa;
+    --pale-bg:#f3f4f6; --pale-fg:#9ca3af; --pale-border:#e6e8ec;
+    --shadow:0 1px 2px rgba(16,20,30,.04), 0 1px 3px rgba(16,20,30,.06);
+    --shadow-pop:0 4px 16px rgba(16,20,30,.12), 0 1px 3px rgba(16,20,30,.08);
+  }
+  :root[data-theme="dark"]{
+    --bg:#0d1017; --surface:#151922; --surface-2:#1b212c; --elevated:#171c25;
+    --border:#262d3a; --border-strong:#323a49;
+    --text:#e7eaf0; --text-secondary:#9aa2b1; --text-muted:#6b7480;
+    --primary:#6366f1; --primary-hover:#7c80f7; --primary-fg:#ffffff; --primary-bg:rgba(99,102,241,.16); --primary-border:rgba(99,102,241,.42);
+    --success:#22c55e; --success-bg:rgba(34,197,94,.14); --success-fg:#4ade80; --success-border:rgba(34,197,94,.32);
+    --danger:#ef4444; --danger-bg:rgba(239,68,68,.14); --danger-fg:#f87171; --danger-border:rgba(239,68,68,.34);
+    --warning:#f59e0b; --warning-bg:rgba(245,158,11,.14); --warning-fg:#fbbf24; --warning-border:rgba(245,158,11,.32);
+    --neutral:#94a3b8; --neutral-bg:rgba(148,163,184,.14); --neutral-fg:#cbd5e1; --neutral-border:rgba(148,163,184,.26);
+    --info:#3b82f6; --info-bg:rgba(59,130,246,.16); --info-fg:#60a5fa; --info-border:rgba(59,130,246,.34);
+    --purple:#8b5cf6; --purple-bg:rgba(139,92,246,.16); --purple-fg:#a78bfa; --purple-border:rgba(139,92,246,.34);
+    --pale-bg:rgba(148,163,184,.07); --pale-fg:#7b8494; --pale-border:rgba(148,163,184,.16);
+    --shadow:0 1px 2px rgba(0,0,0,.4); --shadow-pop:0 8px 28px rgba(0,0,0,.55);
+  }
+  *{box-sizing:border-box;}
+  body{margin:0; background:var(--bg); color:var(--text); font-family:"Noto Sans JP", system-ui, sans-serif; font-size:14px; line-height:1.45; -webkit-font-smoothing:antialiased; font-feature-settings:"palt"; transition:background .18s ease, color .18s ease;}
+  ::selection{background:var(--primary-bg);}
+  @keyframes spin{to{transform:rotate(360deg);}}
+  @keyframes toastin{from{opacity:0; transform:translateY(8px) scale(.98);}to{opacity:1; transform:none;}}
+  @keyframes qrin{from{opacity:0; transform:scale(.96);}to{opacity:1; transform:none;}}
+  @media print{ aside, header, .no-print { display:none !important; } .print-area{ box-shadow:none !important; border:none !important; } }
+</style>
+</helmet>
+
+<div style="display:flex; min-height:100vh; background:var(--bg);">
+
+  <!-- ============ SIDEBAR ============ -->
+  <aside class="no-print" style="width: {{ sidebarWidth }}; flex:none; background:var(--surface); border-right:1px solid var(--border); display:flex; flex-direction:column; position:sticky; top:0; height:100vh; transition:width .16s ease;">
+    <div style="height:52px; display:flex; align-items:center; gap:10px; padding:0 16px; border-bottom:1px solid var(--border);">
+      <div style="width:26px; height:26px; flex:none; border-radius:7px; background:var(--primary); display:flex; align-items:center; justify-content:center; color:#fff; font-weight:700; font-size:13px;">M</div>
+      <sc-if value="{{ showLabels }}" hint-placeholder-val="{{ true }}"><div style="font-weight:700; font-size:14px; white-space:nowrap;">MobiGuard</div></sc-if>
+    </div>
+    <nav style="flex:1; padding:10px 10px; display:flex; flex-direction:column; gap:2px; overflow-y:auto;">
+      <div style="display:flex; align-items:center; gap:11px; padding:8px 10px; border-radius:8px; color:var(--text-secondary); white-space:nowrap; cursor:pointer;" style-hover="background:var(--surface-2); color:var(--text);">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" style="flex:none;"><rect x="3" y="3" width="7" height="7" rx="1.3"/><rect x="14" y="3" width="7" height="7" rx="1.3"/><rect x="14" y="14" width="7" height="7" rx="1.3"/><rect x="3" y="14" width="7" height="7" rx="1.3"/></svg>
+        <sc-if value="{{ showLabels }}" hint-placeholder-val="{{ true }}"><span>ダッシュボード</span></sc-if>
+      </div>
+      <div style="display:flex; align-items:center; gap:11px; padding:8px 10px; border-radius:8px; color:var(--text-secondary); white-space:nowrap; cursor:pointer;" style-hover="background:var(--surface-2); color:var(--text);">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" style="flex:none;"><rect x="7" y="2.5" width="10" height="19" rx="2.5"/><line x1="10.5" y1="18.4" x2="13.5" y2="18.4"/></svg>
+        <sc-if value="{{ showLabels }}" hint-placeholder-val="{{ true }}"><span>デバイス</span></sc-if>
+      </div>
+      <div style="display:flex; align-items:center; gap:11px; padding:8px 10px; border-radius:8px; color:var(--text-secondary); white-space:nowrap; cursor:pointer;" style-hover="background:var(--surface-2); color:var(--text);">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" style="flex:none;"><path d="M12 3 4.5 6v5c0 4.4 3.2 7.4 7.5 9 4.3-1.6 7.5-4.6 7.5-9V6L12 3Z"/></svg>
+        <sc-if value="{{ showLabels }}" hint-placeholder-val="{{ true }}"><span>ポリシー</span></sc-if>
+      </div>
+      <div style="display:flex; align-items:center; gap:11px; padding:8px 10px; border-radius:8px; background:var(--primary-bg); color:var(--primary); font-weight:500; white-space:nowrap; cursor:pointer;">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" style="flex:none;"><rect x="3" y="3" width="7" height="7" rx="1.3"/><rect x="14" y="3" width="7" height="7" rx="1.3"/><rect x="3" y="14" width="7" height="7" rx="1.3"/><path d="M14 14h3v3M21 14v.01M17 21h.01M21 18v3h-3"/></svg>
+        <sc-if value="{{ showLabels }}" hint-placeholder-val="{{ true }}"><span>エンロール</span></sc-if>
+      </div>
+      <div style="display:flex; align-items:center; gap:11px; padding:8px 10px; border-radius:8px; color:var(--text-secondary); white-space:nowrap; cursor:pointer;" style-hover="background:var(--surface-2); color:var(--text);">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" style="flex:none;"><path d="M21 8 12 3 3 8v8l9 5 9-5V8Z"/><path d="m3 8 9 5 9-5M12 13v8"/></svg>
+        <sc-if value="{{ showLabels }}" hint-placeholder-val="{{ true }}"><span>アプリ</span></sc-if>
+      </div>
+      <div style="display:flex; align-items:center; gap:11px; padding:8px 10px; border-radius:8px; color:var(--text-secondary); white-space:nowrap; cursor:pointer;" style-hover="background:var(--surface-2); color:var(--text);">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" style="flex:none;"><path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8l-5-5Z"/><path d="M14 3v5h5"/><line x1="9" y1="13" x2="15" y2="13"/><line x1="9" y1="17" x2="15" y2="17"/></svg>
+        <sc-if value="{{ showLabels }}" hint-placeholder-val="{{ true }}"><span>監査ログ</span></sc-if>
+      </div>
+      <sc-if value="{{ canSeeAdmins }}" hint-placeholder-val="{{ true }}">
+        <div style="display:flex; align-items:center; gap:11px; padding:8px 10px; border-radius:8px; color:var(--text-secondary); white-space:nowrap; cursor:pointer;" style-hover="background:var(--surface-2); color:var(--text);">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" style="flex:none;"><circle cx="9" cy="8" r="3.1"/><path d="M3.6 20a5.4 5.4 0 0 1 10.8 0"/><path d="M16.2 5.3a3.1 3.1 0 0 1 0 5.4M20.4 20a5.4 5.4 0 0 0-3.9-5.2"/></svg>
+          <sc-if value="{{ showLabels }}" hint-placeholder-val="{{ true }}"><span>管理者</span></sc-if>
+        </div>
+      </sc-if>
+    </nav>
+    <div style="border-top:1px solid var(--border); padding:10px;">
+      <div onClick="{{ toggleCollapse }}" style="display:flex; align-items:center; gap:11px; padding:8px 10px; border-radius:8px; color:var(--text-muted); cursor:pointer; white-space:nowrap;" style-hover="background:var(--surface-2); color:var(--text);">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" style="flex:none;"><rect x="3" y="4" width="18" height="16" rx="2"/><line x1="9" y1="4" x2="9" y2="20"/></svg>
+        <sc-if value="{{ showLabels }}" hint-placeholder-val="{{ true }}"><span>サイドバーを折りたたむ</span></sc-if>
+      </div>
+    </div>
+  </aside>
+
+  <!-- ============ MAIN ============ -->
+  <main style="flex:1; min-width:0; display:flex; flex-direction:column;">
+
+    <!-- TOPBAR -->
+    <header class="no-print" style="height:52px; flex:none; position:sticky; top:0; z-index:30; background:color-mix(in srgb, var(--bg) 88%, transparent); backdrop-filter:blur(8px); border-bottom:1px solid var(--border); display:flex; align-items:center; gap:14px; padding:0 18px;">
+      <div style="display:flex; align-items:center; gap:8px;"><span style="font-weight:700; font-size:14.5px; white-space:nowrap;">エンロール</span><span style="font-size:12px; color:var(--text-muted);">/enrollment</span></div>
+      <div style="flex:1;"></div>
+      <button onClick="{{ toggleTheme }}" title="テーマ切替" style="width:32px; height:32px; flex:none; display:flex; align-items:center; justify-content:center; border:1px solid var(--border-strong); border-radius:8px; background:var(--surface); color:var(--text-secondary); cursor:pointer;" style-hover="border-color:var(--primary); color:var(--primary);">{{ themeIcon }}</button>
+      <div style="display:flex; align-items:center; gap:6px;">
+        <span style="font-size:11px; color:var(--text-muted);">ロール</span>
+        <select value="{{ role }}" onChange="{{ onRoleChange }}" style="height:32px; padding:0 8px; border:1px solid var(--border-strong); border-radius:8px; background:var(--surface); color:var(--text); font-size:13px; font-family:inherit; cursor:pointer;">
+          <option value="SuperAdmin">SuperAdmin</option>
+          <option value="TenantAdmin">TenantAdmin</option>
+          <option value="Operator">Operator</option>
+          <option value="Viewer">Viewer</option>
+        </select>
+      </div>
+      <div style="width:1px; height:24px; background:var(--border);"></div>
+      <div style="display:flex; align-items:center; gap:9px; cursor:pointer; padding:3px 4px 3px 6px; border-radius:8px;" style-hover="background:var(--surface-2);">
+        <div style="text-align:right; line-height:1.25;"><div style="font-size:12.5px; font-weight:500;">{{ userEmail }}</div><div style="display:flex; justify-content:flex-end;"><span style="font-size:10px; font-weight:600; padding:1px 6px; border-radius:5px; background: {{ roleBadgeBg }}; color: {{ roleBadgeFg }};">{{ role }}</span></div></div>
+        <div style="width:30px; height:30px; flex:none; border-radius:50%; background:var(--primary); color:#fff; display:flex; align-items:center; justify-content:center; font-size:12px; font-weight:600;">{{ userInitials }}</div>
+      </div>
+    </header>
+
+    <div style="padding:22px 26px 80px; max-width:1200px; width:100%;">
+
+      <!-- ===== 403 (Viewer) ===== -->
+      <sc-if value="{{ isDenied }}" hint-placeholder-val="{{ false }}">
+        <div style="border:1px solid var(--border); border-radius:12px; background:var(--elevated); padding:60px 24px; display:flex; flex-direction:column; align-items:center; text-align:center; margin-top:8px;">
+          <div style="width:52px; height:52px; border-radius:13px; background:var(--surface-2); display:flex; align-items:center; justify-content:center; margin-bottom:14px;"><svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="var(--text-secondary)" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="5" y="11" width="14" height="9" rx="2"/><path d="M8 11V8a4 4 0 0 1 8 0v3"/></svg></div>
+          <div style="font-size:12px; font-weight:700; letter-spacing:.06em; color:var(--text-muted); margin-bottom:4px;">403 FORBIDDEN</div>
+          <div style="font-size:16px; font-weight:600; margin-bottom:6px;">エンロール機能を利用できません</div>
+          <div style="font-size:13px; color:var(--text-secondary); max-width:440px;">トークン発行には <b style="color:var(--text);">Operator 以上</b>の権限が必要です。現在のロール（Viewer）ではこの画面を操作できません。</div>
+        </div>
+      </sc-if>
+
+      <!-- ===== MAIN CONTENT ===== -->
+      <sc-if value="{{ canEnroll }}" hint-placeholder-val="{{ true }}">
+        <div>
+          <!-- header -->
+          <div style="display:flex; align-items:flex-start; justify-content:space-between; gap:14px; flex-wrap:wrap; margin-bottom:18px;">
+            <div>
+              <h1 style="margin:0 0 3px; font-size:21px; font-weight:700; letter-spacing:-.01em;">端末をエンロール</h1>
+              <p style="margin:0; font-size:13px; color:var(--text-secondary);">エンロールトークンを発行し、QR コードで Android 端末を登録します（QR 方式のみ）。</p>
+            </div>
+            <div class="no-print" style="display:flex; align-items:center; gap:6px;">
+              <span style="font-size:11px; color:var(--text-muted);">状態プレビュー</span>
+              <div style="display:inline-flex; padding:2px; background:var(--surface-2); border-radius:8px; gap:2px;">
+                <button onClick="{{ setQrIdle }}" style="height:26px; padding:0 9px; border:none; border-radius:6px; font-family:inherit; font-size:12px; cursor:pointer; background:{{ qIdle.bg }}; color:{{ qIdle.fg }}; font-weight:{{ qIdle.fw }};">発行前</button>
+                <button onClick="{{ setQrActive }}" style="height:26px; padding:0 9px; border:none; border-radius:6px; font-family:inherit; font-size:12px; cursor:pointer; background:{{ qActive.bg }}; color:{{ qActive.fg }}; font-weight:{{ qActive.fw }};">発行直後</button>
+                <button onClick="{{ setQrExpired }}" style="height:26px; padding:0 9px; border:none; border-radius:6px; font-family:inherit; font-size:12px; cursor:pointer; background:{{ qExp.bg }}; color:{{ qExp.fg }}; font-weight:{{ qExp.fw }};">期限切れ</button>
+                <button onClick="{{ setQrError }}" style="height:26px; padding:0 9px; border:none; border-radius:6px; font-family:inherit; font-size:12px; cursor:pointer; background:{{ qErr.bg }}; color:{{ qErr.fg }}; font-weight:{{ qErr.fw }};">エラー</button>
+              </div>
+            </div>
+          </div>
+
+          <!-- two columns -->
+          <div style="display:grid; grid-template-columns:360px minmax(0,1fr); gap:18px; align-items:start;">
+
+            <!-- LEFT: FORM -->
+            <div class="no-print" style="border:1px solid var(--border); border-radius:12px; background:var(--elevated); padding:18px; box-shadow:var(--shadow);">
+              <div style="font-size:13px; font-weight:700; margin-bottom:14px;">トークン設定</div>
+
+              <!-- mode radiogroup -->
+              <div style="font-size:12px; font-weight:600; color:var(--text-secondary); margin-bottom:8px;">管理モード</div>
+              <div style="display:flex; flex-direction:column; gap:8px; margin-bottom:16px;">
+                <div onClick="{{ pickManaged }}" style="display:flex; align-items:flex-start; gap:10px; padding:11px 12px; border:1px solid {{ mManaged.bd }}; background:{{ mManaged.bg }}; border-radius:9px; cursor:pointer;">
+                  <span style="width:16px; height:16px; flex:none; border-radius:50%; border:2px solid {{ mManaged.dot }}; display:flex; align-items:center; justify-content:center; margin-top:1px;"><span style="width:7px; height:7px; border-radius:50%; background:{{ mManaged.fill }};"></span></span>
+                  <div><div style="font-size:13px; font-weight:600; display:flex; align-items:center; gap:6px;"><span style="width:6px;height:6px;border-radius:50%;background:var(--info);"></span>Fully Managed</div><div style="font-size:11.5px; color:var(--text-secondary); margin-top:2px;">会社所有・全体管理。業務端末向け。</div></div>
+                </div>
+                <div onClick="{{ pickDedicated }}" style="display:flex; align-items:flex-start; gap:10px; padding:11px 12px; border:1px solid {{ mDedicated.bd }}; background:{{ mDedicated.bg }}; border-radius:9px; cursor:pointer;">
+                  <span style="width:16px; height:16px; flex:none; border-radius:50%; border:2px solid {{ mDedicated.dot }}; display:flex; align-items:center; justify-content:center; margin-top:1px;"><span style="width:7px; height:7px; border-radius:50%; background:{{ mDedicated.fill }};"></span></span>
+                  <div><div style="font-size:13px; font-weight:600; display:flex; align-items:center; gap:6px;"><span style="width:6px;height:6px;border-radius:50%;background:var(--purple);"></span>Dedicated (Kiosk)</div><div style="font-size:11.5px; color:var(--text-secondary); margin-top:2px;">単一用途・キオスク端末向け。</div></div>
+                </div>
+              </div>
+
+              <!-- kiosk policy select -->
+              <sc-if value="{{ isDedicated }}" hint-placeholder-val="{{ false }}">
+                <div style="margin-bottom:16px;">
+                  <div style="font-size:12px; font-weight:600; color:var(--text-secondary); margin-bottom:7px;">Kiosk ポリシー <span style="color:var(--danger-fg);">*</span></div>
+                  <select value="{{ kioskPolicy }}" onChange="{{ onKioskPolicy }}" style="width:100%; height:36px; padding:0 10px; border:1px solid {{ kioskBorder }}; border-radius:8px; background:var(--bg); color:var(--text); font-size:13px; font-family:inherit; cursor:pointer;">
+                    <option value="">ポリシーを選択…</option>
+                    <option value="店頭サイネージ Kiosk">店頭サイネージ Kiosk</option>
+                    <option value="在庫スキャナ Kiosk">在庫スキャナ Kiosk</option>
+                    <option value="受付端末 Kiosk">受付端末 Kiosk</option>
+                  </select>
+                  <sc-if value="{{ kioskError }}" hint-placeholder-val="{{ false }}"><div style="font-size:11.5px; color:var(--danger-fg); margin-top:5px;">Dedicated モードでは Kiosk ポリシーの選択が必須です。</div></sc-if>
+                </div>
+              </sc-if>
+
+              <!-- expiry -->
+              <div style="margin-bottom:18px;">
+                <div style="font-size:12px; font-weight:600; color:var(--text-secondary); margin-bottom:7px;">有効期限</div>
+                <select value="{{ expiry }}" onChange="{{ onExpiry }}" style="width:100%; height:36px; padding:0 10px; border:1px solid var(--border-strong); border-radius:8px; background:var(--bg); color:var(--text); font-size:13px; font-family:inherit; cursor:pointer;">
+                  <option value="1時間">1 時間</option>
+                  <option value="24時間">24 時間</option>
+                  <option value="7日間">7 日間</option>
+                  <option value="30日間">30 日間</option>
+                </select>
+              </div>
+
+              <button onClick="{{ issueToken }}" style="width:100%; height:40px; border:none; border-radius:8px; background:var(--primary); color:var(--primary-fg); font-size:13.5px; font-weight:600; font-family:inherit; cursor:pointer; display:inline-flex; align-items:center; justify-content:center; gap:8px;" style-hover="background:var(--primary-hover);">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="4" width="6" height="6" rx="1"/><rect x="14" y="4" width="6" height="6" rx="1"/><rect x="4" y="14" width="6" height="6" rx="1"/><path d="M14 14h3v3M21 14v.01M17 21h.01M21 18v3"/></svg>
+                トークンを発行
+              </button>
+              <div style="font-size:11px; color:var(--text-muted); margin-top:10px; line-height:1.5;">QR の内容は Android Management API（AMAPI）の登録トークンに基づきます。zero-touch / NFC は本 MVP の対象外です。</div>
+            </div>
+
+            <!-- RIGHT: QR PREVIEW -->
+            <div class="print-area" style="border:1px solid var(--border); border-radius:12px; background:var(--elevated); padding:22px; box-shadow:var(--shadow); min-height:340px; display:flex; flex-direction:column; align-items:center; justify-content:center; text-align:center;">
+
+              <!-- idle -->
+              <sc-if value="{{ qrIdle }}" hint-placeholder-val="{{ false }}">
+                <div style="display:flex; flex-direction:column; align-items:center; color:var(--text-muted);">
+                  <div style="width:120px; height:120px; border:2px dashed var(--border-strong); border-radius:14px; display:flex; align-items:center; justify-content:center; margin-bottom:16px;"><svg width="44" height="44" viewBox="0 0 24 24" fill="none" stroke="var(--text-muted)" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><path d="M14 14h3v3M21 14v.01M17 21h.01M21 18v3h-3"/></svg></div>
+                  <div style="font-size:13.5px; font-weight:600; color:var(--text-secondary); margin-bottom:4px;">QR コードは未発行です</div>
+                  <div style="font-size:12.5px;">左のフォームで設定し「トークンを発行」を押すと<br>ここに QR コードが表示されます。</div>
+                </div>
+              </sc-if>
+
+              <!-- active -->
+              <sc-if value="{{ qrActive }}" hint-placeholder-val="{{ false }}">
+                <div style="display:flex; flex-direction:column; align-items:center; animation:qrin .25s ease; width:100%;">
+                  <div style="display:flex; align-items:center; gap:7px; margin-bottom:14px;"><span style="display:inline-flex; align-items:center; gap:5px; font-size:11.5px; font-weight:600; padding:2px 9px; border-radius:6px; background:var(--success-bg); color:var(--success-fg); border:1px solid var(--success-border);"><span style="width:6px;height:6px;border-radius:50%;background:var(--success);"></span>有効</span><span style="font-size:12px; color:var(--text-secondary);">{{ activeMode }}</span></div>
+                  <div style="padding:16px; background:#ffffff; border-radius:14px; box-shadow:0 1px 3px rgba(0,0,0,.1); border:1px solid #eee;">{{ qrEl }}</div>
+                  <div style="margin-top:14px; font-size:11px; color:var(--text-muted);">登録トークン</div>
+                  <div style="font-size:13px; font-weight:500; font-family:'IBM Plex Mono',monospace; letter-spacing:.02em; margin-top:2px; word-break:break-all; max-width:280px;">{{ token }}</div>
+                  <div style="font-size:12px; color:var(--text-secondary); margin-top:6px;">有効期限: <b style="color:var(--text);">{{ expiryAt }}</b>（{{ expiry }}）</div>
+                  <div class="no-print" style="display:flex; gap:8px; margin-top:16px; flex-wrap:wrap; justify-content:center;">
+                    <button onClick="{{ doPrint }}" style="display:inline-flex; align-items:center; gap:6px; height:34px; padding:0 13px; border:1px solid var(--border-strong); border-radius:8px; background:var(--bg); color:var(--text); font-size:13px; font-weight:500; font-family:inherit; cursor:pointer;" style-hover="border-color:var(--primary); color:var(--primary);"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9V3h12v6"/><rect x="6" y="14" width="12" height="7"/><path d="M6 17H3v-5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2v5h-3"/></svg>印刷</button>
+                    <button onClick="{{ doDownload }}" style="display:inline-flex; align-items:center; gap:6px; height:34px; padding:0 13px; border:1px solid var(--border-strong); border-radius:8px; background:var(--bg); color:var(--text); font-size:13px; font-weight:500; font-family:inherit; cursor:pointer;" style-hover="border-color:var(--primary); color:var(--primary);"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v12M7 11l5 4 5-4"/><path d="M5 21h14"/></svg>ダウンロード</button>
+                    <button onClick="{{ revokeActive }}" style="display:inline-flex; align-items:center; gap:6px; height:34px; padding:0 13px; border:1px solid var(--danger-border); border-radius:8px; background:var(--danger-bg); color:var(--danger-fg); font-size:13px; font-weight:600; font-family:inherit; cursor:pointer;" style-hover="filter:brightness(.97);"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="m5.5 5.5 13 13"/></svg>失効</button>
+                  </div>
+                </div>
+              </sc-if>
+
+              <!-- expired -->
+              <sc-if value="{{ qrExpired }}" hint-placeholder-val="{{ false }}">
+                <div style="display:flex; flex-direction:column; align-items:center;">
+                  <div style="position:relative; padding:16px; background:#ffffff; border-radius:14px; border:1px solid #eee; opacity:.4; filter:grayscale(1);">{{ qrEl }}</div>
+                  <div style="margin-top:14px;"><span style="display:inline-flex; align-items:center; gap:5px; font-size:12px; font-weight:600; padding:3px 10px; border-radius:6px; background:var(--pale-bg); color:var(--pale-fg); border:1px solid var(--pale-border);">期限切れ / 使用済み</span></div>
+                  <div style="font-size:13.5px; font-weight:600; color:var(--text-secondary); margin-top:12px;">このトークンは無効です</div>
+                  <div style="font-size:12.5px; color:var(--text-muted); margin-top:3px; max-width:300px;">有効期限が過ぎたか、既に端末登録に使用されています。新しいトークンを発行してください。</div>
+                  <button onClick="{{ setQrIdle }}" class="no-print" style="margin-top:14px; height:34px; padding:0 15px; border:none; border-radius:8px; background:var(--primary); color:var(--primary-fg); font-size:13px; font-weight:600; font-family:inherit; cursor:pointer;" style-hover="background:var(--primary-hover);">新しいトークンを発行</button>
+                </div>
+              </sc-if>
+
+              <!-- error -->
+              <sc-if value="{{ qrErrored }}" hint-placeholder-val="{{ false }}">
+                <div style="display:flex; flex-direction:column; align-items:center;">
+                  <div style="width:52px; height:52px; border-radius:13px; background:var(--danger-bg); display:flex; align-items:center; justify-content:center; margin-bottom:14px;"><svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="var(--danger-fg)" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2 2 20h20L12 2Z"/><line x1="12" y1="9" x2="12" y2="14"/><line x1="12" y1="17.5" x2="12" y2="17.51"/></svg></div>
+                  <div style="font-size:15px; font-weight:600; margin-bottom:5px;">トークン発行に失敗しました</div>
+                  <div style="font-size:12.5px; color:var(--text-secondary); max-width:320px; margin-bottom:16px;">AMAPI への接続でエラーが発生しました。エンタープライズのバインド状態を確認し、再試行してください。</div>
+                  <button onClick="{{ issueToken }}" style="display:inline-flex; align-items:center; gap:7px; height:34px; padding:0 15px; border:1px solid var(--border-strong); border-radius:8px; background:var(--bg); color:var(--text); font-size:13px; font-weight:500; font-family:inherit; cursor:pointer;" style-hover="border-color:var(--primary); color:var(--primary);"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-3-6.7"/><path d="M21 4v5h-5"/></svg>再試行</button>
+                </div>
+              </sc-if>
+            </div>
+          </div>
+
+          <!-- STEPS -->
+          <div class="no-print" style="border:1px solid var(--border); border-radius:12px; background:var(--elevated); padding:18px 20px; margin-top:18px;">
+            <div style="font-size:13px; font-weight:700; margin-bottom:16px;">端末側の設定手順</div>
+            <div style="display:grid; grid-template-columns:repeat(auto-fit, minmax(200px,1fr)); gap:18px;">
+              <div style="display:flex; gap:11px; align-items:flex-start;"><div style="width:26px; height:26px; flex:none; border-radius:50%; background:var(--primary-bg); color:var(--primary); display:flex; align-items:center; justify-content:center; font-size:13px; font-weight:700;">1</div><div><div style="font-size:13px; font-weight:600;">端末を初期化</div><div style="font-size:12px; color:var(--text-secondary); margin-top:2px;">新品または出荷時設定にリセットした端末を起動します。</div></div></div>
+              <div style="display:flex; gap:11px; align-items:flex-start;"><div style="width:26px; height:26px; flex:none; border-radius:50%; background:var(--primary-bg); color:var(--primary); display:flex; align-items:center; justify-content:center; font-size:13px; font-weight:700;">2</div><div><div style="font-size:13px; font-weight:600;">ようこそ画面を6回タップ</div><div style="font-size:12px; color:var(--text-secondary); margin-top:2px;">同じ場所を連続でタップし QR スキャナを起動します。</div></div></div>
+              <div style="display:flex; gap:11px; align-items:flex-start;"><div style="width:26px; height:26px; flex:none; border-radius:50%; background:var(--primary-bg); color:var(--primary); display:flex; align-items:center; justify-content:center; font-size:13px; font-weight:700;">3</div><div><div style="font-size:13px; font-weight:600;">この QR をスキャン</div><div style="font-size:12px; color:var(--text-secondary); margin-top:2px;">Wi-Fi 接続後、上記の QR コードを読み取ります。</div></div></div>
+              <div style="display:flex; gap:11px; align-items:flex-start;"><div style="width:26px; height:26px; flex:none; border-radius:50%; background:var(--primary-bg); color:var(--primary); display:flex; align-items:center; justify-content:center; font-size:13px; font-weight:700;">4</div><div><div style="font-size:13px; font-weight:600;">ポリシー適用を待機</div><div style="font-size:12px; color:var(--text-secondary); margin-top:2px;">管理プロファイルとアプリが自動配信されます。</div></div></div>
+            </div>
+          </div>
+
+          <!-- ISSUED TOKENS -->
+          <div class="no-print" style="margin-top:18px;">
+            <div style="font-size:13px; font-weight:700; margin-bottom:10px;">発行済みトークン</div>
+            <div style="border:1px solid var(--border); border-radius:12px; background:var(--elevated); overflow:hidden; box-shadow:var(--shadow);">
+              <div style="overflow-x:auto;">
+                <table style="width:100%; border-collapse:collapse; table-layout:fixed; font-size:13px; min-width:720px;">
+                  <colgroup><col style="width:20%;" /><col style="width:22%;" /><col style="width:24%;" /><col style="width:18%;" /><col style="width:16%;" /></colgroup>
+                  <thead><tr style="background:var(--surface);">
+                    <th style="text-align:left; font-weight:600; color:var(--text-secondary); font-size:12px; padding:10px 14px; border-bottom:1px solid var(--border);">モード</th>
+                    <th style="text-align:left; font-weight:600; color:var(--text-secondary); font-size:12px; padding:10px 14px; border-bottom:1px solid var(--border);">有効期限</th>
+                    <th style="text-align:left; font-weight:600; color:var(--text-secondary); font-size:12px; padding:10px 14px; border-bottom:1px solid var(--border);">発行者</th>
+                    <th style="text-align:left; font-weight:600; color:var(--text-secondary); font-size:12px; padding:10px 14px; border-bottom:1px solid var(--border);">状態</th>
+                    <th style="text-align:right; font-weight:600; color:var(--text-secondary); font-size:12px; padding:10px 14px; border-bottom:1px solid var(--border);">アクション</th>
+                  </tr></thead>
+                  <tbody>
+                    <sc-for list="{{ tokens }}" as="tk" hint-placeholder-count="0">
+                      <tr style="border-bottom:1px solid var(--border);" style-hover="background:var(--surface);">
+                        <td style="padding:10px 14px;"><span style="display:inline-flex; align-items:center; gap:5px; font-size:11.5px; font-weight:600; padding:2px 8px; border-radius:6px; background:{{ tk.modeBg }}; color:{{ tk.modeFg }}; border:1px solid {{ tk.modeBorder }}; white-space:nowrap;">{{ tk.modeShort }}</span></td>
+                        <td style="padding:10px 14px; color:var(--text-secondary); font-variant-numeric:tabular-nums; white-space:nowrap;">{{ tk.expiry }}</td>
+                        <td style="padding:10px 14px; color:var(--text-secondary); font-family:'IBM Plex Mono',monospace; font-size:12px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">{{ tk.by }}</td>
+                        <td style="padding:10px 14px;">{{ tk.statusEl }}</td>
+                        <td style="padding:10px 14px; text-align:right;">{{ tk.actionEl }}</td>
+                      </tr>
+                    </sc-for>
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          </div>
+        </div>
+      </sc-if>
+
+    </div>
+  </main>
+
+  <!-- ===== TOASTER ===== -->
+  <div class="no-print" style="position:fixed; right:20px; bottom:20px; z-index:90; display:flex; flex-direction:column; gap:10px; width:330px; max-width:calc(100vw - 40px);">
+    <sc-for list="{{ toasts }}" as="t" hint-placeholder-count="0">
+      <div style="display:flex; align-items:flex-start; gap:11px; padding:13px 14px; background:var(--elevated); border:1px solid var(--border); border-left:3px solid {{ t.accent }}; border-radius:10px; box-shadow:var(--shadow-pop); animation:toastin .2s ease;">
+        {{ t.icon }}
+        <div style="flex:1; min-width:0;"><div style="font-size:13px; font-weight:600;">{{ t.title }}</div><div style="font-size:12px; color:var(--text-secondary); margin-top:1px;">{{ t.desc }}</div></div>
+      </div>
+    </sc-for>
+  </div>
+
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props="{&quot;$preview&quot;:{&quot;width&quot;:1320,&quot;height&quot;:960},&quot;primary&quot;:{&quot;editor&quot;:&quot;color&quot;,&quot;default&quot;:&quot;#4f46e5&quot;,&quot;tsType&quot;:&quot;string&quot;},&quot;defaultTheme&quot;:{&quot;editor&quot;:&quot;enum&quot;,&quot;default&quot;:&quot;light&quot;,&quot;options&quot;:[&quot;light&quot;,&quot;dark&quot;],&quot;tsType&quot;:&quot;'light'|'dark'&quot;},&quot;defaultRole&quot;:{&quot;editor&quot;:&quot;enum&quot;,&quot;default&quot;:&quot;TenantAdmin&quot;,&quot;options&quot;:[&quot;SuperAdmin&quot;,&quot;TenantAdmin&quot;,&quot;Operator&quot;,&quot;Viewer&quot;],&quot;tsType&quot;:&quot;string&quot;}}">
+class Component extends DCLogic {
+  state = {
+    mode: this.props.defaultTheme || 'light',
+    role: this.props.defaultRole || 'TenantAdmin',
+    collapsed: false,
+    enrollMode: 'managed',
+    kioskPolicy: '',
+    kioskError: false,
+    expiry: '24時間',
+    qr: 'idle',
+    token: '',
+    seed: 12345,
+    toasts: [],
+    tokens: [
+      { id:1, mode:'managed', expiry:'2025-06-25 18:00', by:'admin@acme.co.jp', status:'有効' },
+      { id:2, mode:'dedicated', expiry:'2025-06-20 12:00', by:'operator@acme.co.jp', status:'期限切れ' },
+      { id:3, mode:'managed', expiry:'2025-06-18 09:00', by:'admin@acme.co.jp', status:'使用済み' },
+    ],
+    nextId: 100,
+  };
+
+  componentDidMount(){ this.applyEnv(); }
+  componentDidUpdate(pp, ps){ if (ps.mode !== this.state.mode) this.applyEnv(); }
+  applyEnv(){ document.documentElement.setAttribute('data-theme', this.state.mode); if (this.props.primary) document.documentElement.style.setProperty('--primary', this.props.primary); }
+
+  el(t,p,...k){ return React.createElement(t,p,...k); }
+  perms(){ const r=this.state.role; return { enroll: r==='Operator'||r==='TenantAdmin'||r==='SuperAdmin', tenant:r==='SuperAdmin', admins:r==='TenantAdmin'||r==='SuperAdmin' }; }
+  tok(kind){ const m={ success:['var(--success-bg)','var(--success-fg)','var(--success-border)','var(--success)'], danger:['var(--danger-bg)','var(--danger-fg)','var(--danger-border)','var(--danger)'], warning:['var(--warning-bg)','var(--warning-fg)','var(--warning-border)','var(--warning)'], neutral:['var(--neutral-bg)','var(--neutral-fg)','var(--neutral-border)','var(--neutral)'], info:['var(--info-bg)','var(--info-fg)','var(--info-border)','var(--info)'], purple:['var(--purple-bg)','var(--purple-fg)','var(--purple-border)','var(--purple)'], pale:['var(--pale-bg)','var(--pale-fg)','var(--pale-border)','var(--pale-fg)'] }; return m[kind]; }
+  seg(active){ return active ? {bg:'var(--elevated)',fg:'var(--primary)',fw:'600'} : {bg:'transparent',fg:'var(--text-secondary)',fw:'500'}; }
+  radio(active){ return active ? {bd:'var(--primary)',bg:'var(--primary-bg)',dot:'var(--primary)',fill:'var(--primary)'} : {bd:'var(--border-strong)',bg:'var(--bg)',dot:'var(--border-strong)',fill:'transparent'}; }
+
+  toggleTheme=()=>this.setState(s=>({mode:s.mode==='light'?'dark':'light'}));
+  toggleCollapse=()=>this.setState(s=>({collapsed:!s.collapsed}));
+  onRoleChange=(e)=>this.setState({role:e.target.value});
+
+  themeIconEl(){ if(this.state.mode==='light') return this.el('svg',{width:17,height:17,viewBox:'0 0 24 24',fill:'none',stroke:'currentColor',strokeWidth:1.9,strokeLinecap:'round',strokeLinejoin:'round'}, this.el('path',{key:'p',d:'M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8Z'})); return this.el('svg',{width:17,height:17,viewBox:'0 0 24 24',fill:'none',stroke:'currentColor',strokeWidth:1.9,strokeLinecap:'round',strokeLinejoin:'round'}, this.el('circle',{key:'c',cx:12,cy:12,r:4}), this.el('path',{key:'p',d:'M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4'})); }
+  toastIcon(kind){ if(kind==='pending') return this.el('div',{key:'i',style:{width:16,height:16,flex:'none',marginTop:1,borderRadius:'50%',border:'2px solid var(--border-strong)',borderTopColor:'var(--primary)',animation:'spin .7s linear infinite'}}); const color=kind==='success'?'var(--success-fg)':'var(--danger-fg)'; const path=kind==='success'?'M20 6 9 17l-5-5':'M18 6 6 18M6 6l12 12'; return this.el('svg',{key:'i',width:16,height:16,viewBox:'0 0 24 24',fill:'none',stroke:color,strokeWidth:2.4,strokeLinecap:'round',strokeLinejoin:'round',style:{flex:'none',marginTop:1}}, this.el('path',{key:'p',d:path})); }
+
+  // deterministic QR-like matrix
+  qrMatrixEl(seed){
+    const N=25, cell=8, size=N*cell;
+    let s = (seed>>>0) || 1;
+    const rnd = () => { s ^= s<<13; s^=s>>>17; s^=s<<5; return ((s>>>0)%1000)/1000; };
+    const reserved = (r,c) => (r<8&&c<8) || (r<8&&c>=N-8) || (r>=N-8&&c<8);
+    const inFinder = (r,c,or_,oc) => { const i=r-or_, j=c-oc; if(i<0||i>6||j<0||j>6) return false; if(i===0||i===6||j===0||j===6) return true; if(i>=2&&i<=4&&j>=2&&j<=4) return true; return false; };
+    const finderDark = (r,c) => inFinder(r,c,0,0) || inFinder(r,c,0,N-7) || inFinder(r,c,N-7,0);
+    const rects=[];
+    for(let r=0;r<N;r++) for(let c=0;c<N;c++){
+      let dark=false;
+      if(reserved(r,c)) dark = finderDark(r,c);
+      else dark = rnd() > 0.52;
+      if(dark) rects.push(this.el('rect',{key:r+'-'+c,x:c*cell,y:r*cell,width:cell,height:cell,fill:'#0b0b0b'}));
+    }
+    return this.el('svg',{width:200,height:200,viewBox:'0 0 '+size+' '+size,shapeRendering:'crispEdges',style:{display:'block'}}, this.el('rect',{key:'bg',x:0,y:0,width:size,height:size,fill:'#ffffff'}), rects);
+  }
+
+  pushToast(t){ const id=Date.now()+Math.random(); this.setState(s=>({toasts:[...s.toasts,{id,...t}]})); return id; }
+  updateToast(id,p){ this.setState(s=>({toasts:s.toasts.map(t=>t.id===id?{...t,...p}:t)})); }
+  removeToast(id){ this.setState(s=>({toasts:s.toasts.filter(t=>t.id!==id)})); }
+  flashToast(t,ms){ const id=this.pushToast(t); setTimeout(()=>this.removeToast(id), ms||2400); }
+
+  pickManaged=()=>this.setState({enrollMode:'managed',kioskError:false});
+  pickDedicated=()=>this.setState({enrollMode:'dedicated'});
+  onKioskPolicy=(e)=>this.setState({kioskPolicy:e.target.value,kioskError:false});
+  onExpiry=(e)=>this.setState({expiry:e.target.value});
+
+  genToken(){ const chars='ABCDEFGHJKMNPQRSTVWXYZ23456789'; let out=''; for(let i=0;i<16;i++){ if(i&&i%4===0) out+='-'; out+=chars[Math.floor(Math.random()*chars.length)]; } return 'AMAPI-'+out; }
+  expiryAtStr(){ const map={'1時間':1,'24時間':24,'7日間':168,'30日間':720}; const h=map[this.state.expiry]||24; const d=new Date(Date.now()+h*3600*1000); const z=n=>String(n).padStart(2,'0'); return `${d.getFullYear()}-${z(d.getMonth()+1)}-${z(d.getDate())} ${z(d.getHours())}:${z(d.getMinutes())}`; }
+
+  issueToken=()=>{
+    if (!this.perms().enroll) return;
+    if (this.state.enrollMode==='dedicated' && !this.state.kioskPolicy){ this.setState({kioskError:true}); return; }
+    const tid = this.pushToast({ kind:'pending', title:'トークンを発行中…', desc:'AMAPI に登録トークンを要求しています' });
+    setTimeout(()=>{
+      const token = this.genToken();
+      const by = { SuperAdmin:'platform-ops@mobiguard.io', TenantAdmin:'admin@acme.co.jp', Operator:'operator@acme.co.jp', Viewer:'viewer@acme.co.jp' }[this.state.role];
+      const newTok = { id:this.state.nextId, mode:this.state.enrollMode, expiry:this.expiryAtStr(), by, status:'有効' };
+      this.setState(s=>({ qr:'active', token, seed:(s.seed*48271+1)>>>0, nextId:s.nextId+1, tokens:[newTok, ...s.tokens] }));
+      this.updateToast(tid, { kind:'success', title:'トークンを発行しました', desc:'QR コードを端末でスキャンしてください' });
+      setTimeout(()=>this.removeToast(tid), 3200);
+    }, 1500);
+  };
+  revokeActive=()=>{ this.setState(s=>({ qr:'expired', tokens: s.tokens.map((t,i)=> i===0 && t.status==='有効' ? {...t, status:'失効済み'} : t) })); this.flashToast({kind:'success',title:'トークンを失効しました',desc:'この QR は使用できなくなりました'},2600); };
+  revokeRow(id){ this.setState(s=>({ tokens: s.tokens.map(t=> t.id===id ? {...t, status:'失効済み'} : t) })); this.flashToast({kind:'success',title:'トークンを失効しました',desc:'この QR は使用できなくなりました'},2600); }
+  doPrint=()=>{ window.print(); };
+  doDownload=()=>{ this.flashToast({kind:'success',title:'QR 画像をダウンロードしました',desc:'enrollment-qr.png（プレビュー）'},2400); };
+
+  renderVals(){
+    document.documentElement.setAttribute('data-theme', this.state.mode);
+    if (this.props.primary) document.documentElement.style.setProperty('--primary', this.props.primary);
+    const r=this.state.role, p=this.perms();
+    const emails={ SuperAdmin:'platform-ops@mobiguard.io', TenantAdmin:'admin@acme.co.jp', Operator:'operator@acme.co.jp', Viewer:'viewer@acme.co.jp' };
+    const rbt=this.tok({ SuperAdmin:'purple', TenantAdmin:'info', Operator:'success', Viewer:'neutral' }[r]);
+
+    const statusKind={ '有効':'success','期限切れ':'pale','使用済み':'neutral','失効済み':'pale' };
+    const tokens=this.state.tokens.map(t=>{
+      const isDed=t.mode==='dedicated';
+      const mt=this.tok(isDed?'purple':'info');
+      const sk=this.tok(statusKind[t.status]);
+      const dot = (t.status==='有効') ? this.el('span',{key:'d',style:{width:6,height:6,borderRadius:'50%',background:sk[3]}}) : null;
+      const statusEl=this.el('span',{style:{display:'inline-flex',alignItems:'center',gap:5,fontSize:'11.5px',fontWeight:600,padding:'2px 8px',borderRadius:6,background:sk[0],color:sk[1],border:'1px solid '+sk[2],whiteSpace:'nowrap'}}, dot, t.status);
+      const canRevoke = t.status==='有効' && p.enroll;
+      const actionEl = canRevoke
+        ? this.el('button',{ onClick:()=>this.revokeRow(t.id), style:{height:28,padding:'0 11px',border:'1px solid var(--border-strong)',borderRadius:7,background:'var(--bg)',color:'var(--danger-fg)',fontSize:'12px',fontWeight:600,fontFamily:'inherit',cursor:'pointer'} }, '失効')
+        : this.el('span',{ style:{fontSize:'12px',color:'var(--text-muted)'} }, '—');
+      return { modeShort:isDed?'Dedicated':'Managed', modeBg:mt[0], modeFg:mt[1], modeBorder:mt[2], expiry:t.expiry, by:t.by, statusEl, actionEl };
+    });
+
+    return {
+      mode:this.state.mode, role:r, userEmail:emails[r], userInitials:r.slice(0,2).toUpperCase(),
+      roleBadgeBg:rbt[0], roleBadgeFg:rbt[1], isSuperAdmin:p.tenant, canSeeAdmins:p.admins,
+      tenantLabel:'Acme 株式会社', sidebarWidth:this.state.collapsed?'64px':'240px', showLabels:!this.state.collapsed,
+      themeIcon:this.themeIconEl(), toggleTheme:this.toggleTheme, toggleCollapse:this.toggleCollapse, onRoleChange:this.onRoleChange,
+
+      canEnroll:p.enroll, isDenied:!p.enroll,
+
+      // form
+      isDedicated:this.state.enrollMode==='dedicated',
+      mManaged:this.radio(this.state.enrollMode==='managed'), mDedicated:this.radio(this.state.enrollMode==='dedicated'),
+      pickManaged:this.pickManaged, pickDedicated:this.pickDedicated,
+      kioskPolicy:this.state.kioskPolicy, onKioskPolicy:this.onKioskPolicy, kioskError:this.state.kioskError,
+      kioskBorder:this.state.kioskError?'var(--danger)':'var(--border-strong)',
+      expiry:this.state.expiry, onExpiry:this.onExpiry,
+      issueToken:this.issueToken,
+
+      // qr states
+      qrIdle:this.state.qr==='idle', qrActive:this.state.qr==='active', qrExpired:this.state.qr==='expired', qrErrored:this.state.qr==='error',
+      setQrIdle:()=>this.setState({qr:'idle'}), setQrActive:()=>this.setState(s=>({qr:'active', token:s.token||this.genToken()})), setQrExpired:()=>this.setState({qr:'expired'}), setQrError:()=>this.setState({qr:'error'}),
+      qIdle:this.seg(this.state.qr==='idle'), qActive:this.seg(this.state.qr==='active'), qExp:this.seg(this.state.qr==='expired'), qErr:this.seg(this.state.qr==='error'),
+      qrEl:this.qrMatrixEl(this.state.seed),
+      token:this.state.token||'AMAPI-XXXX-XXXX-XXXX-XXXX',
+      activeMode:this.state.enrollMode==='dedicated'?('Dedicated · '+(this.state.kioskPolicy||'Kiosk')):'Fully Managed',
+      expiryAt:this.expiryAtStr(),
+      doPrint:this.doPrint, doDownload:this.doDownload, revokeActive:this.revokeActive,
+
+      tokens,
+      toasts:this.state.toasts.map(t=>({ ...t, accent:t.kind==='success'?'var(--success)':t.kind==='error'?'var(--danger)':'var(--primary)', icon:this.toastIcon(t.kind) })),
+    };
+  }
+}
+</script>
+</body>
+</html>
