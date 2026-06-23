@@ -560,7 +560,8 @@ func FromContext(ctx context.Context) (TenantContext, error)
 
 **Responsibilities & Constraints**
 - 主責務: `BeginTxFunc(ctx, fn)` パターンで tx の begin / commit / rollback を一元化。fn 実行前に
-  `SET LOCAL app.tenant_id = '<uuid>'` を発行（SuperAdmin なら `SET LOCAL app.is_superadmin = true`
+  `set_config('app.tenant_id', '<uuid>', true)` を発行（`SET LOCAL ... = $1` はバインドパラメータ不可のため
+  `set_config(key, value, is_local=true)` を用いる。SuperAdmin なら `set_config('app.is_superadmin', 'true', true)`
   を追加）
 - ドメイン境界: 全 DB アクセスの入口
 - データ所有権: tx そのもの
@@ -589,7 +590,7 @@ func BeginTxFunc(
     fn func(tx pgx.Tx) error,
 ) error
 
-// SetLocalTenant は tx 内で SET LOCAL app.tenant_id（および is_superadmin）を発行する。
+// SetLocalTenant は tx 内で set_config('app.tenant_id', ..., true)（および is_superadmin）を発行する。
 // BeginTxFunc から内部呼び出しされる前提で、外部から直接呼ぶことは想定しない。
 func SetLocalTenant(ctx context.Context, tx pgx.Tx, tc TenantContext) error
 ```
@@ -697,13 +698,13 @@ func RequireSuperAdmin(log logger.Logger) func(http.Handler) http.Handler
 | `0008_create_tenant_apps` | `tenant_apps` (id, tenant_id, package_name, title, icon_url, approved_at, UNIQUE(tenant_id, package_name)) |
 | `0009_create_audit_logs` | `audit_logs` (id, tenant_id nullable, actor_id, event_type, resource_id, detail jsonb, result enum, occurred_at) |
 | `0010_create_notification_dedupe_and_unassigned` | `notification_dedupe` (message_id PK, ...) + `unassigned_notifications` |
-| `0011_enable_rls` | 全 tenant_id 持ち table に `ENABLE ROW LEVEL SECURITY` + `tenant_isolation_*` ポリシー（USING で `tenant_id = current_setting('app.tenant_id')::uuid OR current_setting('app.is_superadmin')::boolean`） |
-| `0012_audit_log_immutability` | `audit_logs` に `FORCE ROW LEVEL SECURITY`、SELECT/INSERT ポリシー、UPDATE/DELETE は **`REVOKE UPDATE, DELETE ON audit_logs FROM app_user`**（ポリシー未定義 + REVOKE の二重防御） |
+| `0011_enable_rls` | **`audit_logs` を除く**全 tenant_id 持ち table に `ENABLE ROW LEVEL SECURITY` + `tenant_isolation_*` ポリシー（USING/WITH CHECK で `tenant_id = current_setting('app.tenant_id', true)::uuid OR current_setting('app.is_superadmin', true)::boolean`）。`audit_logs` は append-only 要件のため本マイグレーションの汎用 FOR ALL ポリシー対象から除外し、0012 で SELECT/INSERT のみ個別定義する |
+| `0012_audit_log_immutability` | `audit_logs` に `ENABLE`+`FORCE ROW LEVEL SECURITY`、SELECT ポリシー + INSERT ポリシー（**WITH CHECK でテナント分離: `tenant_id = current_setting('app.tenant_id', true)::uuid OR current_setting('app.is_superadmin', true)::boolean`**。任意 tenant_id / NULL の挿入を防ぐ）、UPDATE/DELETE は **ポリシー未定義**（0011 の汎用ポリシーを audit_logs に作らないため許可されない）+ **`REVOKE UPDATE, DELETE ON audit_logs FROM app_user`** の二重防御 |
 
 #### RLS ポリシー（テンプレート）
 
 ```sql
--- 全 tenant_id 持ち table 共通テンプレート（0011_enable_rls.up.sql）
+-- 全 tenant_id 持ち table 共通テンプレート（0011_enable_rls.up.sql）。audit_logs は対象外（下記 0012 で個別定義）
 ALTER TABLE devices ENABLE ROW LEVEL SECURITY;
 CREATE POLICY tenant_isolation_devices ON devices
     USING (
@@ -723,8 +724,14 @@ CREATE POLICY audit_logs_select ON audit_logs FOR SELECT
         tenant_id = current_setting('app.tenant_id', true)::uuid
         OR current_setting('app.is_superadmin', true)::boolean
     );
-CREATE POLICY audit_logs_insert ON audit_logs FOR INSERT WITH CHECK (true);
--- UPDATE / DELETE はポリシーを定義せず、追加で REVOKE で物理拒否
+-- INSERT は現在のテナント context に紐づく行のみ許可（任意 tenant_id / NULL の挿入を防ぐ）。
+-- SuperAdmin はシステム監査ログ（tenant_id NULL 含む）を挿入できる。
+CREATE POLICY audit_logs_insert ON audit_logs FOR INSERT WITH CHECK (
+    tenant_id = current_setting('app.tenant_id', true)::uuid
+    OR current_setting('app.is_superadmin', true)::boolean
+);
+-- UPDATE / DELETE はポリシーを定義せず（0011 の汎用 FOR ALL ポリシーも audit_logs には作らない）、
+-- 追加で REVOKE で物理拒否（二重防御）
 REVOKE UPDATE, DELETE ON audit_logs FROM app_user;
 ```
 
@@ -908,6 +915,8 @@ flowchart LR
 3. **`/healthz` `/readyz` の認可**: 本設計では middleware chain の外側に配置（認証不要）。
    外部公開ポートで `/readyz` を晒すと DB 状態が露出するリスクがあるが、Fargate / k8s の
    readiness probe との相性から chain 外配置を採用。問題ないか
-4. **`MIGRATE_DATABASE_URL` のロール選択**: `migration_user` での接続を要求するか、便宜上
-   `DATABASE_URL` の `ae_mdm` user（DDL 権限あり）で代用するかは MVP では `ae_mdm` 兼用を仮置き。
-   本番運用で `migration_user` 分離が必須なら、後続の運用 Issue で対応する想定
+4. **`MIGRATE_DATABASE_URL` のロール選択**: Req 6.5（DDL 用ロールと app 用ロールの分離）は必須要件のため、
+   本設計では分離を **MVP スコープに含める**。`MIGRATE_DATABASE_URL` は `migration_user`（DDL 権限あり、
+   `db/roles/0001_create_app_and_migration_roles.sql` で定義）で接続し、`DATABASE_URL` は `app_user`
+   （DDL 権限なし・RLS バインド・`audit_logs` の UPDATE/DELETE は REVOKE 済）で接続する。両ロールの作成手順は
+   runbook に記述する（`ae_mdm` 兼用への後退は行わない）

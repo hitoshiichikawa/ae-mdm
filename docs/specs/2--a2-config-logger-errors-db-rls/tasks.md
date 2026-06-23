@@ -65,8 +65,9 @@
     `FromContext(ctx) (TenantContext, error)` を実装。未設定時は
     `*errors.Error{Code: "tenant_context_missing"}` を返す
   - `backend/internal/platform/db/rls.go` に `SetLocalTenant(ctx, tx, tc) error` を実装。
-    `SET LOCAL app.tenant_id = $1` をパラメータバインドで発行し、SuperAdmin 時は
-    `SET LOCAL app.is_superadmin = true` を追加発行（TenantID=uuid.Nil の SuperAdmin は
+    `SELECT set_config('app.tenant_id', $1, true)` をパラメータバインドで発行し（PostgreSQL の
+    `SET LOCAL ... = $1` はバインドパラメータ不可のため、tx-local GUC は `set_config(key, value, is_local=true)`
+    で設定する）、SuperAdmin 時は `SELECT set_config('app.is_superadmin', 'true', true)` を追加発行（TenantID=uuid.Nil の SuperAdmin は
     `app.tenant_id` をセットしない / `current_setting` が NULL を返す → default deny に倒れる）
   - `backend/internal/platform/db/txmanager.go` に `BeginTxFunc(ctx, pool, fn) error` を実装。
     ctx に TenantContext が無い場合 **panic**（`*errors.Error{Code: "tenant_context_missing"}`
