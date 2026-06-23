@@ -11,7 +11,11 @@ CREATE TABLE IF NOT EXISTS policies (
     version           integer NOT NULL DEFAULT 1,
     updated_by        uuid REFERENCES admin_users(id),
     created_at        timestamptz NOT NULL DEFAULT now(),
-    updated_at        timestamptz NOT NULL DEFAULT now()
+    updated_at        timestamptz NOT NULL DEFAULT now(),
+    -- 後続テーブル（devices.applied_policy_id）から (id, tenant_id) 複合 FK で参照させ、
+    -- DB レベルで「policy と参照側 devices のテナント一致」を強制するための ancillary key。
+    -- PR #31 round-2 review 由来（tenant 境界の二重防御）。
+    UNIQUE (id, tenant_id)
 );
 
 CREATE INDEX IF NOT EXISTS idx_policies_tenant_id ON policies(tenant_id);
