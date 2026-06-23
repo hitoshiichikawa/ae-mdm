@@ -1,0 +1,12 @@
+# build artifacts
+/bin/
+/out/
+*.test
+*.out
+
+# dev artifacts
+.vscode/
+.idea/
+*.swp
+
+# テスト fixture が大きい場合に追加（現時点では未配置）

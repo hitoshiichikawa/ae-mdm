@@ -1,0 +1,167 @@
+# ae-mdm ローカル開発用 Docker Compose
+# requirements.md Requirement 5（7 サービス + health check + depends_on）
+# requirements.md NFR 1.1, 1.2（ステートレス・認証情報は .env 経由）
+# requirements.md NFR 3.1（health check は 60 秒以内に収束）
+
+services:
+  # ---- データベース ----
+  postgres:
+    image: postgres:16-alpine
+    container_name: ae-mdm-postgres
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-ae_mdm}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set in .env}
+      POSTGRES_DB: ${POSTGRES_DB:-ae_mdm}
+    ports:
+      - "${POSTGRES_HOST_PORT:-5432}:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-ae_mdm} -d ${POSTGRES_DB:-ae_mdm}"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+
+  # ---- 認証 (Keycloak) ----
+  # dev mode で realm-export.json を import する（requirements.md Requirement 7.7）
+  keycloak:
+    image: quay.io/keycloak/keycloak:25.0
+    container_name: ae-mdm-keycloak
+    command: ["start-dev", "--import-realm"]
+    environment:
+      KC_BOOTSTRAP_ADMIN_USERNAME: ${KEYCLOAK_ADMIN:-admin}
+      KC_BOOTSTRAP_ADMIN_PASSWORD: ${KEYCLOAK_ADMIN_PASSWORD:?KEYCLOAK_ADMIN_PASSWORD must be set in .env}
+      KC_HEALTH_ENABLED: "true"
+      KC_HTTP_ENABLED: "true"
+      KC_HOSTNAME_STRICT: "false"
+    volumes:
+      - ./infra/keycloak/realm-export.json:/opt/keycloak/data/import/realm-export.json:ro
+    ports:
+      - "${KEYCLOAK_HOST_PORT:-8081}:8080"
+      - "${KEYCLOAK_MGMT_HOST_PORT:-9000}:9000"
+    healthcheck:
+      # Keycloak 25 では management port (9000) の /health/ready が readiness を返す
+      test: ["CMD-SHELL", "exec 3<>/dev/tcp/localhost/9000 && echo -e 'GET /health/ready HTTP/1.0\\r\\n\\r\\n' >&3 && grep -q '\"status\": \"UP\"' <&3"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 30s
+
+  # ---- Pub/Sub emulator ----
+  # AMAPI からの通知（ENROLLMENT / STATUS_REPORT / COMMAND）受信用
+  pubsub-emulator:
+    image: gcr.io/google.com/cloudsdktool/google-cloud-cli:emulators
+    container_name: ae-mdm-pubsub
+    command:
+      - /bin/sh
+      - -c
+      - |
+        gcloud beta emulators pubsub start \
+          --project=${PUBSUB_PROJECT_ID:-ae-mdm-dev} \
+          --host-port=0.0.0.0:8085
+    ports:
+      - "${PUBSUB_HOST_PORT:-8085}:8085"
+    healthcheck:
+      # pubsub emulator は GET / で 200 (or 404) を返す。tcp 接続で readiness 判定
+      test: ["CMD-SHELL", "exec 3<>/dev/tcp/localhost/8085 || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+      start_period: 10s
+
+  # ---- backend api プロセス ----
+  api:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile.api
+    container_name: ae-mdm-api
+    environment:
+      DATABASE_URL: ${DATABASE_URL}
+      PUBSUB_EMULATOR_HOST: pubsub-emulator:8085
+      PUBSUB_PROJECT_ID: ${PUBSUB_PROJECT_ID:-ae-mdm-dev}
+      PUBSUB_TOPIC: ${PUBSUB_TOPIC:-amapi-notifications}
+      PUBSUB_SUBSCRIPTION: ${PUBSUB_SUBSCRIPTION:-amapi-notifications-sub}
+      OIDC_TENANT_ISSUER_URL: ${OIDC_TENANT_ISSUER_URL}
+      OIDC_TENANT_CLIENT_ID: ${OIDC_TENANT_CLIENT_ID}
+      OIDC_TENANT_REDIRECT_URL: ${OIDC_TENANT_REDIRECT_URL}
+      OIDC_ADMIN_ISSUER_URL: ${OIDC_ADMIN_ISSUER_URL}
+      OIDC_ADMIN_CLIENT_ID: ${OIDC_ADMIN_CLIENT_ID}
+      OIDC_ADMIN_REDIRECT_URL: ${OIDC_ADMIN_REDIRECT_URL}
+      AMAPI_PROJECT_ID: ${AMAPI_PROJECT_ID}
+      GOOGLE_APPLICATION_CREDENTIALS: ${GOOGLE_APPLICATION_CREDENTIALS:-/run/secrets/amapi-sa.json}
+      SESSION_SECRET: ${SESSION_SECRET:?SESSION_SECRET must be set in .env}
+      AUDIT_LOG_RETENTION_DAYS: ${AUDIT_LOG_RETENTION_DAYS:-180}
+      DEVICE_SYNC_DELAY_THRESHOLD_HOURS: ${DEVICE_SYNC_DELAY_THRESHOLD_HOURS:-24}
+    ports:
+      - "${API_HOST_PORT:-8080}:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      keycloak:
+        condition: service_healthy
+      pubsub-emulator:
+        condition: service_healthy
+    healthcheck:
+      # /healthz は umbrella task 14.1 で実装予定。現時点では process が走っているかを判定
+      test: ["CMD-SHELL", "pgrep -x api > /dev/null || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 10s
+
+  # ---- backend worker プロセス ----
+  worker:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile.worker
+    container_name: ae-mdm-worker
+    environment:
+      DATABASE_URL: ${DATABASE_URL}
+      PUBSUB_EMULATOR_HOST: pubsub-emulator:8085
+      PUBSUB_PROJECT_ID: ${PUBSUB_PROJECT_ID:-ae-mdm-dev}
+      PUBSUB_SUBSCRIPTION: ${PUBSUB_SUBSCRIPTION:-amapi-notifications-sub}
+      AMAPI_PROJECT_ID: ${AMAPI_PROJECT_ID}
+      GOOGLE_APPLICATION_CREDENTIALS: ${GOOGLE_APPLICATION_CREDENTIALS:-/run/secrets/amapi-sa.json}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      keycloak:
+        condition: service_healthy
+      pubsub-emulator:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "pgrep -x worker > /dev/null || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 10s
+
+  # ---- frontend tenant-console SPA ----
+  tenant-console:
+    build:
+      context: .
+      dockerfile: frontend/tenant-console/Dockerfile
+    container_name: ae-mdm-tenant-console
+    ports:
+      - "${TENANT_CONSOLE_HOST_PORT:-5173}:80"
+    depends_on:
+      - api
+
+  # ---- frontend admin-console SPA ----
+  admin-console:
+    build:
+      context: .
+      dockerfile: frontend/admin-console/Dockerfile
+    container_name: ae-mdm-admin-console
+    ports:
+      - "${ADMIN_CONSOLE_HOST_PORT:-5174}:80"
+    depends_on:
+      - api
+
+volumes:
+  postgres-data:
+
+networks:
+  default:
+    name: ae-mdm-default

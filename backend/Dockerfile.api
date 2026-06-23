@@ -1,0 +1,23 @@
+# ae-mdm api プロセス用 multi-stage Dockerfile
+# requirements.md Requirement 6.1, 6.2 / NFR 4.1（最終 stage は distroless）
+
+# ---- Build stage ----
+FROM golang:1.22-alpine AS builder
+WORKDIR /src
+
+# Go module キャッシュ最適化: 先に go.mod / go.sum のみコピー
+COPY go.mod go.sum ./
+RUN go mod download
+
+# ソースをコピーしてバイナリビルド
+COPY . .
+ENV CGO_ENABLED=0 GOOS=linux GOARCH=amd64
+RUN go build -trimpath -ldflags="-s -w" -o /out/api ./cmd/api
+
+# ---- Final stage (distroless) ----
+FROM gcr.io/distroless/static-debian12:nonroot AS final
+WORKDIR /app
+COPY --from=builder /out/api /app/api
+USER nonroot:nonroot
+EXPOSE 8080
+ENTRYPOINT ["/app/api"]
