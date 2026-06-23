@@ -66,7 +66,7 @@
   - _Requirements: 4.1, NFR 3.1, NFR 3.2_
   - _Boundary: DBPool_
   - _Depends: 1.1, 1.3_
-- [ ] 2.2 TenantContext 型 + TxManager + RLS Helper + panic ガード
+- [x] 2.2 TenantContext 型 + TxManager + RLS Helper + panic ガード
   - `backend/internal/platform/db/context.go` に `TenantContext` struct（TenantID /
     AdminUserID / Roles / IsSuperAdmin）と `WithTenantContext(ctx, tc)` /
     `FromContext(ctx) (TenantContext, error)` を実装。未設定時は
