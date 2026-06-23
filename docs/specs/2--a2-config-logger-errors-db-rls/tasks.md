@@ -152,7 +152,7 @@
   - _Requirements: 6.5, NFR 2.1, NFR 2.2, NFR 3.1_
   - _Depends: 3.3_
 
-- [ ] 4. HTTP サブルータ + middleware chain
+- [x] 4. HTTP サブルータ + middleware chain
 - [x] 4.1 chi router + 2 サブルータ mount + middleware chain
   - `backend/internal/platform/httpserver/middleware.go` に recover / request_id（uuid v4）/
     structured access log（method / path / status / duration / request_id / tenant_id を field
