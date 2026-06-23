@@ -66,6 +66,11 @@ cp .env.example .env
 - `KEYCLOAK_ADMIN_PASSWORD`: Keycloak 管理コンソールの初期パスワード
 - `SESSION_SECRET`: 32 バイト以上のランダム hex。`openssl rand -hex 32` で生成
 - `DATABASE_URL`: `POSTGRES_PASSWORD` と整合した接続文字列に書き換える
+  （compose 内部 hostname `postgres` を指す。コンテナ内 api / worker が参照）
+- `MIGRATE_DATABASE_URL`: ホストから `make migrate-up` / `make migrate-down` を実行する
+  ときに使う接続文字列。`POSTGRES_HOST_PORT`（既定 5432）で publish された
+  `localhost` を指す。`MIGRATE_DATABASE_URL` が空の場合 Makefile は `DATABASE_URL` に
+  フォールバックするが、その場合ホストから `postgres` ホスト名が解決できず失敗する
 
 > `.env` は `.gitignore` で除外されています。実値をコミットしないでください
 > （requirements.md NFR 1.2）。

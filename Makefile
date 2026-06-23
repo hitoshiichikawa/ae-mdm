@@ -75,8 +75,13 @@ fmt:
 # golang-migrate を go run 経由で実行
 # requirements.md 3.6: migrate-up / migrate-down ターゲット自体は動作すること
 #   （本 Issue 時点で migration ファイル本体は空でも良い）
+#
+# DATABASE_URL は compose 内部 hostname (`postgres`) を指すためホスト実行では解決不能。
+# ホストから `make migrate-*` する想定で、まず MIGRATE_DATABASE_URL を優先利用し、
+# それも未設定なら DATABASE_URL にフォールバックする（後者は `docker compose exec` 等の
+# 内部実行用途）。MIGRATE_DB_URL 自体は CLI からの上書きを許容する。
 MIGRATE_PATH := backend/db/migrations
-MIGRATE_DB_URL ?= $(DATABASE_URL)
+MIGRATE_DB_URL ?= $(or $(MIGRATE_DATABASE_URL),$(DATABASE_URL))
 
 migrate-up:
 	@echo "==> migrate up: $(MIGRATE_PATH)"
