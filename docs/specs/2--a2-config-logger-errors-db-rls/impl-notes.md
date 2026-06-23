@@ -103,6 +103,83 @@
     cross-tenant 分岐に正しく合流するように、TenantContext を組み立てる箇所で
     `TenantID=uuid.Nil, IsSuperAdmin=true` を明示的に設定すること。
 
+### Task 3
+
+- **採用方針**: SQL マイグレーション 12 ペア（0001-0010 = CREATE TABLE + enum、
+  0011 = RLS 有効化 + 汎用 / subselect / SuperAdmin 専用ポリシー、0012 = audit_logs
+  append-only 強制）と DB ロール定義 SQL（`backend/db/roles/0001_*.sql`）を追加し、
+  task 2 で実装した `SetLocalTenant` が発行する GUC（`app.tenant_id` / `app.is_superadmin`）
+  と完全一致する RLS ポリシーで物理分離を確立する。本 task は SQL / Makefile / runbook /
+  `.env.example` の追加 / 変更のみで Go コードは触らない（unit test は task 6.1 の
+  integration test に委譲）。
+- **重要な判断**
+  - **GUC 名の完全一致**: 0011 / 0012 の RLS ポリシーが参照する `app.tenant_id` /
+    `app.is_superadmin` は、`backend/internal/platform/db/rls.go` の `SetLocalTenant`
+    が `set_config(key, value, true)` で発行する文字列と byte レベルで一致させた。
+    task 2 の learning でも明示された通り、typo は cross-tenant leak の直接原因に
+    なるためコード生成 / 切り出しはせず、SQL コメント側に「rls.go の SetLocalTenant
+    が発行する名称と完全一致させること」を必須注釈として残した。
+  - **audit_logs INSERT WITH CHECK の二重防御**: 0012 の `audit_logs_insert` ポリシーは
+    `tenant_id = current_setting('app.tenant_id', true)::uuid OR current_setting('app.is_superadmin', true)::boolean`
+    とし、(a) 通常テナント文脈で他テナント宛 / NULL の挿入を物理拒否、(b) SuperAdmin
+    文脈で cross-tenant 監査 / tenant_id=NULL システム監査の挿入を許容、の 2 経路を
+    OR で素通りさせる設計に固定。UPDATE / DELETE はポリシー未定義（0011 の汎用 FOR ALL
+    ポリシーも作っていない）+ `REVOKE UPDATE, DELETE ON audit_logs FROM app_user` の
+    二重防御で改竄不可を担保。`REVOKE` は `app_user` 未作成環境向けに
+    `DO $$ ... undefined_object EXCEPTION ... END $$` で NOTICE skip 経路を入れた。
+  - **sessions の subselect ポリシー**: `sessions.tenant_id` カラムが存在しないため、
+    `admin_users.tenant_id` を `EXISTS (SELECT 1 FROM admin_users WHERE ...)` で参照する
+    `tenant_isolation_sessions` を採用。post-tenant 経路（TenantContext 確立後）では
+    通常通り分離が成立する一方、認証 lookup（token_hash でセッションを引く pre-tenant
+    経路）は本ポリシー下で 0 行に倒れるため、後続 Issue の Session Manager は
+    `app.is_superadmin=true` で SuperAdmin 文脈として lookup する前提（design.md
+    「sessions の認証 lookup 経路」散文と整合）。本 task では lookup ヘルパは未実装。
+  - **migration_user / app_user の権限粒度**: `migration_user` = DDL 全権限（`ALL
+    PRIVILEGES ON DATABASE` + `ALL ON ALL TABLES IN SCHEMA public` + `ALTER DEFAULT
+    PRIVILEGES`）、`app_user` = DML のみ（`SELECT, INSERT, UPDATE, DELETE ON ALL TABLES`
+    + `USAGE, SELECT ON ALL SEQUENCES` + `ALTER DEFAULT PRIVILEGES`）の方針を採用。
+    `audit_logs` の UPDATE/DELETE は本ファイルでは GRANT し、0012 で `REVOKE` する
+    ことで二重防御を成立させる（GRANT → REVOKE の順序逆転に注意）。`migration_user`
+    自身は `audit_logs` への UPDATE/DELETE も可能だが、`FORCE ROW LEVEL SECURITY` で
+    テーブル所有者からも RLS が回避不可になるため、INSERT ポリシーで tenant_id の
+    整合性が要求される。
+  - **冪等性イディオムの選定**: テーブル / インデックスは `IF NOT EXISTS`、enum / role
+    は `DO $$ ... duplicate_object EXCEPTION ... END $$`、policy は `DROP POLICY IF
+    EXISTS ... ; CREATE POLICY ...` の 3 種で書き分け。PostgreSQL 16 では
+    `CREATE POLICY IF NOT EXISTS` が未対応のため、policy だけは drop-recreate パターンで
+    冪等化する選択を取った（design.md Migration Strategy 節と整合）。
+  - **`make db-init-roles` の psql 依存**: roles の適用は `golang-migrate` の管轄外
+    （schema_migrations に記録しない初期セットアップ）であり、`psql` CLI を `go run`
+    経由で起動するのは現実的に困難なため、host 上の `psql` を必須とするシンプルな
+    target を採用。psql 未インストール環境向けに `docker compose cp + docker compose
+    exec psql` の代替手順を runbook に併記した。
+- **残存課題（次 task への申し送り）**
+  - **task 4.1（recover / TenantContextMiddleware）への申し送り**: 本 task の RLS
+    ポリシーは「`current_setting('app.tenant_id', true)` が NULL ならポリシー false に
+    倒れる」設計のため、TenantContextMiddleware が **claims を ctx に注入しない default
+    deny 状態**でも `BeginTxFunc` 経由の DB アクセスは panic ガード（task 2）+ RLS の
+    二重で物理的に止まる。auth スタブの default deny 挙動は本 task の RLS と完全に
+    整合している。
+  - **task 5.1 / 5.2（cmd/api / cmd/worker bootstrap）への申し送り**: `DATABASE_URL`
+    は `app_user` 接続前提に変更済み。bootstrap で `db.NewPool(ctx, cfg)` が ping で
+    疎通確認するときに、`app_user` ロールが未作成の環境では接続失敗するため、
+    `NFR 3.1 / 3.2` の fail-fast 経路に乗る（CodeUnavailable で exit 1）。
+    `make db-init-roles` 未実行のオペレータミスをログで明示する責務は cmd/api 側の
+    ERROR ログに任せる（接続文字列の user 名を redaction 通過後に出力する想定）。
+  - **task 6.1 / 6.2（integration test）への申し送り**: `docker compose up -d postgres`
+    + `make db-init-roles` + `make migrate-up` の 3 ステップで実 RLS verify を回せる。
+    integration test 側で migrate-up を Go コードから実行する場合、`migration_user` 接続を
+    使うこと（`app_user` では DDL 失敗）。`audit_logs` の append-only verify は `app_user`
+    接続で行い、`migration_user` 接続でやると REVOKE が効かないため誤判定する点に注意。
+    task 6.1 の (g) WITH CHECK 二重防御テストは、本 task の 0012 INSERT ポリシーが
+    意図通りに動作することを検証する経路で、本 task の judgment（design.md L796-804）と
+    1:1 対応する。
+  - **`audit_logs` UPDATE/DELETE REVOKE の発火タイミング**: 0012 を `app_user` 未作成で
+    適用すると NOTICE skip になり REVOKE が効かないため、後から `make db-init-roles` を
+    実行した場合は手動で `REVOKE UPDATE, DELETE ON audit_logs FROM app_user` を再発行
+    するか、`make migrate-down → migrate-up` で 0012 を再適用する。本注意点は runbook に
+    明記済み。
+
 ## AC Traceability（Req 1 / 2 / 3 / 4 / NFR 1.1 部分）
 
 | Requirement | テスト |
@@ -152,6 +229,13 @@ cd backend && go build ./... && go vet ./... && go test ./...
     pass / `TestNewPool_*` 2 件・`TestSetLocalTenant_*` 5 件・`TestBeginTxFunc_*` 8 件・
     `TestFromContext_*` 2 件・`TestWithTenantContext_RoundTrip` 1 件）。
     `cmd/api` / `cmd/worker` / `internal/depspin`: no test files
+- task 3 完了時点（本 task; SQL / Makefile / runbook / .env.example の追加のみで Go コード非変更）:
+  - `go build ./...`: PASS
+  - `go vet ./...`: PASS
+  - `go test ./...`: task 2 と同一結果（`internal/config` / `internal/errors` /
+    `internal/logger` / `internal/platform/db`: PASS、`cmd/api` / `cmd/worker` /
+    `internal/depspin`: no test files）。SQL 自体の verify は task 6.1 / 6.2 の
+    integration test に委譲する（実 PostgreSQL が必要なため本 task では unit test なし）。
 
 ## 確認事項
 
