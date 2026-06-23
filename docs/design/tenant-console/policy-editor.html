@@ -1,0 +1,578 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Noto+Sans+JP:wght@400;500;700&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+  :root{
+    --bg:#ffffff; --surface:#f7f8fa; --surface-2:#eef0f4; --elevated:#ffffff;
+    --border:#e4e7ec; --border-strong:#d3d8e0;
+    --text:#1b1f27; --text-secondary:#5a616e; --text-muted:#8a909c;
+    --primary:#4f46e5; --primary-hover:#4338ca; --primary-fg:#ffffff; --primary-bg:#eef0fe; --primary-border:#c9cdfa;
+    --success:#16a34a; --success-bg:#e8f6ed; --success-fg:#15803d; --success-border:#bfe6cc;
+    --danger:#dc2626; --danger-bg:#fdeaea; --danger-fg:#b91c1c; --danger-border:#f5c6c6;
+    --warning:#d97706; --warning-bg:#fdf2e0; --warning-fg:#b45309; --warning-border:#f2dbab;
+    --neutral:#6b7280; --neutral-bg:#eef0f3; --neutral-fg:#4b5563; --neutral-border:#dde1e7;
+    --info:#2563eb; --info-bg:#e8f0fe; --info-fg:#1d4ed8; --info-border:#c3d6fb;
+    --purple:#7c3aed; --purple-bg:#f1ebfd; --purple-fg:#6d28d9; --purple-border:#ddcdfa;
+    --pale-bg:#f3f4f6; --pale-fg:#9ca3af; --pale-border:#e6e8ec;
+    --shadow:0 1px 2px rgba(16,20,30,.04), 0 1px 3px rgba(16,20,30,.06);
+    --shadow-pop:0 4px 16px rgba(16,20,30,.12), 0 1px 3px rgba(16,20,30,.08);
+  }
+  :root[data-theme="dark"]{
+    --bg:#0d1017; --surface:#151922; --surface-2:#1b212c; --elevated:#171c25;
+    --border:#262d3a; --border-strong:#323a49;
+    --text:#e7eaf0; --text-secondary:#9aa2b1; --text-muted:#6b7480;
+    --primary:#6366f1; --primary-hover:#7c80f7; --primary-fg:#ffffff; --primary-bg:rgba(99,102,241,.16); --primary-border:rgba(99,102,241,.42);
+    --success:#22c55e; --success-bg:rgba(34,197,94,.14); --success-fg:#4ade80; --success-border:rgba(34,197,94,.32);
+    --danger:#ef4444; --danger-bg:rgba(239,68,68,.14); --danger-fg:#f87171; --danger-border:rgba(239,68,68,.34);
+    --warning:#f59e0b; --warning-bg:rgba(245,158,11,.14); --warning-fg:#fbbf24; --warning-border:rgba(245,158,11,.32);
+    --neutral:#94a3b8; --neutral-bg:rgba(148,163,184,.14); --neutral-fg:#cbd5e1; --neutral-border:rgba(148,163,184,.26);
+    --info:#3b82f6; --info-bg:rgba(59,130,246,.16); --info-fg:#60a5fa; --info-border:rgba(59,130,246,.34);
+    --purple:#8b5cf6; --purple-bg:rgba(139,92,246,.16); --purple-fg:#a78bfa; --purple-border:rgba(139,92,246,.34);
+    --pale-bg:rgba(148,163,184,.07); --pale-fg:#7b8494; --pale-border:rgba(148,163,184,.16);
+    --shadow:0 1px 2px rgba(0,0,0,.4); --shadow-pop:0 8px 28px rgba(0,0,0,.55);
+  }
+  *{box-sizing:border-box;}
+  body{margin:0; background:var(--bg); color:var(--text); font-family:"Noto Sans JP", system-ui, sans-serif; font-size:14px; line-height:1.45; -webkit-font-smoothing:antialiased; font-feature-settings:"palt"; transition:background .18s ease, color .18s ease;}
+  ::selection{background:var(--primary-bg);}
+  @keyframes spin{to{transform:rotate(360deg);}}
+  @keyframes toastin{from{opacity:0; transform:translateY(8px) scale(.98);}to{opacity:1; transform:none;}}
+  input:focus, select:focus{ border-color:var(--primary) !important; }
+</style>
+</helmet>
+
+<div style="display:flex; min-height:100vh; background:var(--bg);">
+
+  <!-- ============ SIDEBAR ============ -->
+  <aside style="width: {{ sidebarWidth }}; flex:none; background:var(--surface); border-right:1px solid var(--border); display:flex; flex-direction:column; position:sticky; top:0; height:100vh; transition:width .16s ease;">
+    <div style="height:52px; display:flex; align-items:center; gap:10px; padding:0 16px; border-bottom:1px solid var(--border);">
+      <div style="width:26px; height:26px; flex:none; border-radius:7px; background:var(--primary); display:flex; align-items:center; justify-content:center; color:#fff; font-weight:700; font-size:13px;">M</div>
+      <sc-if value="{{ showLabels }}" hint-placeholder-val="{{ true }}"><div style="font-weight:700; font-size:14px; white-space:nowrap;">MobiGuard</div></sc-if>
+    </div>
+    <nav style="flex:1; padding:10px 10px; display:flex; flex-direction:column; gap:2px; overflow-y:auto;">
+      <div style="display:flex; align-items:center; gap:11px; padding:8px 10px; border-radius:8px; color:var(--text-secondary); white-space:nowrap; cursor:pointer;" style-hover="background:var(--surface-2); color:var(--text);">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" style="flex:none;"><rect x="3" y="3" width="7" height="7" rx="1.3"/><rect x="14" y="3" width="7" height="7" rx="1.3"/><rect x="14" y="14" width="7" height="7" rx="1.3"/><rect x="3" y="14" width="7" height="7" rx="1.3"/></svg>
+        <sc-if value="{{ showLabels }}" hint-placeholder-val="{{ true }}"><span>ダッシュボード</span></sc-if>
+      </div>
+      <div style="display:flex; align-items:center; gap:11px; padding:8px 10px; border-radius:8px; color:var(--text-secondary); white-space:nowrap; cursor:pointer;" style-hover="background:var(--surface-2); color:var(--text);">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" style="flex:none;"><rect x="7" y="2.5" width="10" height="19" rx="2.5"/><line x1="10.5" y1="18.4" x2="13.5" y2="18.4"/></svg>
+        <sc-if value="{{ showLabels }}" hint-placeholder-val="{{ true }}"><span>デバイス</span></sc-if>
+      </div>
+      <div style="display:flex; align-items:center; gap:11px; padding:8px 10px; border-radius:8px; background:var(--primary-bg); color:var(--primary); font-weight:500; white-space:nowrap; cursor:pointer;">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" style="flex:none;"><path d="M12 3 4.5 6v5c0 4.4 3.2 7.4 7.5 9 4.3-1.6 7.5-4.6 7.5-9V6L12 3Z"/></svg>
+        <sc-if value="{{ showLabels }}" hint-placeholder-val="{{ true }}"><span>ポリシー</span></sc-if>
+      </div>
+      <div style="display:flex; align-items:center; gap:11px; padding:8px 10px; border-radius:8px; color:var(--text-secondary); white-space:nowrap; cursor:pointer;" style-hover="background:var(--surface-2); color:var(--text);">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" style="flex:none;"><rect x="3" y="3" width="7" height="7" rx="1.3"/><rect x="14" y="3" width="7" height="7" rx="1.3"/><rect x="3" y="14" width="7" height="7" rx="1.3"/><path d="M14 14h3v3M21 14v.01M17 21h.01M21 18v3h-3"/></svg>
+        <sc-if value="{{ showLabels }}" hint-placeholder-val="{{ true }}"><span>エンロール</span></sc-if>
+      </div>
+      <div style="display:flex; align-items:center; gap:11px; padding:8px 10px; border-radius:8px; color:var(--text-secondary); white-space:nowrap; cursor:pointer;" style-hover="background:var(--surface-2); color:var(--text);">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" style="flex:none;"><path d="M21 8 12 3 3 8v8l9 5 9-5V8Z"/><path d="m3 8 9 5 9-5M12 13v8"/></svg>
+        <sc-if value="{{ showLabels }}" hint-placeholder-val="{{ true }}"><span>アプリ</span></sc-if>
+      </div>
+      <div style="display:flex; align-items:center; gap:11px; padding:8px 10px; border-radius:8px; color:var(--text-secondary); white-space:nowrap; cursor:pointer;" style-hover="background:var(--surface-2); color:var(--text);">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" style="flex:none;"><path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8l-5-5Z"/><path d="M14 3v5h5"/><line x1="9" y1="13" x2="15" y2="13"/><line x1="9" y1="17" x2="15" y2="17"/></svg>
+        <sc-if value="{{ showLabels }}" hint-placeholder-val="{{ true }}"><span>監査ログ</span></sc-if>
+      </div>
+      <sc-if value="{{ canSeeAdmins }}" hint-placeholder-val="{{ true }}">
+        <div style="display:flex; align-items:center; gap:11px; padding:8px 10px; border-radius:8px; color:var(--text-secondary); white-space:nowrap; cursor:pointer;" style-hover="background:var(--surface-2); color:var(--text);">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" style="flex:none;"><circle cx="9" cy="8" r="3.1"/><path d="M3.6 20a5.4 5.4 0 0 1 10.8 0"/><path d="M16.2 5.3a3.1 3.1 0 0 1 0 5.4M20.4 20a5.4 5.4 0 0 0-3.9-5.2"/></svg>
+          <sc-if value="{{ showLabels }}" hint-placeholder-val="{{ true }}"><span>管理者</span></sc-if>
+        </div>
+      </sc-if>
+    </nav>
+    <div style="border-top:1px solid var(--border); padding:10px;">
+      <div onClick="{{ toggleCollapse }}" style="display:flex; align-items:center; gap:11px; padding:8px 10px; border-radius:8px; color:var(--text-muted); cursor:pointer; white-space:nowrap;" style-hover="background:var(--surface-2); color:var(--text);">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" style="flex:none;"><rect x="3" y="4" width="18" height="16" rx="2"/><line x1="9" y1="4" x2="9" y2="20"/></svg>
+        <sc-if value="{{ showLabels }}" hint-placeholder-val="{{ true }}"><span>サイドバーを折りたたむ</span></sc-if>
+      </div>
+    </div>
+  </aside>
+
+  <!-- ============ MAIN ============ -->
+  <main style="flex:1; min-width:0; display:flex; flex-direction:column;">
+
+    <!-- TOPBAR -->
+    <header style="height:52px; flex:none; position:sticky; top:0; z-index:30; background:color-mix(in srgb, var(--bg) 88%, transparent); backdrop-filter:blur(8px); border-bottom:1px solid var(--border); display:flex; align-items:center; gap:14px; padding:0 18px;">
+      <div style="display:flex; align-items:center; gap:7px; min-width:0; font-size:13px;">
+        <span style="color:var(--text-muted); cursor:pointer; white-space:nowrap;" style-hover="color:var(--text);">ポリシー</span>
+        <span style="color:var(--text-muted);">/</span>
+        <span style="font-weight:600; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">{{ form.name }}</span>
+      </div>
+      <div style="flex:1;"></div>
+      <button onClick="{{ toggleTheme }}" title="テーマ切替" style="width:32px; height:32px; flex:none; display:flex; align-items:center; justify-content:center; border:1px solid var(--border-strong); border-radius:8px; background:var(--surface); color:var(--text-secondary); cursor:pointer;" style-hover="border-color:var(--primary); color:var(--primary);">{{ themeIcon }}</button>
+      <div style="display:flex; align-items:center; gap:6px;">
+        <span style="font-size:11px; color:var(--text-muted);">ロール</span>
+        <select value="{{ role }}" onChange="{{ onRoleChange }}" style="height:32px; padding:0 8px; border:1px solid var(--border-strong); border-radius:8px; background:var(--surface); color:var(--text); font-size:13px; font-family:inherit; cursor:pointer;">
+          <option value="SuperAdmin">SuperAdmin</option>
+          <option value="TenantAdmin">TenantAdmin</option>
+          <option value="Operator">Operator</option>
+          <option value="Viewer">Viewer</option>
+        </select>
+      </div>
+      <div style="width:1px; height:24px; background:var(--border);"></div>
+      <div style="display:flex; align-items:center; gap:9px; cursor:pointer; padding:3px 4px 3px 6px; border-radius:8px;" style-hover="background:var(--surface-2);">
+        <div style="text-align:right; line-height:1.25;"><div style="font-size:12.5px; font-weight:500;">{{ userEmail }}</div><div style="display:flex; justify-content:flex-end;"><span style="font-size:10px; font-weight:600; padding:1px 6px; border-radius:5px; background: {{ roleBadgeBg }}; color: {{ roleBadgeFg }};">{{ role }}</span></div></div>
+        <div style="width:30px; height:30px; flex:none; border-radius:50%; background:var(--primary); color:#fff; display:flex; align-items:center; justify-content:center; font-size:12px; font-weight:600;">{{ userInitials }}</div>
+      </div>
+    </header>
+
+    <!-- ===== 403 ===== -->
+    <sc-if value="{{ isDenied }}" hint-placeholder-val="{{ false }}">
+      <div style="padding:22px 26px;">
+        <div style="border:1px solid var(--border); border-radius:12px; background:var(--elevated); padding:60px 24px; display:flex; flex-direction:column; align-items:center; text-align:center;">
+          <div style="width:52px; height:52px; border-radius:13px; background:var(--surface-2); display:flex; align-items:center; justify-content:center; margin-bottom:14px;"><svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="var(--text-secondary)" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="5" y="11" width="14" height="9" rx="2"/><path d="M8 11V8a4 4 0 0 1 8 0v3"/></svg></div>
+          <div style="font-size:12px; font-weight:700; letter-spacing:.06em; color:var(--text-muted); margin-bottom:4px;">403 FORBIDDEN</div>
+          <div style="font-size:16px; font-weight:600; margin-bottom:6px;">ポリシーを編集できません</div>
+          <div style="font-size:13px; color:var(--text-secondary); max-width:440px;">ポリシーの編集には <b style="color:var(--text);">TenantAdmin 以上</b>の権限が必要です。現在のロール（{{ role }}）では閲覧のみ可能です。</div>
+        </div>
+      </div>
+    </sc-if>
+
+    <!-- ===== EDITOR ===== -->
+    <sc-if value="{{ canEdit }}" hint-placeholder-val="{{ true }}">
+      <div>
+        <!-- EDITOR HEADER BAR -->
+        <div style="position:sticky; top:52px; z-index:20; background:color-mix(in srgb, var(--bg) 92%, transparent); backdrop-filter:blur(8px); border-bottom:1px solid var(--border); padding:14px 26px;">
+          <div style="display:flex; align-items:center; gap:14px; flex-wrap:wrap;">
+            <div style="display:flex; align-items:center; gap:10px; min-width:0; flex:1;">
+              <input value="{{ form.name }}" onInput="{{ onName }}" style="font-size:18px; font-weight:700; letter-spacing:-.01em; border:1px solid transparent; border-radius:7px; background:transparent; color:var(--text); padding:4px 8px; margin-left:-8px; font-family:inherit; max-width:340px; width:100%; outline:none;" style-hover="background:var(--surface-2);" style-focus="background:var(--bg); border-color:var(--border-strong);" />
+              <span style="display:inline-flex; align-items:center; font-size:11.5px; font-weight:600; padding:2px 8px; border-radius:6px; background:var(--neutral-bg); color:var(--neutral-fg); border:1px solid var(--neutral-border); font-family:'IBM Plex Mono',monospace; flex:none;">{{ versionLabel }}</span>
+              <span style="display:inline-flex; align-items:center; gap:5px; font-size:11.5px; font-weight:600; padding:2px 9px; border-radius:6px; background:{{ stateChip.bg }}; color:{{ stateChip.fg }}; border:1px solid {{ stateChip.border }}; flex:none; white-space:nowrap;">{{ stateChip.icon }}{{ stateChip.label }}</span>
+            </div>
+            <div style="display:flex; align-items:center; gap:8px;">
+              <span style="font-size:11px; color:var(--text-muted); margin-right:2px;">状態プレビュー</span>
+              <select value="{{ view }}" onChange="{{ onViewChange }}" style="height:32px; padding:0 8px; border:1px solid var(--border-strong); border-radius:8px; background:var(--surface); color:var(--text-secondary); font-size:12px; font-family:inherit; cursor:pointer;">
+                <option value="editing">編集中</option>
+                <option value="invalid">検証エラー</option>
+                <option value="saving">保存中</option>
+                <option value="saved">保存成功</option>
+                <option value="conflict">競合</option>
+              </select>
+              <button onClick="{{ onPreview }}" style="display:inline-flex; align-items:center; gap:6px; height:36px; padding:0 13px; border:1px solid var(--border-strong); border-radius:8px; background:var(--bg); color:var(--text); font-size:13px; font-weight:500; font-family:inherit; cursor:pointer;" style-hover="border-color:var(--primary); color:var(--primary);"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7-10-7-10-7Z"/><circle cx="12" cy="12" r="2.5"/></svg>配信プレビュー</button>
+              <button onClick="{{ onSave }}" disabled="{{ saveDisabled }}" style="display:inline-flex; align-items:center; gap:7px; height:36px; padding:0 16px; border:none; border-radius:8px; background:var(--primary); color:var(--primary-fg); font-size:13px; font-weight:600; font-family:inherit; cursor:{{ saveCursor }}; opacity:{{ saveOpacity }}; min-width:96px; justify-content:center;" style-hover="background:var(--primary-hover);">{{ saveBtn }}</button>
+            </div>
+          </div>
+        </div>
+
+        <div style="padding:18px 26px 80px; max-width:980px;">
+
+          <!-- VALIDATION ALERT -->
+          <sc-if value="{{ showErrorAlert }}" hint-placeholder-val="{{ false }}">
+            <div style="display:flex; gap:11px; padding:13px 15px; background:var(--danger-bg); border:1px solid var(--danger-border); border-radius:10px; margin-bottom:16px;">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="var(--danger-fg)" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" style="flex:none; margin-top:1px;"><circle cx="12" cy="12" r="9"/><path d="M12 8v5M12 16h.01"/></svg>
+              <div style="flex:1;">
+                <div style="font-size:13px; font-weight:700; color:var(--danger-fg); margin-bottom:5px;">{{ errorCount }} 件の入力エラーがあります</div>
+                <div style="display:flex; flex-direction:column; gap:3px;">
+                  <sc-for list="{{ errorList }}" as="er" hint-placeholder-count="0">
+                    <div onClick="{{ er.go }}" style="font-size:12px; color:var(--danger-fg); opacity:.92; cursor:pointer;" style-hover="text-decoration:underline;">・{{ er.msg }}</div>
+                  </sc-for>
+                </div>
+              </div>
+            </div>
+          </sc-if>
+
+          <!-- CONFLICT ALERT -->
+          <sc-if value="{{ isConflict }}" hint-placeholder-val="{{ false }}">
+            <div style="display:flex; gap:11px; padding:13px 15px; background:var(--warning-bg); border:1px solid var(--warning-border); border-radius:10px; margin-bottom:16px;">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="var(--warning-fg)" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" style="flex:none; margin-top:1px;"><path d="M12 2 2 20h20L12 2Z"/><path d="M12 9v4M12 16.5v.01"/></svg>
+              <div style="flex:1;">
+                <div style="font-size:13px; font-weight:700; color:var(--warning-fg); margin-bottom:3px;">バージョン競合が発生しました</div>
+                <div style="font-size:12px; color:var(--warning-fg); opacity:.92; line-height:1.55; margin-bottom:10px;">編集中に他の管理者がこのポリシーを <b>v6</b> として保存しました。あなたの変更は v5 を基準にしているため、このまま保存すると相手の変更を上書きします。</div>
+                <div style="display:flex; gap:8px;">
+                  <button onClick="{{ onReload }}" style="height:30px; padding:0 12px; border:1px solid var(--warning-border); border-radius:7px; background:var(--bg); color:var(--warning-fg); font-size:12px; font-weight:600; font-family:inherit; cursor:pointer;">最新を再読み込み</button>
+                  <button onClick="{{ onForce }}" style="height:30px; padding:0 12px; border:1px solid var(--danger-border); border-radius:7px; background:var(--danger-bg); color:var(--danger-fg); font-size:12px; font-weight:600; font-family:inherit; cursor:pointer;">強制的に上書き保存</button>
+                </div>
+              </div>
+            </div>
+          </sc-if>
+
+          <!-- TABS -->
+          <div style="display:flex; gap:2px; border-bottom:1px solid var(--border); margin-bottom:20px; overflow-x:auto;">
+            <button onClick="{{ tabApps }}" style="height:40px; padding:0 14px; border:none; background:transparent; font-family:inherit; font-size:13.5px; cursor:pointer; white-space:nowrap; color:{{ tApps.fg }}; font-weight:{{ tApps.fw }}; border-bottom:2px solid {{ tApps.bd }}; margin-bottom:-1px; display:inline-flex; align-items:center; gap:6px;">アプリ管理 {{ appsErrDot }}</button>
+            <button onClick="{{ tabPw }}" style="height:40px; padding:0 14px; border:none; background:transparent; font-family:inherit; font-size:13.5px; cursor:pointer; white-space:nowrap; color:{{ tPw.fg }}; font-weight:{{ tPw.fw }}; border-bottom:2px solid {{ tPw.bd }}; margin-bottom:-1px; display:inline-flex; align-items:center; gap:6px;">パスワード {{ pwErrDot }}</button>
+            <button onClick="{{ tabSec }}" style="height:40px; padding:0 14px; border:none; background:transparent; font-family:inherit; font-size:13.5px; cursor:pointer; white-space:nowrap; color:{{ tSec.fg }}; font-weight:{{ tSec.fw }}; border-bottom:2px solid {{ tSec.bd }}; margin-bottom:-1px;">セキュリティ</button>
+            <button onClick="{{ tabUpd }}" style="height:40px; padding:0 14px; border:none; background:transparent; font-family:inherit; font-size:13.5px; cursor:pointer; white-space:nowrap; color:{{ tUpd.fg }}; font-weight:{{ tUpd.fw }}; border-bottom:2px solid {{ tUpd.bd }}; margin-bottom:-1px;">システム更新</button>
+            <button onClick="{{ tabKiosk }}" style="height:40px; padding:0 14px; border:none; background:transparent; font-family:inherit; font-size:13.5px; cursor:pointer; white-space:nowrap; color:{{ tKiosk.fg }}; font-weight:{{ tKiosk.fw }}; border-bottom:2px solid {{ tKiosk.bd }}; margin-bottom:-1px;">Kiosk</button>
+          </div>
+
+          <!-- ===== TAB: APPS ===== -->
+          <sc-if value="{{ isTabApps }}" hint-placeholder-val="{{ true }}">
+            <div>
+              <div style="display:flex; align-items:flex-end; justify-content:space-between; gap:14px; margin-bottom:14px; flex-wrap:wrap;">
+                <div>
+                  <div style="font-size:14px; font-weight:700; margin-bottom:3px;">承認済みアプリ</div>
+                  <div style="font-size:12.5px; color:var(--text-secondary);">端末に配信するアプリと、その配布方法・権限の既定を設定します。</div>
+                </div>
+                <div style="text-align:right;">
+                  <div style="font-size:12px; color:{{ appCountColor }}; font-weight:600;"><span style="font-variant-numeric:tabular-nums;">{{ appCountStr }}</span> / 3,000</div>
+                  <sc-if value="{{ appOverLimit }}" hint-placeholder-val="{{ false }}"><div style="font-size:11.5px; color:var(--danger-fg); margin-top:2px;">アプリ上限を超えています。保存できません。</div></sc-if>
+                </div>
+              </div>
+
+              <div style="border:1px solid {{ appBorder }}; border-radius:12px; background:var(--elevated); overflow:hidden; margin-bottom:14px;">
+                <div style="overflow-x:auto;">
+                  <table style="width:100%; border-collapse:collapse; table-layout:fixed; font-size:13px; min-width:680px;">
+                    <colgroup><col style="width:34%;" /><col style="width:30%;" /><col style="width:36%;" /></colgroup>
+                    <thead><tr style="background:var(--surface);">
+                      <th style="text-align:left; font-weight:600; color:var(--text-secondary); font-size:12px; padding:10px 14px; border-bottom:1px solid var(--border);">アプリ</th>
+                      <th style="text-align:left; font-weight:600; color:var(--text-secondary); font-size:12px; padding:10px 14px; border-bottom:1px solid var(--border);">インストール種別</th>
+                      <th style="text-align:left; font-weight:600; color:var(--text-secondary); font-size:12px; padding:10px 14px; border-bottom:1px solid var(--border);">権限の既定</th>
+                    </tr></thead>
+                    <tbody>
+                      <sc-for list="{{ apps }}" as="ap" hint-placeholder-count="4">
+                        <tr style="border-bottom:1px solid var(--border);">
+                          <td style="padding:9px 14px;"><div style="font-weight:500; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">{{ ap.name }}</div><div style="font-size:11px; color:var(--text-muted); font-family:'IBM Plex Mono',monospace; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">{{ ap.pkg }}</div></td>
+                          <td style="padding:9px 14px;"><select value="{{ ap.install }}" onChange="{{ ap.onInstall }}" style="width:100%; height:32px; padding:0 8px; border:1px solid var(--border-strong); border-radius:7px; background:var(--bg); color:var(--text); font-size:12.5px; font-family:inherit; cursor:pointer;"><option value="force">強制インストール</option><option value="available">任意（ストア掲載）</option><option value="blocked">ブロック</option><option value="kiosk">Kiosk 起動アプリ</option></select></td>
+                          <td style="padding:9px 14px;"><select value="{{ ap.perm }}" onChange="{{ ap.onPerm }}" style="width:100%; height:32px; padding:0 8px; border:1px solid var(--border-strong); border-radius:7px; background:var(--bg); color:var(--text); font-size:12.5px; font-family:inherit; cursor:pointer;"><option value="prompt">既定（ユーザーに確認）</option><option value="grant">自動的に許可</option><option value="deny">自動的に拒否</option></select></td>
+                        </tr>
+                      </sc-for>
+                    </tbody>
+                  </table>
+                </div>
+                <div style="padding:10px 14px; border-top:1px solid var(--border); display:flex; align-items:center; justify-content:space-between; gap:12px; flex-wrap:wrap;">
+                  <button onClick="{{ onAddApp }}" style="display:inline-flex; align-items:center; gap:6px; height:32px; padding:0 12px; border:1px dashed var(--border-strong); border-radius:8px; background:transparent; color:var(--text-secondary); font-size:12.5px; font-weight:500; font-family:inherit; cursor:pointer;" style-hover="border-color:var(--primary); color:var(--primary);"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14M5 12h14"/></svg>アプリを追加</button>
+                  <div style="display:flex; align-items:center; gap:8px;">
+                    <span style="font-size:11.5px; color:var(--text-muted);">検証用にアプリ数を調整:</span>
+                    <input value="{{ form.appCount }}" onInput="{{ onAppCount }}" inputmode="numeric" style="width:84px; height:32px; padding:0 10px; border:1px solid {{ appInputBorder }}; border-radius:7px; background:var(--bg); color:var(--text); font-size:12.5px; font-family:'IBM Plex Mono',monospace; text-align:right; outline:none;" />
+                  </div>
+                </div>
+              </div>
+            </div>
+          </sc-if>
+
+          <!-- ===== TAB: PASSWORD ===== -->
+          <sc-if value="{{ isTabPw }}" hint-placeholder-val="{{ false }}">
+            <div style="border:1px solid var(--border); border-radius:12px; background:var(--elevated); padding:20px; max-width:560px;">
+              <div style="margin-bottom:16px;">
+                <label style="display:block; font-size:12.5px; font-weight:500; color:var(--text-secondary); margin-bottom:6px;">パスワード品質</label>
+                <select value="{{ form.pwQuality }}" onChange="{{ onPwQuality }}" style="width:100%; height:38px; padding:0 10px; border:1px solid var(--border-strong); border-radius:8px; background:var(--bg); color:var(--text); font-size:13px; font-family:inherit; cursor:pointer;"><option value="none">要求しない</option><option value="biometric">生体認証を許可</option><option value="numeric">数字（PIN）</option><option value="alphanumeric">英数字</option><option value="complex">複雑（記号を含む）</option></select>
+              </div>
+              <div style="display:grid; grid-template-columns:1fr 1fr; gap:16px; margin-bottom:16px;">
+                <div>
+                  <label style="display:block; font-size:12.5px; font-weight:500; color:var(--text-secondary); margin-bottom:6px;">最小桁数</label>
+                  <input value="{{ form.pwMinLen }}" onInput="{{ onPwMinLen }}" inputmode="numeric" style="width:100%; height:38px; padding:0 10px; border:1px solid {{ pwMinBorder }}; border-radius:8px; background:var(--bg); color:var(--text); font-size:13px; font-family:'IBM Plex Mono',monospace; outline:none;" />
+                  <sc-if value="{{ pwMinErr }}" hint-placeholder-val="{{ false }}"><div style="font-size:11.5px; color:var(--danger-fg); margin-top:5px;">{{ pwMinErrMsg }}</div></sc-if>
+                  <sc-if value="{{ pwMinOk }}" hint-placeholder-val="{{ true }}"><div style="font-size:11.5px; color:var(--text-muted); margin-top:5px;">4〜16 桁で指定します。</div></sc-if>
+                </div>
+                <div>
+                  <label style="display:block; font-size:12.5px; font-weight:500; color:var(--text-secondary); margin-bottom:6px;">パスワード履歴（再利用禁止数）</label>
+                  <input value="{{ form.pwHistory }}" onInput="{{ onPwHistory }}" inputmode="numeric" style="width:100%; height:38px; padding:0 10px; border:1px solid var(--border-strong); border-radius:8px; background:var(--bg); color:var(--text); font-size:13px; font-family:'IBM Plex Mono',monospace; outline:none;" />
+                </div>
+                <div>
+                  <label style="display:block; font-size:12.5px; font-weight:500; color:var(--text-secondary); margin-bottom:6px;">有効期限（日数 / 0 で無期限）</label>
+                  <input value="{{ form.pwExpire }}" onInput="{{ onPwExpire }}" inputmode="numeric" style="width:100%; height:38px; padding:0 10px; border:1px solid var(--border-strong); border-radius:8px; background:var(--bg); color:var(--text); font-size:13px; font-family:'IBM Plex Mono',monospace; outline:none;" />
+                </div>
+                <div>
+                  <label style="display:block; font-size:12.5px; font-weight:500; color:var(--text-secondary); margin-bottom:6px;">ロック解除失敗時の挙動</label>
+                  <select value="{{ form.pwMaxFail }}" onChange="{{ onPwMaxFail }}" style="width:100%; height:38px; padding:0 10px; border:1px solid var(--border-strong); border-radius:8px; background:var(--bg); color:var(--text); font-size:13px; font-family:inherit; cursor:pointer;"><option value="0">制限しない</option><option value="5">5 回で端末をワイプ</option><option value="10">10 回で端末をワイプ</option><option value="lock">5 回で一時ロック</option></select>
+                </div>
+              </div>
+            </div>
+          </sc-if>
+
+          <!-- ===== TAB: SECURITY ===== -->
+          <sc-if value="{{ isTabSec }}" hint-placeholder-val="{{ false }}">
+            <div style="border:1px solid var(--border); border-radius:12px; background:var(--elevated); padding:6px 20px; max-width:680px;">
+              <sc-for list="{{ securitySwitches }}" as="sw" hint-placeholder-count="6">
+                <div style="display:flex; align-items:center; justify-content:space-between; gap:16px; padding:14px 0; border-bottom:1px solid var(--border);">
+                  <div style="min-width:0;"><div style="font-size:13.5px; font-weight:500;">{{ sw.label }}</div><div style="font-size:12px; color:var(--text-secondary); margin-top:2px;">{{ sw.desc }}</div></div>
+                  <button onClick="{{ sw.onToggle }}" style="width:42px; height:24px; border:none; border-radius:12px; background:{{ sw.bg }}; cursor:pointer; position:relative; flex:none; padding:0; transition:background .15s;">
+                    <span style="position:absolute; top:2px; left:2px; width:20px; height:20px; border-radius:50%; background:#fff; transform:translateX({{ sw.knobX }}); transition:transform .15s; box-shadow:0 1px 2px rgba(0,0,0,.25);"></span>
+                  </button>
+                </div>
+              </sc-for>
+            </div>
+          </sc-if>
+
+          <!-- ===== TAB: SYSTEM UPDATE ===== -->
+          <sc-if value="{{ isTabUpd }}" hint-placeholder-val="{{ false }}">
+            <div style="border:1px solid var(--border); border-radius:12px; background:var(--elevated); padding:20px; max-width:620px;">
+              <label style="display:block; font-size:12.5px; font-weight:500; color:var(--text-secondary); margin-bottom:9px;">更新ポリシー</label>
+              <div style="display:flex; flex-direction:column; gap:8px; margin-bottom:18px;">
+                <sc-for list="{{ updateModes }}" as="um" hint-placeholder-count="4">
+                  <div onClick="{{ um.onPick }}" style="display:flex; align-items:flex-start; gap:10px; padding:11px 13px; border:1px solid {{ um.bd }}; background:{{ um.bg }}; border-radius:9px; cursor:pointer;">
+                    <span style="width:16px; height:16px; flex:none; border-radius:50%; border:2px solid {{ um.dot }}; display:flex; align-items:center; justify-content:center; margin-top:1px;"><span style="width:7px; height:7px; border-radius:50%; background:{{ um.fill }};"></span></span>
+                    <div><div style="font-size:13px; font-weight:600;">{{ um.label }}</div><div style="font-size:11.5px; color:var(--text-secondary); margin-top:2px;">{{ um.desc }}</div></div>
+                  </div>
+                </sc-for>
+              </div>
+              <sc-if value="{{ isWindowed }}" hint-placeholder-val="{{ false }}">
+                <div style="display:grid; grid-template-columns:1fr 1fr; gap:14px; margin-bottom:18px; padding:14px; background:var(--surface); border-radius:9px;">
+                  <div><label style="display:block; font-size:12px; color:var(--text-secondary); margin-bottom:6px;">適用開始時刻</label><input value="{{ form.winStart }}" onInput="{{ onWinStart }}" style="width:100%; height:36px; padding:0 10px; border:1px solid var(--border-strong); border-radius:8px; background:var(--bg); color:var(--text); font-size:13px; font-family:'IBM Plex Mono',monospace; outline:none;" /></div>
+                  <div><label style="display:block; font-size:12px; color:var(--text-secondary); margin-bottom:6px;">適用終了時刻</label><input value="{{ form.winEnd }}" onInput="{{ onWinEnd }}" style="width:100%; height:36px; padding:0 10px; border:1px solid var(--border-strong); border-radius:8px; background:var(--bg); color:var(--text); font-size:13px; font-family:'IBM Plex Mono',monospace; outline:none;" /></div>
+                </div>
+              </sc-if>
+              <div style="border-top:1px solid var(--border); padding-top:16px;">
+                <label style="display:block; font-size:12.5px; font-weight:500; color:var(--text-secondary); margin-bottom:3px;">更新の凍結期間（任意）</label>
+                <div style="font-size:11.5px; color:var(--text-muted); margin-bottom:9px;">繁忙期など、システム更新を一時停止する期間（最大 90 日）。</div>
+                <div style="display:grid; grid-template-columns:1fr 1fr; gap:14px;">
+                  <div><label style="display:block; font-size:12px; color:var(--text-secondary); margin-bottom:6px;">凍結開始（月-日）</label><input value="{{ form.freezeStart }}" onInput="{{ onFreezeStart }}" style="width:100%; height:36px; padding:0 10px; border:1px solid var(--border-strong); border-radius:8px; background:var(--bg); color:var(--text); font-size:13px; font-family:'IBM Plex Mono',monospace; outline:none;" /></div>
+                  <div><label style="display:block; font-size:12px; color:var(--text-secondary); margin-bottom:6px;">凍結終了（月-日）</label><input value="{{ form.freezeEnd }}" onInput="{{ onFreezeEnd }}" style="width:100%; height:36px; padding:0 10px; border:1px solid var(--border-strong); border-radius:8px; background:var(--bg); color:var(--text); font-size:13px; font-family:'IBM Plex Mono',monospace; outline:none;" /></div>
+                </div>
+              </div>
+            </div>
+          </sc-if>
+
+          <!-- ===== TAB: KIOSK ===== -->
+          <sc-if value="{{ isTabKiosk }}" hint-placeholder-val="{{ false }}">
+            <div>
+              <div style="display:flex; align-items:flex-start; gap:9px; padding:11px 14px; border:1px solid var(--purple-border); background:var(--purple-bg); border-radius:10px; margin-bottom:16px;">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="var(--purple-fg)" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="flex:none; margin-top:1px;"><circle cx="12" cy="12" r="9"/><path d="M12 16v-4M12 8h.01"/></svg>
+                <div style="font-size:12px; color:var(--purple-fg); line-height:1.55;">この設定は <b>Dedicated (Kiosk)</b> 端末にのみ適用されます。Fully Managed 端末では無視されます。</div>
+              </div>
+              <div style="border:1px solid var(--border); border-radius:12px; background:var(--elevated); padding:20px; max-width:680px;">
+                <label style="display:block; font-size:12.5px; font-weight:500; color:var(--text-secondary); margin-bottom:9px;">Kiosk モード</label>
+                <div style="display:flex; gap:8px; margin-bottom:20px; flex-wrap:wrap;">
+                  <div onClick="{{ pickSingle }}" style="flex:1; min-width:200px; display:flex; align-items:flex-start; gap:10px; padding:12px 13px; border:1px solid {{ kSingle.bd }}; background:{{ kSingle.bg }}; border-radius:9px; cursor:pointer;">
+                    <span style="width:16px; height:16px; flex:none; border-radius:50%; border:2px solid {{ kSingle.dot }}; display:flex; align-items:center; justify-content:center; margin-top:1px;"><span style="width:7px; height:7px; border-radius:50%; background:{{ kSingle.fill }};"></span></span>
+                    <div><div style="font-size:13px; font-weight:600;">単一アプリ Kiosk</div><div style="font-size:11.5px; color:var(--text-secondary); margin-top:2px;">1 つのアプリに固定（サイネージ等）。</div></div>
+                  </div>
+                  <div onClick="{{ pickMulti }}" style="flex:1; min-width:200px; display:flex; align-items:flex-start; gap:10px; padding:12px 13px; border:1px solid {{ kMulti.bd }}; background:{{ kMulti.bg }}; border-radius:9px; cursor:pointer;">
+                    <span style="width:16px; height:16px; flex:none; border-radius:50%; border:2px solid {{ kMulti.dot }}; display:flex; align-items:center; justify-content:center; margin-top:1px;"><span style="width:7px; height:7px; border-radius:50%; background:{{ kMulti.fill }};"></span></span>
+                    <div><div style="font-size:13px; font-weight:600;">複数アプリ Kiosk</div><div style="font-size:11.5px; color:var(--text-secondary); margin-top:2px;">許可した複数アプリのみのランチャー。</div></div>
+                  </div>
+                </div>
+                <div style="margin-bottom:6px; font-size:12.5px; font-weight:500; color:var(--text-secondary);">端末 UI の制御</div>
+                <sc-for list="{{ kioskSwitches }}" as="sw" hint-placeholder-count="3">
+                  <div style="display:flex; align-items:center; justify-content:space-between; gap:16px; padding:13px 0; border-bottom:1px solid var(--border);">
+                    <div style="min-width:0;"><div style="font-size:13.5px; font-weight:500;">{{ sw.label }}</div><div style="font-size:12px; color:var(--text-secondary); margin-top:2px;">{{ sw.desc }}</div></div>
+                    <button onClick="{{ sw.onToggle }}" style="width:42px; height:24px; border:none; border-radius:12px; background:{{ sw.bg }}; cursor:pointer; position:relative; flex:none; padding:0;">
+                      <span style="position:absolute; top:2px; left:2px; width:20px; height:20px; border-radius:50%; background:#fff; transform:translateX({{ sw.knobX }}); box-shadow:0 1px 2px rgba(0,0,0,.25);"></span>
+                    </button>
+                  </div>
+                </sc-for>
+              </div>
+            </div>
+          </sc-if>
+
+        </div>
+      </div>
+    </sc-if>
+
+  </main>
+
+  <!-- TOASTER -->
+  <div style="position:fixed; right:20px; bottom:20px; z-index:90; display:flex; flex-direction:column; gap:10px; width:330px; max-width:calc(100vw - 40px);">
+    <sc-for list="{{ toasts }}" as="t" hint-placeholder-count="0">
+      <div style="display:flex; align-items:flex-start; gap:11px; padding:13px 14px; background:var(--elevated); border:1px solid var(--border); border-left:3px solid {{ t.accent }}; border-radius:10px; box-shadow:var(--shadow-pop); animation:toastin .2s ease;">
+        {{ t.icon }}
+        <div style="flex:1; min-width:0;"><div style="font-size:13px; font-weight:600;">{{ t.title }}</div><div style="font-size:12px; color:var(--text-secondary); margin-top:1px;">{{ t.desc }}</div></div>
+      </div>
+    </sc-for>
+  </div>
+
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props="{&quot;$preview&quot;:{&quot;width&quot;:1320,&quot;height&quot;:960},&quot;primary&quot;:{&quot;editor&quot;:&quot;color&quot;,&quot;default&quot;:&quot;#4f46e5&quot;,&quot;tsType&quot;:&quot;string&quot;},&quot;defaultTheme&quot;:{&quot;editor&quot;:&quot;enum&quot;,&quot;default&quot;:&quot;light&quot;,&quot;options&quot;:[&quot;light&quot;,&quot;dark&quot;],&quot;tsType&quot;:&quot;'light'|'dark'&quot;},&quot;defaultRole&quot;:{&quot;editor&quot;:&quot;enum&quot;,&quot;default&quot;:&quot;TenantAdmin&quot;,&quot;options&quot;:[&quot;SuperAdmin&quot;,&quot;TenantAdmin&quot;,&quot;Operator&quot;,&quot;Viewer&quot;],&quot;tsType&quot;:&quot;string&quot;}}">
+class Component extends DCLogic {
+  state = {
+    mode: this.props.defaultTheme || 'light',
+    role: this.props.defaultRole || 'TenantAdmin',
+    collapsed: false,
+    tab: 'apps',
+    view: 'editing',
+    version: 5,
+    showErrors: false,
+    toasts: [],
+    apps: [
+      { name:'営業支援アプリ', pkg:'com.acme.sales', install:'force', perm:'grant' },
+      { name:'Outlook', pkg:'com.microsoft.office.outlook', install:'force', perm:'prompt' },
+      { name:'Acme VPN', pkg:'com.acme.vpn', install:'force', perm:'grant' },
+      { name:'Chrome', pkg:'com.android.chrome', install:'available', perm:'prompt' },
+      { name:'カメラ（標準）', pkg:'com.android.camera', install:'blocked', perm:'deny' },
+    ],
+    form: {
+      name:'営業部ポリシー',
+      appCount: 2847,
+      pwQuality:'complex', pwMinLen:'8', pwHistory:'5', pwExpire:'90', pwMaxFail:'10',
+      encrypt:true, unknownSources:false, playProtect:true, devOptions:false, factoryReset:true, screenshot:false, usbDebug:false,
+      updateMode:'windowed', winStart:'02:00', winEnd:'05:00', freezeStart:'12-20', freezeEnd:'01-05',
+      kioskMode:'single', statusBar:false, navigation:false, powerButton:true,
+    },
+  };
+
+  el(t,p,...k){ return React.createElement(t,p,...k); }
+  perms(){ const r=this.state.role; return { edit:r==='TenantAdmin'||r==='SuperAdmin', admins:r==='TenantAdmin'||r==='SuperAdmin' }; }
+  setForm(k,v){ this.setState(s=>({ form:{...s.form,[k]:v} })); }
+
+  toggleTheme=()=>this.setState(s=>({mode:s.mode==='light'?'dark':'light'}));
+  toggleCollapse=()=>this.setState(s=>({collapsed:!s.collapsed}));
+  onRoleChange=(e)=>this.setState({role:e.target.value});
+
+  tab(active){ return active ? {fg:'var(--primary)',fw:'600',bd:'var(--primary)'} : {fg:'var(--text-secondary)',fw:'500',bd:'transparent'}; }
+  radio(active){ return active ? {bd:'var(--primary)',bg:'var(--primary-bg)',dot:'var(--primary)',fill:'var(--primary)'} : {bd:'var(--border-strong)',bg:'var(--bg)',dot:'var(--border-strong)',fill:'transparent'}; }
+  sw(on){ return { bg: on?'var(--primary)':'var(--border-strong)', knobX: on?'18px':'0px' }; }
+
+  themeIconEl(){ if(this.state.mode==='light') return this.el('svg',{width:17,height:17,viewBox:'0 0 24 24',fill:'none',stroke:'currentColor',strokeWidth:1.9,strokeLinecap:'round',strokeLinejoin:'round'}, this.el('path',{key:'p',d:'M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8Z'})); return this.el('svg',{width:17,height:17,viewBox:'0 0 24 24',fill:'none',stroke:'currentColor',strokeWidth:1.9,strokeLinecap:'round',strokeLinejoin:'round'}, this.el('circle',{key:'c',cx:12,cy:12,r:4}), this.el('path',{key:'p',d:'M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4'})); }
+  toastIcon(kind){ if(kind==='pending') return this.el('div',{key:'i',style:{width:16,height:16,flex:'none',marginTop:1,borderRadius:'50%',border:'2px solid var(--border-strong)',borderTopColor:'var(--primary)',animation:'spin .7s linear infinite'}}); const color=kind==='success'?'var(--success-fg)':'var(--danger-fg)'; const path=kind==='success'?'M20 6 9 17l-5-5':'M18 6 6 18M6 6l12 12'; return this.el('svg',{key:'i',width:16,height:16,viewBox:'0 0 24 24',fill:'none',stroke:color,strokeWidth:2.4,strokeLinecap:'round',strokeLinejoin:'round',style:{flex:'none',marginTop:1}}, this.el('path',{key:'p',d:path})); }
+  spinnerEl(){ return this.el('span',{key:'s',style:{width:15,height:15,borderRadius:'50%',border:'2px solid rgba(255,255,255,.45)',borderTopColor:'#fff',animation:'spin .7s linear infinite',display:'inline-block'}}); }
+
+  pushToast(t){ const id=Date.now()+Math.random(); this.setState(s=>({toasts:[...s.toasts,{id,...t}]})); return id; }
+  updateToast(id,p){ this.setState(s=>({toasts:s.toasts.map(t=>t.id===id?{...t,...p}:t)})); }
+  removeToast(id){ this.setState(s=>({toasts:s.toasts.filter(t=>t.id!==id)})); }
+  flash(t,ms){ const id=this.pushToast(t); setTimeout(()=>this.removeToast(id), ms||2000); }
+
+  computeErrors(){
+    const f=this.state.form, errs=[];
+    const minLen=parseInt(f.pwMinLen,10);
+    if (isNaN(minLen) || minLen<4 || minLen>16) errs.push({ field:'pwMinLen', tab:'pw', msg:'パスワード最小桁数は 4〜16 で指定してください（現在: '+(f.pwMinLen||'未入力')+'）。' });
+    const ac=parseInt(String(f.appCount).replace(/,/g,''),10);
+    if (!isNaN(ac) && ac>3000) errs.push({ field:'appCount', tab:'apps', msg:'承認済みアプリが上限 3,000 件を超えています（現在: '+ac.toLocaleString()+' 件）。' });
+    return errs;
+  }
+
+  onSave=()=>{
+    const errs=this.computeErrors();
+    if (errs.length){ this.setState({ showErrors:true, view:'invalid' }); return; }
+    this.setState({ showErrors:false, view:'saving' });
+    setTimeout(()=>{
+      this.setState(s=>({ view:'saved', version:s.version+1 }));
+      this.flash({ kind:'success', title:'ポリシーを保存しました', desc:'割当端末への配信を開始します' }, 3000);
+    }, 1600);
+  };
+  onPreview=()=>this.flash({ kind:'pending', title:'配信プレビューを生成中…', desc:'312 台への差分を計算しています' }, 2200);
+  onViewChange=(e)=>{
+    const v=e.target.value;
+    if (v==='invalid'){ this.setState(s=>({ view:'invalid', showErrors:true, tab:'pw', form:{...s.form, pwMinLen:'2', appCount:3140} })); return; }
+    this.setState({ view:v, showErrors: v==='invalid' });
+  };
+  onReload=()=>{ this.setState(s=>({ view:'editing', version:6 })); this.flash({kind:'success',title:'最新バージョンを読み込みました',desc:'v6 を基準に再編集できます'},2400); };
+  onForce=()=>{ this.setState({ view:'saving' }); setTimeout(()=>{ this.setState(s=>({view:'saved',version:7})); this.flash({kind:'success',title:'上書き保存しました',desc:'v7 として保存しました'},2600); },1600); };
+
+  renderVals(){
+    document.documentElement.setAttribute('data-theme', this.state.mode);
+    if (this.props.primary) document.documentElement.style.setProperty('--primary', this.props.primary);
+    const r=this.state.role, p=this.perms(), f=this.state.form, t=this.state.tab, v=this.state.view;
+    const emails={ SuperAdmin:'platform-ops@mobiguard.io', TenantAdmin:'admin@acme.co.jp', Operator:'operator@acme.co.jp', Viewer:'viewer@acme.co.jp' };
+    const roleKind={ SuperAdmin:['var(--purple-bg)','var(--purple-fg)'], TenantAdmin:['var(--info-bg)','var(--info-fg)'], Operator:['var(--success-bg)','var(--success-fg)'], Viewer:['var(--neutral-bg)','var(--neutral-fg)'] }[r];
+
+    const errs = this.computeErrors();
+    const errByField = {}; errs.forEach(e=>errByField[e.field]=e.msg);
+    const showErrAlert = this.state.showErrors && errs.length>0;
+
+    // state chip
+    let chip;
+    if (v==='saving') chip={ label:'保存中', bg:'var(--pale-bg)', fg:'var(--pale-fg)', border:'var(--pale-border)', icon:this.spinnerEl() };
+    else if (v==='saved') chip={ label:'保存済み', bg:'var(--success-bg)', fg:'var(--success-fg)', border:'var(--success-border)', icon:null };
+    else if (v==='conflict') chip={ label:'競合', bg:'var(--danger-bg)', fg:'var(--danger-fg)', border:'var(--danger-border)', icon:null };
+    else if (v==='invalid') chip={ label:'未保存（エラー）', bg:'var(--danger-bg)', fg:'var(--danger-fg)', border:'var(--danger-border)', icon:null };
+    else chip={ label:'編集中', bg:'var(--neutral-bg)', fg:'var(--neutral-fg)', border:'var(--neutral-border)', icon:null };
+
+    // save button content
+    const saveBtn = v==='saving' ? this.spinnerEl() : '変更を保存';
+
+    // apps
+    const apps=this.state.apps.map((a,i)=>({
+      name:a.name, pkg:a.pkg, install:a.install, perm:a.perm,
+      onInstall:(e)=>this.setState(s=>({apps:s.apps.map((x,j)=>j===i?{...x,install:e.target.value}:x)})),
+      onPerm:(e)=>this.setState(s=>({apps:s.apps.map((x,j)=>j===i?{...x,perm:e.target.value}:x)})),
+    }));
+    const acNum = parseInt(String(f.appCount).replace(/,/g,''),10);
+    const appOver = !isNaN(acNum) && acNum>3000;
+
+    // security switches
+    const secDefs=[
+      ['encrypt','ストレージ暗号化を必須にする','端末ストレージの暗号化を強制します。'],
+      ['unknownSources','提供元不明アプリのインストールを禁止','Google Play 以外からのインストールをブロックします。'],
+      ['playProtect','Google Play Protect を有効にする','アプリの安全性スキャンを常時有効にします。'],
+      ['devOptions','開発者向けオプションを禁止','USB デバッグや開発者設定へのアクセスを無効化します。'],
+      ['factoryReset','ユーザーによる工場出荷リセットを禁止','管理対象端末の初期化を防止します。'],
+      ['screenshot','スクリーンショットを禁止','画面キャプチャと画面録画を制限します。'],
+      ['usbDebug','USB データ転送を禁止','USB 経由のファイル転送・デバッグを無効化します。'],
+    ];
+    const securitySwitches=secDefs.map(d=>{ const on=f[d[0]]; const s=this.sw(on); return { label:d[1], desc:d[2], on, bg:s.bg, knobX:s.knobX, onToggle:()=>this.setForm(d[0], !f[d[0]]) }; });
+
+    // update modes
+    const umDefs=[
+      ['automatic','自動（即時）','利用可能になり次第、自動で適用します。'],
+      ['windowed','時間帯を指定','指定した時間帯のみ更新を適用します。'],
+      ['postpone','延期（最大 30 日）','更新を最長 30 日間延期します。'],
+      ['keep','現状維持','OS 更新を適用しません（非推奨）。'],
+    ];
+    const updateModes=umDefs.map(d=>{ const active=f.updateMode===d[0]; const rd=this.radio(active); return { label:d[1], desc:d[2], bd:rd.bd, bg:rd.bg, dot:rd.dot, fill:rd.fill, onPick:()=>this.setForm('updateMode',d[0]) }; });
+
+    // kiosk switches
+    const kDefs=[
+      ['statusBar','ステータスバーを表示','時刻・通知バーの表示を許可します。'],
+      ['navigation','ナビゲーションバーを表示','戻る / ホームボタンの表示を許可します。'],
+      ['powerButton','電源ボタンを有効にする','長押しメニュー（電源 / 再起動）を許可します。'],
+    ];
+    const kioskSwitches=kDefs.map(d=>{ const on=f[d[0]]; const s=this.sw(on); return { label:d[1], desc:d[2], on, bg:s.bg, knobX:s.knobX, onToggle:()=>this.setForm(d[0], !f[d[0]]) }; });
+
+    const dangerDot = this.el('span',{key:'d',style:{width:6,height:6,borderRadius:'50%',background:'var(--danger)',display:'inline-block'}});
+
+    return {
+      mode:this.state.mode, role:r, userEmail:emails[r], userInitials:r.slice(0,2).toUpperCase(),
+      roleBadgeBg:roleKind[0], roleBadgeFg:roleKind[1], canSeeAdmins:p.admins,
+      sidebarWidth:this.state.collapsed?'64px':'240px', showLabels:!this.state.collapsed,
+      themeIcon:this.themeIconEl(), toggleTheme:this.toggleTheme, toggleCollapse:this.toggleCollapse, onRoleChange:this.onRoleChange,
+
+      canEdit:p.edit, isDenied:!p.edit,
+      form:f, onName:(e)=>this.setForm('name',e.target.value),
+      versionLabel:'v'+this.state.version,
+      view:v, onViewChange:this.onViewChange, stateChip:chip,
+      isConflict:v==='conflict',
+      saveBtn, onSave:this.onSave, onPreview:this.onPreview,
+      saveDisabled: v==='saving', saveCursor: v==='saving'?'default':'pointer', saveOpacity: v==='saving'?'.8':'1',
+      onReload:this.onReload, onForce:this.onForce,
+
+      // alert
+      showErrorAlert:showErrAlert, errorCount:errs.length,
+      errorList:errs.map(e=>({ msg:e.msg, go:()=>this.setState({tab:e.tab}) })),
+
+      // tabs
+      isTabApps:t==='apps', isTabPw:t==='pw', isTabSec:t==='sec', isTabUpd:t==='upd', isTabKiosk:t==='kiosk',
+      tabApps:()=>this.setState({tab:'apps'}), tabPw:()=>this.setState({tab:'pw'}), tabSec:()=>this.setState({tab:'sec'}), tabUpd:()=>this.setState({tab:'upd'}), tabKiosk:()=>this.setState({tab:'kiosk'}),
+      tApps:this.tab(t==='apps'), tPw:this.tab(t==='pw'), tSec:this.tab(t==='sec'), tUpd:this.tab(t==='upd'), tKiosk:this.tab(t==='kiosk'),
+      appsErrDot: (showErrAlert && errByField.appCount) ? dangerDot : null,
+      pwErrDot: (showErrAlert && errByField.pwMinLen) ? dangerDot : null,
+
+      // apps tab
+      apps,
+      appCountStr: isNaN(acNum) ? String(f.appCount) : acNum.toLocaleString(),
+      appCountColor: appOver ? 'var(--danger-fg)' : 'var(--text-secondary)',
+      appOverLimit: appOver,
+      appBorder: appOver ? 'var(--danger-border)' : 'var(--border)',
+      appInputBorder: appOver ? 'var(--danger)' : 'var(--border-strong)',
+      onAppCount:(e)=>this.setForm('appCount', e.target.value),
+      onAddApp:()=>this.flash({kind:'pending',title:'アプリを検索',desc:'マネージド Google Play を開く'},1600),
+
+      // password tab
+      onPwQuality:(e)=>this.setForm('pwQuality',e.target.value),
+      onPwMinLen:(e)=>this.setForm('pwMinLen',e.target.value),
+      onPwHistory:(e)=>this.setForm('pwHistory',e.target.value),
+      onPwExpire:(e)=>this.setForm('pwExpire',e.target.value),
+      onPwMaxFail:(e)=>this.setForm('pwMaxFail',e.target.value),
+      pwMinBorder: errByField.pwMinLen ? 'var(--danger)' : 'var(--border-strong)',
+      pwMinErr: !!errByField.pwMinLen, pwMinErrMsg: errByField.pwMinLen || '', pwMinOk: !errByField.pwMinLen,
+
+      // security
+      securitySwitches,
+
+      // update
+      updateModes, isWindowed:f.updateMode==='windowed',
+      onWinStart:(e)=>this.setForm('winStart',e.target.value), onWinEnd:(e)=>this.setForm('winEnd',e.target.value),
+      onFreezeStart:(e)=>this.setForm('freezeStart',e.target.value), onFreezeEnd:(e)=>this.setForm('freezeEnd',e.target.value),
+
+      // kiosk
+      kSingle:this.radio(f.kioskMode==='single'), kMulti:this.radio(f.kioskMode==='multi'),
+      pickSingle:()=>this.setForm('kioskMode','single'), pickMulti:()=>this.setForm('kioskMode','multi'),
+      kioskSwitches,
+
+      toasts:this.state.toasts.map(x=>({ ...x, accent:x.kind==='success'?'var(--success)':x.kind==='error'?'var(--danger)':'var(--primary)', icon:this.toastIcon(x.kind) })),
+    };
+  }
+}
+</script>
+</body>
+</html>

@@ -1,0 +1,503 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Noto+Sans+JP:wght@400;500;700&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+  :root{
+    --bg:#ffffff; --surface:#f7f8fa; --surface-2:#eef0f4; --elevated:#ffffff;
+    --border:#e4e7ec; --border-strong:#d3d8e0;
+    --text:#1b1f27; --text-secondary:#5a616e; --text-muted:#8a909c;
+    --primary:#4f46e5; --primary-hover:#4338ca; --primary-fg:#ffffff; --primary-bg:#eef0fe; --primary-border:#c9cdfa;
+    --success:#16a34a; --success-bg:#e8f6ed; --success-fg:#15803d; --success-border:#bfe6cc;
+    --danger:#dc2626; --danger-bg:#fdeaea; --danger-fg:#b91c1c; --danger-border:#f5c6c6;
+    --warning:#d97706; --warning-bg:#fdf2e0; --warning-fg:#b45309; --warning-border:#f2dbab;
+    --neutral:#6b7280; --neutral-bg:#eef0f3; --neutral-fg:#4b5563; --neutral-border:#dde1e7;
+    --info:#2563eb; --info-bg:#e8f0fe; --info-fg:#1d4ed8; --info-border:#c3d6fb;
+    --purple:#7c3aed; --purple-bg:#f1ebfd; --purple-fg:#6d28d9; --purple-border:#ddcdfa;
+    --pale-bg:#f3f4f6; --pale-fg:#9ca3af; --pale-border:#e6e8ec;
+    --shadow:0 1px 2px rgba(16,20,30,.04), 0 1px 3px rgba(16,20,30,.06);
+    --shadow-pop:0 4px 16px rgba(16,20,30,.12), 0 1px 3px rgba(16,20,30,.08);
+  }
+  :root[data-theme="dark"]{
+    --bg:#0d1017; --surface:#151922; --surface-2:#1b212c; --elevated:#171c25;
+    --border:#262d3a; --border-strong:#323a49;
+    --text:#e7eaf0; --text-secondary:#9aa2b1; --text-muted:#6b7480;
+    --primary:#6366f1; --primary-hover:#7c80f7; --primary-fg:#ffffff; --primary-bg:rgba(99,102,241,.16); --primary-border:rgba(99,102,241,.42);
+    --success:#22c55e; --success-bg:rgba(34,197,94,.14); --success-fg:#4ade80; --success-border:rgba(34,197,94,.32);
+    --danger:#ef4444; --danger-bg:rgba(239,68,68,.14); --danger-fg:#f87171; --danger-border:rgba(239,68,68,.34);
+    --warning:#f59e0b; --warning-bg:rgba(245,158,11,.14); --warning-fg:#fbbf24; --warning-border:rgba(245,158,11,.32);
+    --neutral:#94a3b8; --neutral-bg:rgba(148,163,184,.14); --neutral-fg:#cbd5e1; --neutral-border:rgba(148,163,184,.26);
+    --info:#3b82f6; --info-bg:rgba(59,130,246,.16); --info-fg:#60a5fa; --info-border:rgba(59,130,246,.34);
+    --purple:#8b5cf6; --purple-bg:rgba(139,92,246,.16); --purple-fg:#a78bfa; --purple-border:rgba(139,92,246,.34);
+    --pale-bg:rgba(148,163,184,.07); --pale-fg:#7b8494; --pale-border:rgba(148,163,184,.16);
+    --shadow:0 1px 2px rgba(0,0,0,.4); --shadow-pop:0 8px 28px rgba(0,0,0,.55);
+  }
+  *{box-sizing:border-box;}
+  body{margin:0; background:var(--bg); color:var(--text); font-family:"Noto Sans JP", system-ui, sans-serif; font-size:14px; line-height:1.45; -webkit-font-smoothing:antialiased; font-feature-settings:"palt"; transition:background .18s ease, color .18s ease;}
+  ::selection{background:var(--primary-bg);}
+  @keyframes shimmer{0%{background-position:-180% 0;}100%{background-position:180% 0;}}
+  @keyframes spin{to{transform:rotate(360deg);}}
+  @keyframes toastin{from{opacity:0; transform:translateY(8px) scale(.98);}to{opacity:1; transform:none;}}
+  @keyframes overlayin{from{opacity:0;}to{opacity:1;}}
+  @keyframes dialogin{from{opacity:0; transform:translateY(10px) scale(.985);}to{opacity:1; transform:none;}}
+</style>
+</helmet>
+
+<div style="display:flex; min-height:100vh; background:var(--bg);">
+
+  <!-- ============ SIDEBAR (admin-console) ============ -->
+  <aside style="width: {{ sidebarWidth }}; flex:none; background:var(--surface); border-right:1px solid var(--border); display:flex; flex-direction:column; position:sticky; top:0; height:100vh; transition:width .16s ease;">
+    <div style="height:52px; display:flex; align-items:center; gap:10px; padding:0 16px; border-bottom:1px solid var(--border);">
+      <div style="width:26px; height:26px; flex:none; border-radius:7px; background:var(--primary); display:flex; align-items:center; justify-content:center; color:#fff; font-weight:700; font-size:13px;">M</div>
+      <sc-if value="{{ showLabels }}" hint-placeholder-val="{{ true }}"><div style="font-weight:700; font-size:14px; white-space:nowrap; display:flex; align-items:center; gap:6px;">MobiGuard <span style="font-size:9px; font-weight:700; letter-spacing:.04em; padding:1px 5px; border-radius:4px; background:var(--purple-bg); color:var(--purple-fg);">ADMIN</span></div></sc-if>
+    </div>
+    <nav style="flex:1; padding:10px 10px; display:flex; flex-direction:column; gap:2px; overflow-y:auto;">
+      <sc-if value="{{ showLabels }}" hint-placeholder-val="{{ true }}"><div style="font-size:10px; font-weight:600; letter-spacing:.05em; color:var(--text-muted); padding:6px 10px 4px;">プラットフォーム運用</div></sc-if>
+      <div style="display:flex; align-items:center; gap:11px; padding:8px 10px; border-radius:8px; background:var(--primary-bg); color:var(--primary); font-weight:500; white-space:nowrap; cursor:pointer;">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" style="flex:none;"><rect x="5" y="3" width="14" height="18" rx="1.5"/><path d="M9 7h.01M15 7h.01M9 11h.01M15 11h.01M10 21v-3h4v3"/></svg>
+        <sc-if value="{{ showLabels }}" hint-placeholder-val="{{ true }}"><span>テナント</span></sc-if>
+      </div>
+      <div style="display:flex; align-items:center; gap:11px; padding:8px 10px; border-radius:8px; color:var(--text-secondary); white-space:nowrap; cursor:pointer;" style-hover="background:var(--surface-2); color:var(--text);">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" style="flex:none;"><circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3a14 14 0 0 1 0 18M12 3a14 14 0 0 0 0 18"/></svg>
+        <sc-if value="{{ showLabels }}" hint-placeholder-val="{{ true }}"><span>横断ダッシュボード</span></sc-if>
+      </div>
+      <div style="display:flex; align-items:center; gap:11px; padding:8px 10px; border-radius:8px; color:var(--text-secondary); white-space:nowrap; cursor:pointer;" style-hover="background:var(--surface-2); color:var(--text);">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" style="flex:none;"><path d="M22 12h-6l-2 3h-4l-2-3H2"/><path d="M5.5 5.5 2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.5-6.5A2 2 0 0 0 16.8 4H7.2a2 2 0 0 0-1.7 1.5Z"/></svg>
+        <sc-if value="{{ showLabels }}" hint-placeholder-val="{{ true }}"><span style="display:flex; align-items:center; gap:7px;">未割当（退避キュー）<span style="font-size:10px; font-weight:700; padding:0 6px; border-radius:9px; background:var(--warning-bg); color:var(--warning-fg);">7</span></span></sc-if>
+      </div>
+      <div style="display:flex; align-items:center; gap:11px; padding:8px 10px; border-radius:8px; color:var(--text-secondary); white-space:nowrap; cursor:pointer;" style-hover="background:var(--surface-2); color:var(--text);">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" style="flex:none;"><path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8l-5-5Z"/><path d="M14 3v5h5"/><line x1="9" y1="13" x2="15" y2="13"/><line x1="9" y1="17" x2="15" y2="17"/></svg>
+        <sc-if value="{{ showLabels }}" hint-placeholder-val="{{ true }}"><span>横断監査ログ</span></sc-if>
+      </div>
+    </nav>
+    <div style="border-top:1px solid var(--border); padding:10px;">
+      <div onClick="{{ toggleCollapse }}" style="display:flex; align-items:center; gap:11px; padding:8px 10px; border-radius:8px; color:var(--text-muted); cursor:pointer; white-space:nowrap;" style-hover="background:var(--surface-2); color:var(--text);">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" style="flex:none;"><rect x="3" y="4" width="18" height="16" rx="2"/><line x1="9" y1="4" x2="9" y2="20"/></svg>
+        <sc-if value="{{ showLabels }}" hint-placeholder-val="{{ true }}"><span>サイドバーを折りたたむ</span></sc-if>
+      </div>
+    </div>
+  </aside>
+
+  <!-- ============ MAIN ============ -->
+  <main style="flex:1; min-width:0; display:flex; flex-direction:column;">
+
+    <!-- TOPBAR -->
+    <header style="height:52px; flex:none; position:sticky; top:0; z-index:30; background:color-mix(in srgb, var(--bg) 88%, transparent); backdrop-filter:blur(8px); border-bottom:1px solid var(--border); display:flex; align-items:center; gap:14px; padding:0 18px;">
+      <div style="display:flex; align-items:center; gap:8px;"><span style="font-weight:700; font-size:14.5px; white-space:nowrap;">テナント管理</span><span style="font-size:12px; color:var(--text-muted);">/tenants</span></div>
+      <div style="flex:1;"></div>
+      <button onClick="{{ toggleTheme }}" title="テーマ切替" style="width:32px; height:32px; flex:none; display:flex; align-items:center; justify-content:center; border:1px solid var(--border-strong); border-radius:8px; background:var(--surface); color:var(--text-secondary); cursor:pointer;" style-hover="border-color:var(--primary); color:var(--primary);">{{ themeIcon }}</button>
+      <div style="display:flex; align-items:center; gap:6px;">
+        <span style="font-size:11px; color:var(--text-muted);">ロール</span>
+        <select value="{{ role }}" onChange="{{ onRoleChange }}" style="height:32px; padding:0 8px; border:1px solid var(--border-strong); border-radius:8px; background:var(--surface); color:var(--text); font-size:13px; font-family:inherit; cursor:pointer;">
+          <option value="SuperAdmin">SuperAdmin</option>
+          <option value="TenantAdmin">TenantAdmin</option>
+          <option value="Operator">Operator</option>
+          <option value="Viewer">Viewer</option>
+        </select>
+      </div>
+      <div style="width:1px; height:24px; background:var(--border);"></div>
+      <div style="display:flex; align-items:center; gap:9px; cursor:pointer; padding:3px 4px 3px 6px; border-radius:8px;" style-hover="background:var(--surface-2);">
+        <div style="text-align:right; line-height:1.25;"><div style="font-size:12.5px; font-weight:500;">{{ userEmail }}</div><div style="display:flex; justify-content:flex-end;"><span style="font-size:10px; font-weight:600; padding:1px 6px; border-radius:5px; background: {{ roleBadgeBg }}; color: {{ roleBadgeFg }};">{{ role }}</span></div></div>
+        <div style="width:30px; height:30px; flex:none; border-radius:50%; background:var(--primary); color:#fff; display:flex; align-items:center; justify-content:center; font-size:12px; font-weight:600;">{{ userInitials }}</div>
+      </div>
+    </header>
+
+    <div style="padding:22px 26px 80px;">
+
+      <!-- ===== 403 ===== -->
+      <sc-if value="{{ isDenied }}" hint-placeholder-val="{{ false }}">
+        <div style="border:1px solid var(--border); border-radius:12px; background:var(--elevated); padding:60px 24px; display:flex; flex-direction:column; align-items:center; text-align:center; margin-top:8px;">
+          <div style="width:52px; height:52px; border-radius:13px; background:var(--surface-2); display:flex; align-items:center; justify-content:center; margin-bottom:14px;"><svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="var(--text-secondary)" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="5" y="11" width="14" height="9" rx="2"/><path d="M8 11V8a4 4 0 0 1 8 0v3"/></svg></div>
+          <div style="font-size:12px; font-weight:700; letter-spacing:.06em; color:var(--text-muted); margin-bottom:4px;">403 FORBIDDEN</div>
+          <div style="font-size:16px; font-weight:600; margin-bottom:6px;">テナント管理は SuperAdmin 専用です</div>
+          <div style="font-size:13px; color:var(--text-secondary); max-width:440px;">この機能はプラットフォーム運営者（<b style="color:var(--text);">SuperAdmin</b>）のみが利用できます。現在のロール（{{ role }}）にはアクセス権がありません。</div>
+        </div>
+      </sc-if>
+
+      <!-- ===== MAIN ===== -->
+      <sc-if value="{{ canManage }}" hint-placeholder-val="{{ true }}">
+        <div>
+          <!-- header -->
+          <div style="display:flex; align-items:flex-start; justify-content:space-between; gap:16px; flex-wrap:wrap; margin-bottom:18px;">
+            <div>
+              <h1 style="margin:0 0 3px; font-size:21px; font-weight:700; letter-spacing:-.01em;">テナント管理</h1>
+              <p style="margin:0; font-size:13px; color:var(--text-secondary);">顧客テナントの作成と Android Enterprise バインド状態を管理します。</p>
+            </div>
+            <div style="display:flex; align-items:center; gap:14px; flex-wrap:wrap;">
+              <div style="display:flex; align-items:center; gap:6px;">
+                <span style="font-size:11px; color:var(--text-muted);">状態プレビュー</span>
+                <div style="display:inline-flex; padding:2px; background:var(--surface-2); border-radius:8px; gap:2px; flex-wrap:wrap;">
+                  <button onClick="{{ setList }}" style="height:26px; padding:0 9px; border:none; border-radius:6px; font-family:inherit; font-size:12px; cursor:pointer; background:{{ vList.bg }}; color:{{ vList.fg }}; font-weight:{{ vList.fw }};">一覧</button>
+                  <button onClick="{{ setWizard }}" style="height:26px; padding:0 9px; border:none; border-radius:6px; font-family:inherit; font-size:12px; cursor:pointer; background:{{ vWiz.bg }}; color:{{ vWiz.fg }}; font-weight:{{ vWiz.fw }};">作成ウィザード</button>
+                  <button onClick="{{ setBinding }}" style="height:26px; padding:0 9px; border:none; border-radius:6px; font-family:inherit; font-size:12px; cursor:pointer; background:{{ vBind.bg }}; color:{{ vBind.fg }}; font-weight:{{ vBind.fw }};">バインド処理中</button>
+                  <button onClick="{{ setFailed }}" style="height:26px; padding:0 9px; border:none; border-radius:6px; font-family:inherit; font-size:12px; cursor:pointer; background:{{ vFail.bg }}; color:{{ vFail.fg }}; font-weight:{{ vFail.fw }};">バインド失敗</button>
+                  <button onClick="{{ setDisable }}" style="height:26px; padding:0 9px; border:none; border-radius:6px; font-family:inherit; font-size:12px; cursor:pointer; background:{{ vDis.bg }}; color:{{ vDis.fg }}; font-weight:{{ vDis.fw }};">無効化確認</button>
+                </div>
+              </div>
+              <button onClick="{{ openWizard }}" style="display:inline-flex; align-items:center; gap:7px; height:36px; padding:0 15px; border:none; border-radius:8px; background:var(--primary); color:var(--primary-fg); font-size:13px; font-weight:600; font-family:inherit; cursor:pointer;" style-hover="background:var(--primary-hover);">
+                <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14M5 12h14"/></svg>テナントを作成
+              </button>
+            </div>
+          </div>
+
+          <!-- metrics -->
+          <div style="display:grid; grid-template-columns:repeat(4,1fr); gap:14px; margin-bottom:18px;">
+            <div style="border:1px solid var(--border); border-radius:12px; padding:14px 16px; background:var(--elevated); box-shadow:var(--shadow);"><div style="font-size:12px; color:var(--text-secondary); margin-bottom:6px;">総テナント数</div><div style="font-size:24px; font-weight:700; font-variant-numeric:tabular-nums;">{{ totalCount }}</div></div>
+            <div style="border:1px solid var(--border); border-radius:12px; padding:14px 16px; background:var(--elevated); box-shadow:var(--shadow);"><div style="font-size:12px; color:var(--text-secondary); margin-bottom:6px; display:flex; align-items:center; gap:6px;"><span style="width:7px;height:7px;border-radius:50%;background:var(--success);"></span>有効</div><div style="font-size:24px; font-weight:700; font-variant-numeric:tabular-nums; color:var(--success-fg);">{{ activeCount }}</div></div>
+            <div style="border:1px solid var(--border); border-radius:12px; padding:14px 16px; background:var(--elevated); box-shadow:var(--shadow);"><div style="font-size:12px; color:var(--text-secondary); margin-bottom:6px; display:flex; align-items:center; gap:6px;"><span style="width:7px;height:7px;border-radius:50%;background:var(--warning);"></span>バインド未完了</div><div style="font-size:24px; font-weight:700; font-variant-numeric:tabular-nums; color:var(--warning-fg);">{{ pendingCount }}</div></div>
+            <div style="border:1px solid var(--border); border-radius:12px; padding:14px 16px; background:var(--elevated); box-shadow:var(--shadow);"><div style="font-size:12px; color:var(--text-secondary); margin-bottom:6px;">総管理端末数</div><div style="font-size:24px; font-weight:700; font-variant-numeric:tabular-nums;">{{ deviceTotal }}</div></div>
+          </div>
+
+          <!-- LOADING -->
+          <sc-if value="{{ isLoading }}" hint-placeholder-val="{{ false }}">
+            <div style="border:1px solid var(--border); border-radius:12px; background:var(--elevated); overflow:hidden;">
+              <div style="height:46px; border-bottom:1px solid var(--border); background:var(--surface);"></div>
+              <div style="padding:0 16px;">
+                <sc-for list="{{ skeletonRows }}" as="s" hint-placeholder-count="4">
+                  <div style="display:flex; align-items:center; gap:18px; padding:15px 0; border-bottom:1px solid var(--border);">
+                    <div style="height:11px; width:160px; border-radius:4px; background:linear-gradient(90deg,var(--surface-2) 25%,var(--border) 37%,var(--surface-2) 63%); background-size:200% 100%; animation:shimmer 1.4s ease-in-out infinite;"></div>
+                    <div style="height:11px; width:90px; border-radius:4px; background:linear-gradient(90deg,var(--surface-2) 25%,var(--border) 37%,var(--surface-2) 63%); background-size:200% 100%; animation:shimmer 1.4s ease-in-out infinite;"></div>
+                    <div style="flex:1;"></div>
+                    <div style="height:11px; width:70px; border-radius:4px; background:linear-gradient(90deg,var(--surface-2) 25%,var(--border) 37%,var(--surface-2) 63%); background-size:200% 100%; animation:shimmer 1.4s ease-in-out infinite;"></div>
+                  </div>
+                </sc-for>
+              </div>
+            </div>
+          </sc-if>
+
+          <!-- LIST -->
+          <sc-if value="{{ isList }}" hint-placeholder-val="{{ true }}">
+            <div style="border:1px solid var(--border); border-radius:12px; background:var(--elevated); overflow:hidden; box-shadow:var(--shadow);">
+              <div style="overflow-x:auto;">
+                <table style="width:100%; border-collapse:collapse; table-layout:fixed; font-size:13px; min-width:840px;">
+                  <colgroup><col style="width:26%;" /><col style="width:17%;" /><col style="width:23%;" /><col style="width:15%;" /><col style="width:13%;" /><col style="width:52px;" /></colgroup>
+                  <thead>
+                    <tr style="background:var(--surface);">
+                      <th style="text-align:left; font-weight:600; color:var(--text-secondary); font-size:12px; padding:10px 14px; border-bottom:1px solid var(--border);">テナント名</th>
+                      <th style="text-align:left; font-weight:600; color:var(--text-secondary); font-size:12px; padding:10px 14px; border-bottom:1px solid var(--border);">状態</th>
+                      <th style="text-align:left; font-weight:600; color:var(--text-secondary); font-size:12px; padding:10px 14px; border-bottom:1px solid var(--border);">Enterprise</th>
+                      <th style="text-align:left; font-weight:600; color:var(--text-secondary); font-size:12px; padding:10px 14px; border-bottom:1px solid var(--border);">作成日</th>
+                      <th style="text-align:right; font-weight:600; color:var(--text-secondary); font-size:12px; padding:10px 14px; border-bottom:1px solid var(--border);">端末数</th>
+                      <th style="border-bottom:1px solid var(--border);"></th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    <sc-for list="{{ tenants }}" as="tn" hint-placeholder-count="0">
+                      <tr style="border-bottom:1px solid var(--border); background:{{ tn.rowBg }};" style-hover="background:var(--surface);">
+                        <td style="padding:12px 14px;">
+                          <div style="display:flex; align-items:center; gap:10px; min-width:0;">
+                            <div style="width:30px; height:30px; flex:none; border-radius:8px; background:var(--surface-2); display:flex; align-items:center; justify-content:center; font-size:13px; font-weight:700; color:var(--text-secondary);">{{ tn.initial }}</div>
+                            <div style="min-width:0;"><div style="font-weight:500; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">{{ tn.name }}</div><div style="font-size:11px; color:var(--text-muted); font-family:'IBM Plex Mono',monospace;">{{ tn.id }}</div></div>
+                          </div>
+                        </td>
+                        <td style="padding:12px 14px;">
+                          <span style="display:inline-flex; align-items:center; gap:5px; font-size:11.5px; font-weight:600; padding:2px 9px; border-radius:6px; background:{{ tn.stBg }}; color:{{ tn.stFg }}; border:1px solid {{ tn.stBorder }}; white-space:nowrap;"><span style="width:5px; height:5px; border-radius:50%; background:{{ tn.stDot }};"></span>{{ tn.status }}</span>
+                          <sc-if value="{{ tn.locked }}" hint-placeholder-val="{{ false }}"><div style="font-size:10.5px; color:var(--warning-fg); margin-top:4px; display:flex; align-items:center; gap:4px;"><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="5" y="11" width="14" height="9" rx="2"/><path d="M8 11V8a4 4 0 0 1 8 0v3"/></svg>端末・ポリシー操作は不可</div></sc-if>
+                        </td>
+                        <td style="padding:12px 14px; color:{{ tn.entColor }}; font-family:'IBM Plex Mono',monospace; font-size:12px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">{{ tn.enterprise }}</td>
+                        <td style="padding:12px 14px; color:var(--text-secondary); white-space:nowrap; font-variant-numeric:tabular-nums;">{{ tn.created }}</td>
+                        <td style="padding:12px 14px; text-align:right; font-variant-numeric:tabular-nums; color:{{ tn.devColor }};">{{ tn.devices }}</td>
+                        <td style="padding:12px 6px; text-align:center; position:relative;">
+                          <button onClick="{{ tn.onMenu }}" style="width:28px; height:28px; border:none; background:transparent; border-radius:7px; color:var(--text-muted); cursor:pointer; display:inline-flex; align-items:center; justify-content:center;" style-hover="background:var(--surface-2); color:var(--text);"><svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><circle cx="12" cy="5" r="1.7"/><circle cx="12" cy="12" r="1.7"/><circle cx="12" cy="19" r="1.7"/></svg></button>
+                          <sc-if value="{{ tn.menuOpen }}" hint-placeholder-val="{{ false }}">
+                            <div style="position:absolute; right:8px; top:36px; z-index:40; width:184px; background:var(--elevated); border:1px solid var(--border); border-radius:10px; box-shadow:var(--shadow-pop); padding:5px; text-align:left;">
+                              <div style="padding:7px 9px; font-size:12.5px; border-radius:6px; cursor:pointer;" style-hover="background:var(--surface-2);">詳細・状態を確認</div>
+                              <sc-if value="{{ tn.locked }}" hint-placeholder-val="{{ false }}"><div onClick="{{ tn.onRebind }}" style="padding:7px 9px; font-size:12.5px; border-radius:6px; cursor:pointer; color:var(--warning-fg);" style-hover="background:var(--surface-2);">バインドを再試行</div></sc-if>
+                              <div style="height:1px; background:var(--border); margin:4px 0;"></div>
+                              <div onClick="{{ tn.onDisable }}" style="padding:7px 9px; font-size:12.5px; border-radius:6px; cursor:{{ tn.disableCursor }}; color:{{ tn.disableColor }};" style-hover="background:var(--danger-bg);" title="{{ tn.disableTip }}">テナントを無効化</div>
+                            </div>
+                          </sc-if>
+                        </td>
+                      </tr>
+                    </sc-for>
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          </sc-if>
+        </div>
+      </sc-if>
+
+    </div>
+  </main>
+
+  <!-- ===== CREATE WIZARD DIALOG ===== -->
+  <sc-if value="{{ wizardOpen }}" hint-placeholder-val="{{ false }}">
+    <div onClick="{{ closeWizard }}" style="position:fixed; inset:0; z-index:80; background:rgba(8,11,18,.5); display:flex; align-items:center; justify-content:center; padding:24px; animation:overlayin .14s ease;">
+      <div onClick="{{ stop }}" style="width:100%; max-width:560px; background:var(--elevated); border:1px solid var(--border); border-radius:14px; box-shadow:var(--shadow-pop); overflow:hidden; animation:dialogin .16s ease;">
+        <div style="display:flex; align-items:center; justify-content:space-between; gap:12px; padding:16px 20px; border-bottom:1px solid var(--border);">
+          <div style="font-size:15px; font-weight:700;">テナントを作成</div>
+          <button onClick="{{ closeWizard }}" style="width:30px; height:30px; flex:none; border:none; background:transparent; border-radius:8px; color:var(--text-muted); cursor:pointer; display:flex; align-items:center; justify-content:center;" style-hover="background:var(--surface-2); color:var(--text);"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 6 6 18M6 6l12 12"/></svg></button>
+        </div>
+
+        <!-- stepper -->
+        <div style="display:flex; align-items:center; padding:18px 20px 4px;">
+          <sc-for list="{{ steps }}" as="st" hint-placeholder-count="4">
+            <div style="display:flex; align-items:center; flex:{{ st.flex }}; min-width:0;">
+              <div style="display:flex; flex-direction:column; align-items:center; gap:5px; flex:none;">
+                <div style="width:28px; height:28px; border-radius:50%; display:flex; align-items:center; justify-content:center; font-size:12px; font-weight:700; background:{{ st.circleBg }}; color:{{ st.circleFg }}; border:1.5px solid {{ st.circleBorder }};">{{ st.icon }}</div>
+                <div style="font-size:10.5px; color:{{ st.labelColor }}; white-space:nowrap; text-align:center;">{{ st.label }}</div>
+              </div>
+              <sc-if value="{{ st.hasLine }}" hint-placeholder-val="{{ true }}"><div style="flex:1; height:2px; margin:0 6px; margin-bottom:18px; background:{{ st.lineColor }};"></div></sc-if>
+            </div>
+          </sc-for>
+        </div>
+
+        <div style="padding:14px 22px 4px;">
+          <!-- STEP: info -->
+          <sc-if value="{{ wzInfo }}" hint-placeholder-val="{{ true }}">
+            <div>
+              <div style="margin-bottom:14px;">
+                <label style="display:block; font-size:12px; font-weight:500; color:var(--text-secondary); margin-bottom:6px;">テナント名 <span style="color:var(--danger-fg);">*</span></label>
+                <input value="{{ wzName }}" onInput="{{ onWzName }}" placeholder="例: 株式会社サンプル" style="width:100%; height:38px; padding:0 12px; border:1px solid var(--border-strong); border-radius:8px; background:var(--bg); color:var(--text); font-size:13px; font-family:inherit; outline:none;" />
+              </div>
+              <div style="margin-bottom:14px;">
+                <label style="display:block; font-size:12px; font-weight:500; color:var(--text-secondary); margin-bottom:6px;">初期 TenantAdmin のメール <span style="color:var(--danger-fg);">*</span></label>
+                <input value="{{ wzEmail }}" onInput="{{ onWzEmail }}" placeholder="admin@example.co.jp" style="width:100%; height:38px; padding:0 12px; border:1px solid var(--border-strong); border-radius:8px; background:var(--bg); color:var(--text); font-size:13px; font-family:'IBM Plex Mono',monospace; outline:none;" />
+              </div>
+              <div style="display:flex; gap:8px; align-items:flex-start; padding:11px 13px; background:var(--surface); border:1px solid var(--border); border-radius:9px;">
+                <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="var(--text-muted)" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="flex:none; margin-top:1px;"><circle cx="12" cy="12" r="9"/><path d="M12 16v-4M12 8h.01"/></svg>
+                <div style="font-size:11.5px; color:var(--text-secondary); line-height:1.55;">SuperAdmin が代行して Google の Enterprise を作成し、Android Management API へバインドします。完了するまで端末・ポリシー操作はできません。</div>
+              </div>
+            </div>
+          </sc-if>
+
+          <!-- STEP: binding -->
+          <sc-if value="{{ wzBinding }}" hint-placeholder-val="{{ false }}">
+            <div style="padding:18px 0; display:flex; flex-direction:column; align-items:center; text-align:center;">
+              <div style="width:40px; height:40px; border-radius:50%; border:3px solid var(--surface-2); border-top-color:var(--primary); animation:spin .7s linear infinite; margin-bottom:16px;"></div>
+              <div style="font-size:14px; font-weight:600; margin-bottom:4px;">Enterprise をバインドしています…</div>
+              <div style="font-size:12.5px; color:var(--text-secondary); max-width:340px;">Google Enterprise の作成と AMAPI への接続検証を行っています。完了まで数十秒かかる場合があります。</div>
+            </div>
+          </sc-if>
+
+          <!-- STEP: failed -->
+          <sc-if value="{{ wzFailed }}" hint-placeholder-val="{{ false }}">
+            <div style="padding:6px 0 4px;">
+              <div style="display:flex; gap:11px; padding:13px 14px; background:var(--danger-bg); border:1px solid var(--danger-border); border-radius:10px; margin-bottom:12px;">
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="var(--danger-fg)" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" style="flex:none; margin-top:1px;"><circle cx="12" cy="12" r="9"/><path d="M12 8v5M12 16h.01"/></svg>
+                <div><div style="font-size:13.5px; font-weight:700; color:var(--danger-fg); margin-bottom:3px;">バインドに失敗しました</div><div style="font-size:12px; color:var(--danger-fg); opacity:.92; line-height:1.55;">Google Enterprise の作成は完了しましたが、AMAPI への接続検証に失敗しました。テナントは <b>バインド未完了</b> として保存され、<b>端末・ポリシー操作はできません</b>。</div></div>
+              </div>
+              <div style="display:flex; justify-content:space-between; gap:10px; padding:9px 12px; background:var(--surface); border:1px solid var(--border); border-radius:8px;"><span style="font-size:11.5px; color:var(--text-muted);">エラー</span><span style="font-size:11.5px; font-weight:500; font-family:'IBM Plex Mono',monospace;">ENTERPRISE_BIND_TIMEOUT</span></div>
+            </div>
+          </sc-if>
+
+          <!-- STEP: done -->
+          <sc-if value="{{ wzDone }}" hint-placeholder-val="{{ false }}">
+            <div style="padding:18px 0; display:flex; flex-direction:column; align-items:center; text-align:center;">
+              <div style="width:48px; height:48px; border-radius:50%; background:var(--success-bg); display:flex; align-items:center; justify-content:center; margin-bottom:14px;"><svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="var(--success-fg)" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg></div>
+              <div style="font-size:15px; font-weight:700; margin-bottom:4px;">テナントを作成しました</div>
+              <div style="font-size:12.5px; color:var(--text-secondary); max-width:340px;">Enterprise のバインドが完了し、テナントは <b style="color:var(--success-fg);">有効</b> になりました。端末のエンロールを開始できます。</div>
+            </div>
+          </sc-if>
+        </div>
+
+        <div style="display:flex; gap:10px; justify-content:flex-end; padding:16px 22px 20px; border-top:1px solid var(--border); margin-top:14px;">
+          {{ wizardFooter }}
+        </div>
+      </div>
+    </div>
+  </sc-if>
+
+  <!-- ===== DISABLE CONFIRM (二段階) ===== -->
+  <sc-if value="{{ disableOpen }}" hint-placeholder-val="{{ false }}">
+    <div onClick="{{ closeDisable }}" style="position:fixed; inset:0; z-index:80; background:rgba(8,11,18,.5); display:flex; align-items:center; justify-content:center; padding:20px; animation:overlayin .14s ease;">
+      <div onClick="{{ stop }}" style="width:100%; max-width:440px; background:var(--elevated); border:1px solid var(--border); border-radius:14px; box-shadow:var(--shadow-pop); overflow:hidden; animation:dialogin .16s ease;">
+        <div style="padding:20px 22px 0;">
+          <div style="display:flex; align-items:center; gap:11px; margin-bottom:14px;">
+            <div style="width:38px; height:38px; flex:none; border-radius:10px; background:var(--danger-bg); display:flex; align-items:center; justify-content:center;"><svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="var(--danger-fg)" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2 2 20h20L12 2Z"/><line x1="12" y1="9" x2="12" y2="14"/><line x1="12" y1="17.5" x2="12" y2="17.51"/></svg></div>
+            <div><div style="font-size:15px; font-weight:700;">テナントを無効化します</div><div style="font-size:12px; color:var(--danger-fg); font-weight:500;">この操作は全ユーザーに影響します</div></div>
+          </div>
+          <p style="margin:0 0 14px; font-size:13px; color:var(--text-secondary); line-height:1.6;">無効化すると、このテナントの管理者はコンソールにアクセスできなくなり、端末へのコマンド配信が停止します。続行するにはテナント名を入力してください。</p>
+          <div style="border:1px solid var(--border); border-radius:9px; background:var(--surface); padding:11px 13px; margin-bottom:14px;">
+            <div style="display:flex; justify-content:space-between; gap:10px; margin-bottom:4px;"><span style="font-size:12px; color:var(--text-muted);">テナント</span><span style="font-size:12.5px; font-weight:600;">{{ disableName }}</span></div>
+            <div style="display:flex; justify-content:space-between; gap:10px;"><span style="font-size:12px; color:var(--text-muted);">影響する端末</span><span style="font-size:12.5px; font-weight:600; font-variant-numeric:tabular-nums;">{{ disableDevices }}</span></div>
+          </div>
+          <label style="display:block; font-size:12px; color:var(--text-secondary); margin-bottom:6px;">確認のためテナント名を入力</label>
+          <input value="{{ disableInput }}" onInput="{{ onDisableInput }}" placeholder="{{ disableName }}" style="width:100%; height:38px; padding:0 12px; border:1px solid {{ disableInputBorder }}; border-radius:8px; background:var(--bg); color:var(--text); font-size:13px; font-family:inherit; outline:none;" />
+        </div>
+        <div style="display:flex; gap:10px; justify-content:flex-end; padding:16px 22px 20px;">
+          <button onClick="{{ closeDisable }}" style="height:36px; padding:0 16px; border:1px solid var(--border-strong); border-radius:8px; background:var(--bg); color:var(--text); font-size:13px; font-weight:500; font-family:inherit; cursor:pointer;" style-hover="background:var(--surface-2);">キャンセル</button>
+          <button onClick="{{ commitDisable }}" disabled="{{ disableConfirmDisabled }}" style="height:36px; padding:0 18px; border:none; border-radius:8px; background:{{ disableBtnBg }}; color:#fff; font-size:13px; font-weight:600; font-family:inherit; cursor:{{ disableBtnCursor }}; opacity:{{ disableBtnOpacity }};">無効化する</button>
+        </div>
+      </div>
+    </div>
+  </sc-if>
+
+  <!-- TOASTER -->
+  <div style="position:fixed; right:20px; bottom:20px; z-index:90; display:flex; flex-direction:column; gap:10px; width:330px; max-width:calc(100vw - 40px);">
+    <sc-for list="{{ toasts }}" as="t" hint-placeholder-count="0">
+      <div style="display:flex; align-items:flex-start; gap:11px; padding:13px 14px; background:var(--elevated); border:1px solid var(--border); border-left:3px solid {{ t.accent }}; border-radius:10px; box-shadow:var(--shadow-pop); animation:toastin .2s ease;">
+        {{ t.icon }}
+        <div style="flex:1; min-width:0;"><div style="font-size:13px; font-weight:600;">{{ t.title }}</div><div style="font-size:12px; color:var(--text-secondary); margin-top:1px;">{{ t.desc }}</div></div>
+      </div>
+    </sc-for>
+  </div>
+
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props="{&quot;$preview&quot;:{&quot;width&quot;:1320,&quot;height&quot;:920},&quot;primary&quot;:{&quot;editor&quot;:&quot;color&quot;,&quot;default&quot;:&quot;#4f46e5&quot;,&quot;tsType&quot;:&quot;string&quot;},&quot;defaultTheme&quot;:{&quot;editor&quot;:&quot;enum&quot;,&quot;default&quot;:&quot;light&quot;,&quot;options&quot;:[&quot;light&quot;,&quot;dark&quot;],&quot;tsType&quot;:&quot;'light'|'dark'&quot;},&quot;defaultRole&quot;:{&quot;editor&quot;:&quot;enum&quot;,&quot;default&quot;:&quot;SuperAdmin&quot;,&quot;options&quot;:[&quot;SuperAdmin&quot;,&quot;TenantAdmin&quot;,&quot;Operator&quot;,&quot;Viewer&quot;],&quot;tsType&quot;:&quot;string&quot;}}">
+class Component extends DCLogic {
+  state = {
+    mode: this.props.defaultTheme || 'light',
+    role: this.props.defaultRole || 'SuperAdmin',
+    collapsed: false,
+    view: 'list',
+    menuRow: null,
+    wizardOpen: false,
+    wzStep: 'info', // info | binding | failed | done
+    wzName: '', wzEmail: '',
+    disableOpen: false, disableIdx: null, disableInput: '',
+    toasts: [],
+    skeletonRows: [1,2,3,4],
+    tenants: [
+      { name:'Acme 株式会社', id:'ten_acme', status:'有効', enterprise:'LC04f9k2a1', created:'2024-10-01', devices:2481 },
+      { name:'Globex Inc.', id:'ten_globex', status:'有効', enterprise:'LC0xn82bd7', created:'2025-01-12', devices:640 },
+      { name:'Initech', id:'ten_initech', status:'有効', enterprise:'LC0qp51mz9', created:'2025-02-20', devices:312 },
+      { name:'Hooli', id:'ten_hooli', status:'バインド未完了', enterprise:'', created:'2026-06-21', devices:0 },
+      { name:'Umbrella Corp.', id:'ten_umbrella', status:'無効', enterprise:'LC0aa77xx2', created:'2025-08-30', devices:0 },
+    ],
+  };
+
+  el(t,p,...k){ return React.createElement(t,p,...k); }
+  perms(){ return { manage:this.state.role==='SuperAdmin' }; }
+
+  toggleTheme=()=>this.setState(s=>({mode:s.mode==='light'?'dark':'light'}));
+  toggleCollapse=()=>this.setState(s=>({collapsed:!s.collapsed}));
+  onRoleChange=(e)=>this.setState({role:e.target.value, menuRow:null});
+  seg(active){ return active ? {bg:'var(--elevated)',fg:'var(--primary)',fw:'600'} : {bg:'transparent',fg:'var(--text-secondary)',fw:'500'}; }
+  statusTok(st){ const m={ '有効':'success','バインド未完了':'warning','無効':'neutral' }[st]; const t={ success:['var(--success-bg)','var(--success-fg)','var(--success-border)','var(--success)'], warning:['var(--warning-bg)','var(--warning-fg)','var(--warning-border)','var(--warning)'], neutral:['var(--neutral-bg)','var(--neutral-fg)','var(--neutral-border)','var(--neutral)'] }[m]; return t; }
+
+  themeIconEl(){ if(this.state.mode==='light') return this.el('svg',{width:17,height:17,viewBox:'0 0 24 24',fill:'none',stroke:'currentColor',strokeWidth:1.9,strokeLinecap:'round',strokeLinejoin:'round'}, this.el('path',{key:'p',d:'M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8Z'})); return this.el('svg',{width:17,height:17,viewBox:'0 0 24 24',fill:'none',stroke:'currentColor',strokeWidth:1.9,strokeLinecap:'round',strokeLinejoin:'round'}, this.el('circle',{key:'c',cx:12,cy:12,r:4}), this.el('path',{key:'p',d:'M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4'})); }
+  toastIcon(kind){ if(kind==='pending') return this.el('div',{key:'i',style:{width:16,height:16,flex:'none',marginTop:1,borderRadius:'50%',border:'2px solid var(--border-strong)',borderTopColor:'var(--primary)',animation:'spin .7s linear infinite'}}); const color=kind==='success'?'var(--success-fg)':'var(--danger-fg)'; const path=kind==='success'?'M20 6 9 17l-5-5':'M18 6 6 18M6 6l12 12'; return this.el('svg',{key:'i',width:16,height:16,viewBox:'0 0 24 24',fill:'none',stroke:color,strokeWidth:2.4,strokeLinecap:'round',strokeLinejoin:'round',style:{flex:'none',marginTop:1}}, this.el('path',{key:'p',d:path})); }
+  checkEl(){ return this.el('svg',{width:14,height:14,viewBox:'0 0 24 24',fill:'none',stroke:'currentColor',strokeWidth:3,strokeLinecap:'round',strokeLinejoin:'round'}, this.el('path',{key:'p',d:'M20 6 9 17l-5-5'})); }
+
+  pushToast(t){ const id=Date.now()+Math.random(); this.setState(s=>({toasts:[...s.toasts,{id,...t}]})); return id; }
+  removeToast(id){ this.setState(s=>({toasts:s.toasts.filter(t=>t.id!==id)})); }
+  flash(t,ms){ const id=this.pushToast(t); setTimeout(()=>this.removeToast(id), ms||2800); }
+
+  openWizard=()=>this.setState({wizardOpen:true, wzStep:'info', wzName:'', wzEmail:''});
+  closeWizard=()=>this.setState({wizardOpen:false});
+  onWzName=(e)=>this.setState({wzName:e.target.value});
+  onWzEmail=(e)=>this.setState({wzEmail:e.target.value});
+  startBind=()=>{ this.setState({wzStep:'binding'}); setTimeout(()=>this.setState({wzStep:'done'}), 2400); };
+  finishWizard=()=>{
+    const nm=this.state.wzName.trim()||'新規テナント';
+    this.setState(s=>({ wizardOpen:false, tenants:[...s.tenants, { name:nm, id:'ten_new', status:'有効', enterprise:'LC0new'+(s.tenants.length), created:'2026-06-22', devices:0 }] }));
+    this.flash({kind:'success',title:'テナントを作成しました',desc:nm+' を有効化しました'},3000);
+  };
+  retryBind=()=>{ this.setState({wzStep:'binding'}); setTimeout(()=>this.setState({wzStep:'done'}), 2400); };
+  stop=(e)=>e.stopPropagation();
+
+  openDisable(idx){ this.setState({disableOpen:true, disableIdx:idx, disableInput:'', menuRow:null}); }
+  closeDisable=()=>this.setState({disableOpen:false});
+  onDisableInput=(e)=>this.setState({disableInput:e.target.value});
+  commitDisable=()=>{ const t=this.state.tenants[this.state.disableIdx]; if(!t || this.state.disableInput.trim()!==t.name) return; this.setState(s=>({ disableOpen:false, tenants:s.tenants.map((x,i)=>i===s.disableIdx?{...x,status:'無効'}:x) })); this.flash({kind:'success',title:'テナントを無効化しました',desc:t.name+'（監査記録済み）'},3000); };
+
+  renderVals(){
+    document.documentElement.setAttribute('data-theme', this.state.mode);
+    if (this.props.primary) document.documentElement.style.setProperty('--primary', this.props.primary);
+    const r=this.state.role, p=this.perms(), v=this.state.view;
+    const emails={ SuperAdmin:'platform-ops@mobiguard.io', TenantAdmin:'admin@acme.co.jp', Operator:'operator@acme.co.jp', Viewer:'viewer@acme.co.jp' };
+    const roleKind={ SuperAdmin:['var(--purple-bg)','var(--purple-fg)'], TenantAdmin:['var(--info-bg)','var(--info-fg)'], Operator:['var(--success-bg)','var(--success-fg)'], Viewer:['var(--neutral-bg)','var(--neutral-fg)'] }[r];
+
+    const tenants=this.state.tenants.map((t,i)=>{
+      const st=this.statusTok(t.status);
+      const locked=t.status==='バインド未完了';
+      const disabled=t.status==='無効';
+      return {
+        name:t.name, id:t.id, status:t.status, created:t.created,
+        initial:t.name.slice(0,1),
+        enterprise: t.enterprise || '（未作成）', entColor: t.enterprise ? 'var(--text-secondary)' : 'var(--text-muted)',
+        devices: t.devices.toLocaleString()+' 台', devColor: t.devices===0?'var(--text-muted)':'var(--text-secondary)',
+        stBg:st[0], stFg:st[1], stBorder:st[2], stDot:st[3],
+        locked, rowBg: locked ? 'var(--warning-bg)' : 'transparent',
+        menuOpen:this.state.menuRow===i,
+        onMenu:(e)=>{ e.stopPropagation(); this.setState(s=>({menuRow:s.menuRow===i?null:i})); },
+        onRebind:()=>{ this.setState({menuRow:null}); this.flash({kind:'pending',title:'バインドを再試行中…',desc:t.name+' の Enterprise を再検証'},2200); },
+        onDisable:()=>{ if(!disabled) this.openDisable(i); },
+        disableCursor: disabled?'not-allowed':'pointer', disableColor: disabled?'var(--text-muted)':'var(--danger-fg)',
+        disableTip: disabled?'すでに無効です':'',
+      };
+    });
+
+    // steps
+    const order=['info','binding','done'];
+    const stepDefs=[['info','テナント情報'],['binding','Enterprise 作成'],['verify','バインド検証'],['done','完了']];
+    const wz=this.state.wzStep;
+    // map wzStep to a progress index across 4 visual steps
+    let prog = wz==='info'?0 : (wz==='binding'?1 : (wz==='failed'?2 : 3));
+    const steps=stepDefs.map((d,i)=>{
+      const done = i<prog || (wz==='done');
+      const current = i===prog && wz!=='done';
+      const failed = wz==='failed' && i===2;
+      let circleBg='var(--surface-2)', circleFg='var(--text-muted)', circleBorder='var(--border-strong)', icon=String(i+1), labelColor='var(--text-muted)', lineColor='var(--border-strong)';
+      if(done && !failed){ circleBg='var(--success)'; circleFg='#fff'; circleBorder='var(--success)'; icon=this.checkEl(); labelColor='var(--text-secondary)'; lineColor='var(--success)'; }
+      else if(failed){ circleBg='var(--danger-bg)'; circleFg='var(--danger-fg)'; circleBorder='var(--danger-border)'; icon='!'; labelColor='var(--danger-fg)'; }
+      else if(current){ circleBg='var(--primary)'; circleFg='#fff'; circleBorder='var(--primary)'; labelColor='var(--text)'; }
+      return { label:d[1], icon, circleBg, circleFg, circleBorder, labelColor, hasLine:i<3, flex:i<3?'1':'none', lineColor: (i<prog||wz==='done')?'var(--success)':'var(--border-strong)' };
+    });
+
+    // wizard footer (createElement)
+    let footer;
+    const btn=(label,onClick,kind)=>{ const bg= kind==='primary'?'var(--primary)': (kind==='ghost'?'var(--bg)':'var(--bg)'); const col= kind==='primary'?'var(--primary-fg)':'var(--text)'; const bd= kind==='primary'?'none':'1px solid var(--border-strong)'; return this.el('button',{key:label,onClick,style:{height:36,padding:'0 16px',border:bd,borderRadius:8,background:bg,color:col,fontSize:'13px',fontWeight:600,fontFamily:'inherit',cursor:'pointer'}},label); };
+    const okInfo = this.state.wzName.trim() && /^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(this.state.wzEmail.trim());
+    if(wz==='info') footer=[ btn('キャンセル',this.closeWizard,'ghost'), this.el('button',{key:'next',onClick:okInfo?this.startBind:undefined,disabled:!okInfo,style:{height:36,padding:'0 16px',border:'none',borderRadius:8,background:'var(--primary)',color:'#fff',fontSize:'13px',fontWeight:600,fontFamily:'inherit',cursor:okInfo?'pointer':'not-allowed',opacity:okInfo?1:.55}},'Enterprise を作成してバインド') ];
+    else if(wz==='binding') footer=[ this.el('span',{key:'w',style:{fontSize:'12px',color:'var(--text-muted)'}},'処理が完了するまでお待ちください…') ];
+    else if(wz==='failed') footer=[ btn('閉じる',this.closeWizard,'ghost'), btn('再試行',this.retryBind,'primary') ];
+    else footer=[ btn('一覧へ戻る',this.finishWizard,'primary') ];
+
+    const dt=this.state.disableIdx!=null?this.state.tenants[this.state.disableIdx]:null;
+    const dOk = dt && this.state.disableInput.trim()===dt.name;
+
+    return {
+      mode:this.state.mode, role:r, userEmail:emails[r], userInitials:r.slice(0,2).toUpperCase(),
+      roleBadgeBg:roleKind[0], roleBadgeFg:roleKind[1],
+      sidebarWidth:this.state.collapsed?'64px':'240px', showLabels:!this.state.collapsed,
+      themeIcon:this.themeIconEl(), toggleTheme:this.toggleTheme, toggleCollapse:this.toggleCollapse, onRoleChange:this.onRoleChange,
+
+      canManage:p.manage, isDenied:!p.manage,
+
+      isList:v==='list', isLoading:v==='loading',
+      setList:()=>this.setState({view:'list', wizardOpen:false, disableOpen:false}),
+      setWizard:()=>this.setState({view:'list', wizardOpen:true, wzStep:'info', disableOpen:false}),
+      setBinding:()=>this.setState({view:'list', wizardOpen:true, wzStep:'binding', disableOpen:false}),
+      setFailed:()=>this.setState({view:'list', wizardOpen:true, wzStep:'failed', disableOpen:false}),
+      setDisable:()=>this.setState({view:'list', wizardOpen:false, disableOpen:true, disableIdx:0, disableInput:''}),
+      vList:this.seg(v==='list'&&!this.state.wizardOpen&&!this.state.disableOpen), vWiz:this.seg(this.state.wizardOpen&&this.state.wzStep==='info'), vBind:this.seg(this.state.wizardOpen&&this.state.wzStep==='binding'), vFail:this.seg(this.state.wizardOpen&&this.state.wzStep==='failed'), vDis:this.seg(this.state.disableOpen),
+      skeletonRows:this.state.skeletonRows,
+
+      totalCount:this.state.tenants.length,
+      activeCount:this.state.tenants.filter(t=>t.status==='有効').length,
+      pendingCount:this.state.tenants.filter(t=>t.status==='バインド未完了').length,
+      deviceTotal:this.state.tenants.reduce((a,t)=>a+t.devices,0).toLocaleString(),
+
+      tenants,
+      openWizard:this.openWizard, closeWizard:this.closeWizard, stop:this.stop,
+      wizardOpen:this.state.wizardOpen,
+      wzInfo:wz==='info', wzBinding:wz==='binding', wzFailed:wz==='failed', wzDone:wz==='done',
+      wzName:this.state.wzName, onWzName:this.onWzName, wzEmail:this.state.wzEmail, onWzEmail:this.onWzEmail,
+      steps, wizardFooter:footer,
+
+      disableOpen:this.state.disableOpen, closeDisable:this.closeDisable, commitDisable:this.commitDisable,
+      onDisableInput:this.onDisableInput, disableInput:this.state.disableInput,
+      disableName: dt?dt.name:'', disableDevices: dt?(dt.devices.toLocaleString()+' 台'):'0 台',
+      disableInputBorder: this.state.disableInput && !dOk ? 'var(--danger)':'var(--border-strong)',
+      disableConfirmDisabled: !dOk, disableBtnBg: dOk?'var(--danger)':'var(--neutral)', disableBtnCursor: dOk?'pointer':'not-allowed', disableBtnOpacity: dOk?'1':'.6',
+
+      toasts:this.state.toasts.map(t=>({ ...t, accent:t.kind==='success'?'var(--success)':t.kind==='error'?'var(--danger)':'var(--primary)', icon:this.toastIcon(t.kind) })),
+    };
+  }
+}
+</script>
+</body>
+</html>

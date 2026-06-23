@@ -1,0 +1,417 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Noto+Sans+JP:wght@400;500;700&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+  :root{
+    --bg:#ffffff; --surface:#f7f8fa; --surface-2:#eef0f4; --elevated:#ffffff;
+    --border:#e4e7ec; --border-strong:#d3d8e0;
+    --text:#1b1f27; --text-secondary:#5a616e; --text-muted:#8a909c;
+    --primary:#4f46e5; --primary-hover:#4338ca; --primary-fg:#ffffff; --primary-bg:#eef0fe; --primary-border:#c9cdfa;
+    --success:#16a34a; --success-bg:#e8f6ed; --success-fg:#15803d; --success-border:#bfe6cc;
+    --danger:#dc2626; --danger-bg:#fdeaea; --danger-fg:#b91c1c; --danger-border:#f5c6c6;
+    --warning:#d97706; --warning-bg:#fdf2e0; --warning-fg:#b45309; --warning-border:#f2dbab;
+    --neutral:#6b7280; --neutral-bg:#eef0f3; --neutral-fg:#4b5563; --neutral-border:#dde1e7;
+    --info:#2563eb; --info-bg:#e8f0fe; --info-fg:#1d4ed8; --info-border:#c3d6fb;
+    --purple:#7c3aed; --purple-bg:#f1ebfd; --purple-fg:#6d28d9; --purple-border:#ddcdfa;
+    --pale-bg:#f3f4f6; --pale-fg:#9ca3af; --pale-border:#e6e8ec;
+    --shadow:0 1px 2px rgba(16,20,30,.04), 0 1px 3px rgba(16,20,30,.06);
+    --shadow-pop:0 4px 16px rgba(16,20,30,.12), 0 1px 3px rgba(16,20,30,.08);
+  }
+  :root[data-theme="dark"]{
+    --bg:#0d1017; --surface:#151922; --surface-2:#1b212c; --elevated:#171c25;
+    --border:#262d3a; --border-strong:#323a49;
+    --text:#e7eaf0; --text-secondary:#9aa2b1; --text-muted:#6b7480;
+    --primary:#6366f1; --primary-hover:#7c80f7; --primary-fg:#ffffff; --primary-bg:rgba(99,102,241,.16); --primary-border:rgba(99,102,241,.42);
+    --success:#22c55e; --success-bg:rgba(34,197,94,.14); --success-fg:#4ade80; --success-border:rgba(34,197,94,.32);
+    --danger:#ef4444; --danger-bg:rgba(239,68,68,.14); --danger-fg:#f87171; --danger-border:rgba(239,68,68,.34);
+    --warning:#f59e0b; --warning-bg:rgba(245,158,11,.14); --warning-fg:#fbbf24; --warning-border:rgba(245,158,11,.32);
+    --neutral:#94a3b8; --neutral-bg:rgba(148,163,184,.14); --neutral-fg:#cbd5e1; --neutral-border:rgba(148,163,184,.26);
+    --info:#3b82f6; --info-bg:rgba(59,130,246,.16); --info-fg:#60a5fa; --info-border:rgba(59,130,246,.34);
+    --purple:#8b5cf6; --purple-bg:rgba(139,92,246,.16); --purple-fg:#a78bfa; --purple-border:rgba(139,92,246,.34);
+    --pale-bg:rgba(148,163,184,.07); --pale-fg:#7b8494; --pale-border:rgba(148,163,184,.16);
+    --shadow:0 1px 2px rgba(0,0,0,.4); --shadow-pop:0 8px 28px rgba(0,0,0,.55);
+  }
+  *{box-sizing:border-box;}
+  body{margin:0; background:var(--bg); color:var(--text); font-family:"Noto Sans JP", system-ui, sans-serif; font-size:14px; line-height:1.45; -webkit-font-smoothing:antialiased; font-feature-settings:"palt"; transition:background .18s ease, color .18s ease;}
+  ::selection{background:var(--primary-bg);}
+  @keyframes shimmer{0%{background-position:-180% 0;}100%{background-position:180% 0;}}
+  @keyframes spin{to{transform:rotate(360deg);}}
+  @keyframes toastin{from{opacity:0; transform:translateY(8px) scale(.98);}to{opacity:1; transform:none;}}
+  @keyframes overlayin{from{opacity:0;}to{opacity:1;}}
+  @keyframes dialogin{from{opacity:0; transform:translateY(10px) scale(.99);}to{opacity:1; transform:none;}}
+</style>
+</helmet>
+
+<div style="display:flex; min-height:100vh; background:var(--bg);">
+
+  <!-- ============ SIDEBAR ============ -->
+  <aside style="width: {{ sidebarWidth }}; flex:none; background:var(--surface); border-right:1px solid var(--border); display:flex; flex-direction:column; position:sticky; top:0; height:100vh; transition:width .16s ease;">
+    <div style="height:52px; display:flex; align-items:center; gap:10px; padding:0 16px; border-bottom:1px solid var(--border);">
+      <div style="width:26px; height:26px; flex:none; border-radius:7px; background:var(--primary); display:flex; align-items:center; justify-content:center; color:#fff; font-weight:700; font-size:13px;">M</div>
+      <sc-if value="{{ showLabels }}" hint-placeholder-val="{{ true }}"><div style="font-weight:700; font-size:14px; white-space:nowrap;">MobiGuard</div></sc-if>
+    </div>
+    <nav style="flex:1; padding:10px 10px; display:flex; flex-direction:column; gap:2px; overflow-y:auto;">
+      <div style="display:flex; align-items:center; gap:11px; padding:8px 10px; border-radius:8px; color:var(--text-secondary); white-space:nowrap; cursor:pointer;" style-hover="background:var(--surface-2); color:var(--text);">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" style="flex:none;"><rect x="3" y="3" width="7" height="7" rx="1.3"/><rect x="14" y="3" width="7" height="7" rx="1.3"/><rect x="14" y="14" width="7" height="7" rx="1.3"/><rect x="3" y="14" width="7" height="7" rx="1.3"/></svg>
+        <sc-if value="{{ showLabels }}" hint-placeholder-val="{{ true }}"><span>ダッシュボード</span></sc-if>
+      </div>
+      <div style="display:flex; align-items:center; gap:11px; padding:8px 10px; border-radius:8px; color:var(--text-secondary); white-space:nowrap; cursor:pointer;" style-hover="background:var(--surface-2); color:var(--text);">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" style="flex:none;"><rect x="7" y="2.5" width="10" height="19" rx="2.5"/><line x1="10.5" y1="18.4" x2="13.5" y2="18.4"/></svg>
+        <sc-if value="{{ showLabels }}" hint-placeholder-val="{{ true }}"><span>デバイス</span></sc-if>
+      </div>
+      <div style="display:flex; align-items:center; gap:11px; padding:8px 10px; border-radius:8px; color:var(--text-secondary); white-space:nowrap; cursor:pointer;" style-hover="background:var(--surface-2); color:var(--text);">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" style="flex:none;"><path d="M12 3 4.5 6v5c0 4.4 3.2 7.4 7.5 9 4.3-1.6 7.5-4.6 7.5-9V6L12 3Z"/></svg>
+        <sc-if value="{{ showLabels }}" hint-placeholder-val="{{ true }}"><span>ポリシー</span></sc-if>
+      </div>
+      <div style="display:flex; align-items:center; gap:11px; padding:8px 10px; border-radius:8px; color:var(--text-secondary); white-space:nowrap; cursor:pointer;" style-hover="background:var(--surface-2); color:var(--text);">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" style="flex:none;"><rect x="3" y="3" width="7" height="7" rx="1.3"/><rect x="14" y="3" width="7" height="7" rx="1.3"/><rect x="3" y="14" width="7" height="7" rx="1.3"/><path d="M14 14h3v3M21 14v.01M17 21h.01M21 18v3h-3"/></svg>
+        <sc-if value="{{ showLabels }}" hint-placeholder-val="{{ true }}"><span>エンロール</span></sc-if>
+      </div>
+      <div style="display:flex; align-items:center; gap:11px; padding:8px 10px; border-radius:8px; background:var(--primary-bg); color:var(--primary); font-weight:500; white-space:nowrap; cursor:pointer;">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" style="flex:none;"><path d="M21 8 12 3 3 8v8l9 5 9-5V8Z"/><path d="m3 8 9 5 9-5M12 13v8"/></svg>
+        <sc-if value="{{ showLabels }}" hint-placeholder-val="{{ true }}"><span>アプリ</span></sc-if>
+      </div>
+      <div style="display:flex; align-items:center; gap:11px; padding:8px 10px; border-radius:8px; color:var(--text-secondary); white-space:nowrap; cursor:pointer;" style-hover="background:var(--surface-2); color:var(--text);">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" style="flex:none;"><path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8l-5-5Z"/><path d="M14 3v5h5"/><line x1="9" y1="13" x2="15" y2="13"/><line x1="9" y1="17" x2="15" y2="17"/></svg>
+        <sc-if value="{{ showLabels }}" hint-placeholder-val="{{ true }}"><span>監査ログ</span></sc-if>
+      </div>
+      <sc-if value="{{ canSeeAdmins }}" hint-placeholder-val="{{ true }}">
+        <div style="display:flex; align-items:center; gap:11px; padding:8px 10px; border-radius:8px; color:var(--text-secondary); white-space:nowrap; cursor:pointer;" style-hover="background:var(--surface-2); color:var(--text);">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" style="flex:none;"><circle cx="9" cy="8" r="3.1"/><path d="M3.6 20a5.4 5.4 0 0 1 10.8 0"/><path d="M16.2 5.3a3.1 3.1 0 0 1 0 5.4M20.4 20a5.4 5.4 0 0 0-3.9-5.2"/></svg>
+          <sc-if value="{{ showLabels }}" hint-placeholder-val="{{ true }}"><span>管理者</span></sc-if>
+        </div>
+      </sc-if>
+    </nav>
+    <div style="border-top:1px solid var(--border); padding:10px;">
+      <div onClick="{{ toggleCollapse }}" style="display:flex; align-items:center; gap:11px; padding:8px 10px; border-radius:8px; color:var(--text-muted); cursor:pointer; white-space:nowrap;" style-hover="background:var(--surface-2); color:var(--text);">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" style="flex:none;"><rect x="3" y="4" width="18" height="16" rx="2"/><line x1="9" y1="4" x2="9" y2="20"/></svg>
+        <sc-if value="{{ showLabels }}" hint-placeholder-val="{{ true }}"><span>サイドバーを折りたたむ</span></sc-if>
+      </div>
+    </div>
+  </aside>
+
+  <!-- ============ MAIN ============ -->
+  <main style="flex:1; min-width:0; display:flex; flex-direction:column;">
+
+    <!-- TOPBAR -->
+    <header style="height:52px; flex:none; position:sticky; top:0; z-index:30; background:color-mix(in srgb, var(--bg) 88%, transparent); backdrop-filter:blur(8px); border-bottom:1px solid var(--border); display:flex; align-items:center; gap:14px; padding:0 18px;">
+      <div style="display:flex; align-items:center; gap:8px;"><span style="font-weight:700; font-size:14.5px; white-space:nowrap;">アプリ</span><span style="font-size:12px; color:var(--text-muted);">/apps</span></div>
+      <div style="flex:1;"></div>
+      <button onClick="{{ toggleTheme }}" title="テーマ切替" style="width:32px; height:32px; flex:none; display:flex; align-items:center; justify-content:center; border:1px solid var(--border-strong); border-radius:8px; background:var(--surface); color:var(--text-secondary); cursor:pointer;" style-hover="border-color:var(--primary); color:var(--primary);">{{ themeIcon }}</button>
+      <div style="display:flex; align-items:center; gap:6px;">
+        <span style="font-size:11px; color:var(--text-muted);">ロール</span>
+        <select value="{{ role }}" onChange="{{ onRoleChange }}" style="height:32px; padding:0 8px; border:1px solid var(--border-strong); border-radius:8px; background:var(--surface); color:var(--text); font-size:13px; font-family:inherit; cursor:pointer;">
+          <option value="SuperAdmin">SuperAdmin</option>
+          <option value="TenantAdmin">TenantAdmin</option>
+          <option value="Operator">Operator</option>
+          <option value="Viewer">Viewer</option>
+        </select>
+      </div>
+      <div style="width:1px; height:24px; background:var(--border);"></div>
+      <div style="display:flex; align-items:center; gap:9px; cursor:pointer; padding:3px 4px 3px 6px; border-radius:8px;" style-hover="background:var(--surface-2);">
+        <div style="text-align:right; line-height:1.25;"><div style="font-size:12.5px; font-weight:500;">{{ userEmail }}</div><div style="display:flex; justify-content:flex-end;"><span style="font-size:10px; font-weight:600; padding:1px 6px; border-radius:5px; background: {{ roleBadgeBg }}; color: {{ roleBadgeFg }};">{{ role }}</span></div></div>
+        <div style="width:30px; height:30px; flex:none; border-radius:50%; background:var(--primary); color:#fff; display:flex; align-items:center; justify-content:center; font-size:12px; font-weight:600;">{{ userInitials }}</div>
+      </div>
+    </header>
+
+    <div style="padding:22px 26px 80px;">
+
+      <!-- ===== 403 ===== -->
+      <sc-if value="{{ isDenied }}" hint-placeholder-val="{{ false }}">
+        <div style="border:1px solid var(--border); border-radius:12px; background:var(--elevated); padding:60px 24px; display:flex; flex-direction:column; align-items:center; text-align:center; margin-top:8px;">
+          <div style="width:52px; height:52px; border-radius:13px; background:var(--surface-2); display:flex; align-items:center; justify-content:center; margin-bottom:14px;"><svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="var(--text-secondary)" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="5" y="11" width="14" height="9" rx="2"/><path d="M8 11V8a4 4 0 0 1 8 0v3"/></svg></div>
+          <div style="font-size:12px; font-weight:700; letter-spacing:.06em; color:var(--text-muted); margin-bottom:4px;">403 FORBIDDEN</div>
+          <div style="font-size:16px; font-weight:600; margin-bottom:6px;">アプリ配信を管理できません</div>
+          <div style="font-size:13px; color:var(--text-secondary); max-width:440px;">アプリの承認・割当には <b style="color:var(--text);">TenantAdmin 以上</b>の権限が必要です。現在のロール（{{ role }}）では操作できません。</div>
+        </div>
+      </sc-if>
+
+      <!-- ===== MAIN ===== -->
+      <sc-if value="{{ canManage }}" hint-placeholder-val="{{ true }}">
+        <div>
+          <!-- header -->
+          <div style="display:flex; align-items:flex-start; justify-content:space-between; gap:16px; flex-wrap:wrap; margin-bottom:18px;">
+            <div>
+              <h1 style="margin:0 0 3px; font-size:21px; font-weight:700; letter-spacing:-.01em;">アプリ配信</h1>
+              <p style="margin:0; font-size:13px; color:var(--text-secondary);">Managed Google Play で承認したアプリを、ポリシー経由で端末へ配信します。</p>
+            </div>
+            <div style="display:flex; align-items:center; gap:14px; flex-wrap:wrap;">
+              <div style="display:flex; align-items:center; gap:6px;">
+                <span style="font-size:11px; color:var(--text-muted);">状態プレビュー</span>
+                <div style="display:inline-flex; padding:2px; background:var(--surface-2); border-radius:8px; gap:2px;">
+                  <button onClick="{{ setCatalog }}" style="height:26px; padding:0 9px; border:none; border-radius:6px; font-family:inherit; font-size:12px; cursor:pointer; background:{{ vCatalog.bg }}; color:{{ vCatalog.fg }}; font-weight:{{ vCatalog.fw }};">カタログ</button>
+                  <button onClick="{{ setEmpty }}" style="height:26px; padding:0 9px; border:none; border-radius:6px; font-family:inherit; font-size:12px; cursor:pointer; background:{{ vEmpty.bg }}; color:{{ vEmpty.fg }}; font-weight:{{ vEmpty.fw }};">空</button>
+                  <button onClick="{{ setSyncing }}" style="height:26px; padding:0 9px; border:none; border-radius:6px; font-family:inherit; font-size:12px; cursor:pointer; background:{{ vSync.bg }}; color:{{ vSync.fg }}; font-weight:{{ vSync.fw }};">同期中</button>
+                  <button onClick="{{ setError }}" style="height:26px; padding:0 9px; border:none; border-radius:6px; font-family:inherit; font-size:12px; cursor:pointer; background:{{ vError.bg }}; color:{{ vError.fg }}; font-weight:{{ vError.fw }};">エラー</button>
+                </div>
+              </div>
+              <button onClick="{{ openDialog }}" style="display:inline-flex; align-items:center; gap:7px; height:36px; padding:0 15px; border:none; border-radius:8px; background:var(--primary); color:var(--primary-fg); font-size:13px; font-weight:600; font-family:inherit; cursor:pointer;" style-hover="background:var(--primary-hover);">
+                <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14M5 12h14"/></svg>アプリを追加
+              </button>
+            </div>
+          </div>
+
+          <!-- SYNCING banner -->
+          <sc-if value="{{ isSyncing }}" hint-placeholder-val="{{ false }}">
+            <div style="display:flex; align-items:center; gap:11px; padding:12px 14px; border:1px solid var(--info-border); background:var(--info-bg); border-radius:10px; margin-bottom:16px;">
+              <span style="width:16px; height:16px; flex:none; border-radius:50%; border:2px solid var(--info-border); border-top-color:var(--info-fg); animation:spin .7s linear infinite;"></span>
+              <div style="flex:1; font-size:12.5px; color:var(--info-fg);">Managed Google Play とカタログを同期しています… 承認済みアプリの一覧を最新化中です。</div>
+            </div>
+          </sc-if>
+
+          <!-- ERROR -->
+          <sc-if value="{{ isError }}" hint-placeholder-val="{{ false }}">
+            <div style="border:1px solid var(--border); border-radius:12px; background:var(--elevated); padding:56px 24px; display:flex; flex-direction:column; align-items:center; text-align:center;">
+              <div style="width:52px; height:52px; border-radius:13px; background:var(--danger-bg); display:flex; align-items:center; justify-content:center; margin-bottom:14px;"><svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="var(--danger-fg)" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2 2 20h20L12 2Z"/><line x1="12" y1="9" x2="12" y2="14"/><line x1="12" y1="17.5" x2="12" y2="17.51"/></svg></div>
+              <div style="font-size:16px; font-weight:600; margin-bottom:6px;">Managed Google Play に接続できません</div>
+              <div style="font-size:13px; color:var(--text-secondary); max-width:440px; margin-bottom:18px;">エンタープライズのバインド状態を確認のうえ、カタログの再同期を行ってください。</div>
+              <button onClick="{{ retrySync }}" style="display:inline-flex; align-items:center; gap:7px; height:36px; padding:0 16px; border:1px solid var(--border-strong); border-radius:8px; background:var(--bg); color:var(--text); font-size:13px; font-weight:500; font-family:inherit; cursor:pointer;" style-hover="border-color:var(--primary); color:var(--primary);"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-3-6.7"/><path d="M21 4v5h-5"/></svg>再同期</button>
+            </div>
+          </sc-if>
+
+          <!-- EMPTY -->
+          <sc-if value="{{ isEmpty }}" hint-placeholder-val="{{ false }}">
+            <div style="border:1px dashed var(--border-strong); border-radius:12px; background:var(--elevated); padding:60px 24px; display:flex; flex-direction:column; align-items:center; text-align:center;">
+              <div style="width:56px; height:56px; border-radius:14px; background:var(--primary-bg); display:flex; align-items:center; justify-content:center; margin-bottom:16px;"><svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="var(--primary)" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M21 8 12 3 3 8v8l9 5 9-5V8Z"/><path d="m3 8 9 5 9-5M12 13v8"/></svg></div>
+              <div style="font-size:17px; font-weight:700; margin-bottom:6px;">承認済みアプリがありません</div>
+              <div style="font-size:13px; color:var(--text-secondary); max-width:400px; margin-bottom:20px;">Managed Google Play でアプリを承認すると、ここにカタログとして表示され、ポリシーへ割り当てられます。</div>
+              <button onClick="{{ openDialog }}" style="display:inline-flex; align-items:center; gap:7px; height:38px; padding:0 18px; border:none; border-radius:8px; background:var(--primary); color:var(--primary-fg); font-size:13.5px; font-weight:600; font-family:inherit; cursor:pointer;" style-hover="background:var(--primary-hover);"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14M5 12h14"/></svg>アプリを追加</button>
+            </div>
+          </sc-if>
+
+          <!-- CATALOG -->
+          <sc-if value="{{ isCatalog }}" hint-placeholder-val="{{ true }}">
+            <div>
+              <div style="display:flex; align-items:center; gap:10px; margin-bottom:14px; flex-wrap:wrap;">
+                <div style="display:flex; align-items:center; gap:7px; height:34px; flex:1; min-width:180px; max-width:300px; padding:0 10px; border:1px solid var(--border-strong); border-radius:8px; background:var(--bg);">
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="var(--text-muted)" stroke-width="2" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><path d="m20 20-3-3"/></svg>
+                  <input value="{{ search }}" onInput="{{ onSearch }}" placeholder="アプリ名・パッケージ名で検索" style="border:none; outline:none; background:transparent; font-family:inherit; font-size:13px; color:var(--text); width:100%;" />
+                </div>
+                <div style="flex:1;"></div>
+                <span style="font-size:12px; color:var(--text-muted);"><span style="font-variant-numeric:tabular-nums;">{{ appCount }}</span> アプリ承認済み</span>
+              </div>
+
+              <div style="display:grid; grid-template-columns:repeat(auto-fill, minmax(280px,1fr)); gap:14px;">
+                <sc-for list="{{ apps }}" as="ap" hint-placeholder-count="6">
+                  <div style="border:1px solid var(--border); border-radius:12px; background:var(--elevated); box-shadow:var(--shadow); overflow:hidden; display:flex; flex-direction:column;">
+                    <div style="padding:15px 15px 12px; display:flex; gap:12px;">
+                      <div style="width:46px; height:46px; flex:none; border-radius:11px; background:{{ ap.iconBg }}; color:{{ ap.iconFg }}; display:flex; align-items:center; justify-content:center; font-size:20px; font-weight:700;">{{ ap.initial }}</div>
+                      <div style="min-width:0; flex:1;">
+                        <div style="font-size:13.5px; font-weight:600; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">{{ ap.name }}</div>
+                        <div style="font-size:11px; color:var(--text-muted); font-family:'IBM Plex Mono',monospace; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">{{ ap.pkg }}</div>
+                        <div style="font-size:11px; color:var(--text-muted); margin-top:3px;">承認: {{ ap.approvedAt }}</div>
+                      </div>
+                    </div>
+                    <!-- install status -->
+                    <div style="padding:0 15px 12px;">
+                      <div style="display:flex; align-items:center; justify-content:space-between; gap:8px; margin-bottom:5px;">
+                        <span style="font-size:11px; color:var(--text-secondary);">インストール状況</span>
+                        <span style="font-size:11px; color:var(--text-muted); font-variant-numeric:tabular-nums;">{{ ap.installedStr }}</span>
+                      </div>
+                      <div style="height:5px; border-radius:3px; background:var(--surface-2); overflow:hidden;"><div style="width:{{ ap.installPct }}; height:100%; background:{{ ap.installColor }};"></div></div>
+                    </div>
+                    <!-- assignment -->
+                    <div style="margin-top:auto; padding:11px 15px; border-top:1px solid var(--border); background:var(--surface); display:flex; align-items:center; gap:9px;">
+                      <span style="font-size:11.5px; color:var(--text-secondary); white-space:nowrap;">割当</span>
+                      <select value="{{ ap.assign }}" onChange="{{ ap.onAssign }}" style="flex:1; height:32px; padding:0 8px; border:1px solid var(--border-strong); border-radius:7px; background:var(--bg); color:var(--text); font-size:12.5px; font-family:inherit; cursor:pointer;">
+                        <option value="force">強制インストール</option>
+                        <option value="available">任意（ストア掲載）</option>
+                        <option value="unassigned">未割当</option>
+                      </select>
+                      <span style="display:inline-flex; align-items:center; font-size:11px; font-weight:600; padding:2px 7px; border-radius:6px; background:{{ ap.badgeBg }}; color:{{ ap.badgeFg }}; border:1px solid {{ ap.badgeBorder }}; white-space:nowrap;">{{ ap.badgeLabel }}</span>
+                    </div>
+                  </div>
+                </sc-for>
+              </div>
+              <sc-if value="{{ noResults }}" hint-placeholder-val="{{ false }}">
+                <div style="border:1px solid var(--border); border-radius:12px; background:var(--elevated); padding:48px 24px; text-align:center;"><div style="font-size:13.5px; font-weight:600; color:var(--text-secondary); margin-bottom:4px;">該当するアプリがありません</div><div style="font-size:12.5px; color:var(--text-muted);">検索語を変更してください。</div></div>
+              </sc-if>
+            </div>
+          </sc-if>
+        </div>
+      </sc-if>
+
+    </div>
+  </main>
+
+  <!-- ===== ADD APP DIALOG (Managed Google Play iframe frame) ===== -->
+  <sc-if value="{{ dialogOpen }}" hint-placeholder-val="{{ false }}">
+    <div onClick="{{ closeDialog }}" style="position:fixed; inset:0; z-index:80; background:rgba(8,11,18,.5); display:flex; align-items:center; justify-content:center; padding:24px; animation:overlayin .14s ease;">
+      <div onClick="{{ stop }}" style="width:100%; max-width:780px; height:min(620px, 88vh); background:var(--elevated); border:1px solid var(--border); border-radius:14px; box-shadow:var(--shadow-pop); overflow:hidden; display:flex; flex-direction:column; animation:dialogin .16s ease;">
+        <!-- dialog header (OUR chrome) -->
+        <div style="display:flex; align-items:center; gap:11px; padding:15px 18px; border-bottom:1px solid var(--border);">
+          <div style="width:30px; height:30px; flex:none; border-radius:8px; background:var(--surface-2); display:flex; align-items:center; justify-content:center;"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="var(--text-secondary)" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M21 8 12 3 3 8v8l9 5 9-5V8Z"/><path d="m3 8 9 5 9-5"/></svg></div>
+          <div style="flex:1; min-width:0;">
+            <div style="font-size:14px; font-weight:700;">アプリを追加 — Managed Google Play</div>
+            <div style="font-size:11.5px; color:var(--text-muted);">この枠内は Google 提供の画面です（再デザイン対象外）。</div>
+          </div>
+          <button onClick="{{ closeDialog }}" style="width:30px; height:30px; flex:none; border:none; background:transparent; border-radius:8px; color:var(--text-muted); cursor:pointer; display:flex; align-items:center; justify-content:center;" style-hover="background:var(--surface-2); color:var(--text);"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 6 6 18M6 6l12 12"/></svg></button>
+        </div>
+        <!-- iframe placeholder area (Google's iframe lives here) -->
+        <div style="flex:1; position:relative; background:repeating-linear-gradient(135deg, var(--surface) 0 12px, var(--surface-2) 12px 24px); display:flex; align-items:center; justify-content:center; padding:24px;">
+          <div style="position:absolute; top:10px; left:12px; font-size:10.5px; color:var(--text-muted); font-family:'IBM Plex Mono',monospace; background:var(--elevated); padding:3px 7px; border-radius:6px; border:1px solid var(--border);">&lt;iframe src="play.google.com/managed/…"&gt;</div>
+          <div style="text-align:center; max-width:340px;">
+            <div style="width:54px; height:54px; border-radius:14px; background:var(--elevated); border:1px solid var(--border); display:flex; align-items:center; justify-content:center; margin:0 auto 14px;"><svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="var(--text-muted)" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><polygon points="5 3 19 12 5 21 5 3"/></svg></div>
+            <div style="font-size:13.5px; font-weight:600; color:var(--text-secondary); margin-bottom:5px;">Managed Google Play の埋め込み枠</div>
+            <div style="font-size:12px; color:var(--text-muted); line-height:1.6;">実際には Google の iframe（アプリ検索・承認・権限確認）がここに表示されます。検証用に、下のボタンで承認完了をシミュレートできます。</div>
+          </div>
+        </div>
+        <!-- dialog footer (OUR chrome) -->
+        <div style="display:flex; align-items:center; justify-content:space-between; gap:12px; padding:14px 18px; border-top:1px solid var(--border);">
+          <span style="font-size:11.5px; color:var(--text-muted);">承認したアプリは自動でカタログに反映されます。</span>
+          <div style="display:flex; gap:10px;">
+            <button onClick="{{ closeDialog }}" style="height:36px; padding:0 15px; border:1px solid var(--border-strong); border-radius:8px; background:var(--bg); color:var(--text); font-size:13px; font-weight:500; font-family:inherit; cursor:pointer;" style-hover="background:var(--surface-2);">閉じる</button>
+            <button onClick="{{ simulateApprove }}" style="height:36px; padding:0 15px; border:none; border-radius:8px; background:var(--primary); color:var(--primary-fg); font-size:13px; font-weight:600; font-family:inherit; cursor:pointer;" style-hover="background:var(--primary-hover);">承認をシミュレート</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  </sc-if>
+
+  <!-- TOASTER -->
+  <div style="position:fixed; right:20px; bottom:20px; z-index:90; display:flex; flex-direction:column; gap:10px; width:330px; max-width:calc(100vw - 40px);">
+    <sc-for list="{{ toasts }}" as="t" hint-placeholder-count="0">
+      <div style="display:flex; align-items:flex-start; gap:11px; padding:13px 14px; background:var(--elevated); border:1px solid var(--border); border-left:3px solid {{ t.accent }}; border-radius:10px; box-shadow:var(--shadow-pop); animation:toastin .2s ease;">
+        {{ t.icon }}
+        <div style="flex:1; min-width:0;"><div style="font-size:13px; font-weight:600;">{{ t.title }}</div><div style="font-size:12px; color:var(--text-secondary); margin-top:1px;">{{ t.desc }}</div></div>
+      </div>
+    </sc-for>
+  </div>
+
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props="{&quot;$preview&quot;:{&quot;width&quot;:1320,&quot;height&quot;:900},&quot;primary&quot;:{&quot;editor&quot;:&quot;color&quot;,&quot;default&quot;:&quot;#4f46e5&quot;,&quot;tsType&quot;:&quot;string&quot;},&quot;defaultTheme&quot;:{&quot;editor&quot;:&quot;enum&quot;,&quot;default&quot;:&quot;light&quot;,&quot;options&quot;:[&quot;light&quot;,&quot;dark&quot;],&quot;tsType&quot;:&quot;'light'|'dark'&quot;},&quot;defaultRole&quot;:{&quot;editor&quot;:&quot;enum&quot;,&quot;default&quot;:&quot;TenantAdmin&quot;,&quot;options&quot;:[&quot;SuperAdmin&quot;,&quot;TenantAdmin&quot;,&quot;Operator&quot;,&quot;Viewer&quot;],&quot;tsType&quot;:&quot;string&quot;}}">
+class Component extends DCLogic {
+  state = {
+    mode: this.props.defaultTheme || 'light',
+    role: this.props.defaultRole || 'TenantAdmin',
+    collapsed: false,
+    view: 'catalog',
+    search: '',
+    dialogOpen: false,
+    toasts: [],
+    apps: [
+      { name:'営業支援アプリ', pkg:'com.acme.sales', approvedAt:'2025-05-12', assign:'force', installed:308, total:312 },
+      { name:'Outlook', pkg:'com.microsoft.office.outlook', approvedAt:'2025-04-28', assign:'force', installed:312, total:312 },
+      { name:'Gmail', pkg:'com.google.android.gm', approvedAt:'2025-04-28', assign:'available', installed:144, total:312 },
+      { name:'Acme VPN', pkg:'com.acme.vpn', approvedAt:'2025-05-30', assign:'force', installed:298, total:312 },
+      { name:'在庫スキャナ', pkg:'jp.co.acme.scanner', approvedAt:'2025-06-02', assign:'available', installed:47, total:88 },
+      { name:'Chrome', pkg:'com.android.chrome', approvedAt:'2025-04-28', assign:'available', installed:201, total:312 },
+      { name:'Teams', pkg:'com.microsoft.teams', approvedAt:'2025-06-10', assign:'unassigned', installed:0, total:312 },
+    ],
+    nextSeed: 1,
+  };
+
+  el(t,p,...k){ return React.createElement(t,p,...k); }
+  perms(){ const r=this.state.role; return { manage:r==='TenantAdmin'||r==='SuperAdmin', admins:r==='TenantAdmin'||r==='SuperAdmin' }; }
+
+  toggleTheme=()=>this.setState(s=>({mode:s.mode==='light'?'dark':'light'}));
+  toggleCollapse=()=>this.setState(s=>({collapsed:!s.collapsed}));
+  onRoleChange=(e)=>this.setState({role:e.target.value});
+  onSearch=(e)=>this.setState({search:e.target.value});
+  seg(active){ return active ? {bg:'var(--elevated)',fg:'var(--primary)',fw:'600'} : {bg:'transparent',fg:'var(--text-secondary)',fw:'500'}; }
+
+  themeIconEl(){ if(this.state.mode==='light') return this.el('svg',{width:17,height:17,viewBox:'0 0 24 24',fill:'none',stroke:'currentColor',strokeWidth:1.9,strokeLinecap:'round',strokeLinejoin:'round'}, this.el('path',{key:'p',d:'M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8Z'})); return this.el('svg',{width:17,height:17,viewBox:'0 0 24 24',fill:'none',stroke:'currentColor',strokeWidth:1.9,strokeLinecap:'round',strokeLinejoin:'round'}, this.el('circle',{key:'c',cx:12,cy:12,r:4}), this.el('path',{key:'p',d:'M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4'})); }
+  toastIcon(kind){ if(kind==='pending') return this.el('div',{key:'i',style:{width:16,height:16,flex:'none',marginTop:1,borderRadius:'50%',border:'2px solid var(--border-strong)',borderTopColor:'var(--primary)',animation:'spin .7s linear infinite'}}); const color=kind==='success'?'var(--success-fg)':'var(--danger-fg)'; const path=kind==='success'?'M20 6 9 17l-5-5':'M18 6 6 18M6 6l12 12'; return this.el('svg',{key:'i',width:16,height:16,viewBox:'0 0 24 24',fill:'none',stroke:color,strokeWidth:2.4,strokeLinecap:'round',strokeLinejoin:'round',style:{flex:'none',marginTop:1}}, this.el('path',{key:'p',d:path})); }
+
+  pushToast(t){ const id=Date.now()+Math.random(); this.setState(s=>({toasts:[...s.toasts,{id,...t}]})); return id; }
+  updateToast(id,p){ this.setState(s=>({toasts:s.toasts.map(t=>t.id===id?{...t,...p}:t)})); }
+  removeToast(id){ this.setState(s=>({toasts:s.toasts.filter(t=>t.id!==id)})); }
+  flash(t,ms){ const id=this.pushToast(t); setTimeout(()=>this.removeToast(id), ms||2200); }
+
+  openDialog=()=>this.setState({dialogOpen:true});
+  closeDialog=()=>this.setState({dialogOpen:false});
+  stop=(e)=>e.stopPropagation();
+  retrySync=()=>{ this.setState({view:'syncing'}); setTimeout(()=>{ this.setState({view:'catalog'}); this.flash({kind:'success',title:'カタログを同期しました',desc:'承認済みアプリを最新化しました'},2600); },1800); };
+
+  simulateApprove=()=>{
+    this.setState({ dialogOpen:false, view:'syncing' });
+    const candidates=[
+      ['LINE WORKS','jp.naver.lineworks'], ['Zoom','us.zoom.videomeetings'], ['Salesforce','com.salesforce.chatter'], ['Slack','com.slack'], ['Notion','notion.id'],
+    ];
+    const pick=candidates[this.state.nextSeed % candidates.length];
+    const id=this.pushToast({kind:'pending',title:'承認結果を同期中…',desc:pick[0]+' をカタログへ追加しています'});
+    setTimeout(()=>{
+      this.setState(s=>({
+        view:'catalog', nextSeed:s.nextSeed+1,
+        apps:[{ name:pick[0], pkg:pick[1], approvedAt:'2026-06-22', assign:'unassigned', installed:0, total:312 }, ...s.apps],
+      }));
+      this.updateToast(id,{kind:'success',title:'アプリを承認しました',desc:pick[0]+' をカタログに追加しました'});
+      setTimeout(()=>this.removeToast(id),3000);
+    }, 1600);
+  };
+
+  iconColor(name){
+    const palette=[['var(--info-bg)','var(--info-fg)'],['var(--purple-bg)','var(--purple-fg)'],['var(--success-bg)','var(--success-fg)'],['var(--warning-bg)','var(--warning-fg)'],['var(--primary-bg)','var(--primary)'],['var(--danger-bg)','var(--danger-fg)']];
+    let h=0; for(let i=0;i<name.length;i++) h=(h*31+name.charCodeAt(i))>>>0;
+    return palette[h%palette.length];
+  }
+
+  renderVals(){
+    document.documentElement.setAttribute('data-theme', this.state.mode);
+    if (this.props.primary) document.documentElement.style.setProperty('--primary', this.props.primary);
+    const r=this.state.role, p=this.perms(), v=this.state.view;
+    const emails={ SuperAdmin:'platform-ops@mobiguard.io', TenantAdmin:'admin@acme.co.jp', Operator:'operator@acme.co.jp', Viewer:'viewer@acme.co.jp' };
+    const roleKind={ SuperAdmin:['var(--purple-bg)','var(--purple-fg)'], TenantAdmin:['var(--info-bg)','var(--info-fg)'], Operator:['var(--success-bg)','var(--success-fg)'], Viewer:['var(--neutral-bg)','var(--neutral-fg)'] }[r];
+
+    const assignMap={
+      force:['強制', 'var(--info-bg)','var(--info-fg)','var(--info-border)'],
+      available:['任意', 'var(--neutral-bg)','var(--neutral-fg)','var(--neutral-border)'],
+      unassigned:['未割当','var(--pale-bg)','var(--pale-fg)','var(--pale-border)'],
+    };
+
+    let list=this.state.apps.slice();
+    const q=this.state.search.trim().toLowerCase();
+    if (q) list=list.filter(a=>(a.name+a.pkg).toLowerCase().includes(q));
+
+    const apps=list.map((a)=>{
+      const realIdx=this.state.apps.indexOf(a);
+      const ic=this.iconColor(a.name);
+      const am=assignMap[a.assign];
+      const pct = a.total>0 ? Math.round(a.installed/a.total*100) : 0;
+      const installColor = a.assign==='unassigned' ? 'var(--neutral)' : (pct>=90 ? 'var(--success)' : pct>=50 ? 'var(--info)' : 'var(--warning)');
+      return {
+        name:a.name, pkg:a.pkg, approvedAt:a.approvedAt, assign:a.assign,
+        initial:a.name.slice(0,1), iconBg:ic[0], iconFg:ic[1],
+        installedStr: a.assign==='unassigned' ? '配信なし' : (a.installed.toLocaleString()+' / '+a.total.toLocaleString()+' 台'),
+        installPct: (a.assign==='unassigned'?0:pct)+'%', installColor,
+        badgeLabel:am[0], badgeBg:am[1], badgeFg:am[2], badgeBorder:am[3],
+        onAssign:(e)=>{ const val=e.target.value; this.setState(s=>({apps:s.apps.map((x,j)=>j===realIdx?{...x,assign:val}:x)})); this.flash({kind:'success',title:'割当を更新しました',desc:a.name+' → '+(assignMap[val][0])},2000); },
+      };
+    });
+
+    return {
+      mode:this.state.mode, role:r, userEmail:emails[r], userInitials:r.slice(0,2).toUpperCase(),
+      roleBadgeBg:roleKind[0], roleBadgeFg:roleKind[1], canSeeAdmins:p.admins,
+      sidebarWidth:this.state.collapsed?'64px':'240px', showLabels:!this.state.collapsed,
+      themeIcon:this.themeIconEl(), toggleTheme:this.toggleTheme, toggleCollapse:this.toggleCollapse, onRoleChange:this.onRoleChange,
+
+      canManage:p.manage, isDenied:!p.manage,
+      isCatalog:v==='catalog', isEmpty:v==='empty', isSyncing:v==='syncing', isError:v==='error',
+      setCatalog:()=>this.setState({view:'catalog'}), setEmpty:()=>this.setState({view:'empty'}), setSyncing:()=>this.setState({view:'syncing'}), setError:()=>this.setState({view:'error'}),
+      vCatalog:this.seg(v==='catalog'), vEmpty:this.seg(v==='empty'), vSync:this.seg(v==='syncing'), vError:this.seg(v==='error'),
+      retrySync:this.retrySync,
+
+      search:this.state.search, onSearch:this.onSearch,
+      appCount:this.state.apps.length, apps, noResults:list.length===0,
+
+      openDialog:this.openDialog, closeDialog:this.closeDialog, stop:this.stop, simulateApprove:this.simulateApprove,
+      dialogOpen:this.state.dialogOpen,
+
+      toasts:this.state.toasts.map(t=>({ ...t, accent:t.kind==='success'?'var(--success)':t.kind==='error'?'var(--danger)':'var(--primary)', icon:this.toastIcon(t.kind) })),
+    };
+  }
+}
+</script>
+</body>
+</html>

@@ -1,0 +1,229 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Noto+Sans+JP:wght@400;500;700&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+  :root{
+    --bg:#ffffff; --surface:#f7f8fa; --surface-2:#eef0f4; --elevated:#ffffff;
+    --border:#e4e7ec; --border-strong:#d3d8e0;
+    --text:#1b1f27; --text-secondary:#5a616e; --text-muted:#8a909c;
+    --primary:#4f46e5; --primary-hover:#4338ca; --primary-fg:#ffffff; --primary-bg:#eef0fe; --primary-border:#c9cdfa;
+    --success:#16a34a; --success-bg:#e8f6ed; --success-fg:#15803d; --success-border:#bfe6cc;
+    --danger:#dc2626; --danger-bg:#fdeaea; --danger-fg:#b91c1c; --danger-border:#f5c6c6;
+    --warning:#d97706; --warning-bg:#fdf2e0; --warning-fg:#b45309; --warning-border:#f2dbab;
+    --neutral:#6b7280; --neutral-bg:#eef0f3; --neutral-fg:#4b5563; --neutral-border:#dde1e7;
+    --info:#2563eb; --info-bg:#e8f0fe; --info-fg:#1d4ed8; --info-border:#c3d6fb;
+    --shadow:0 1px 2px rgba(16,20,30,.04), 0 1px 3px rgba(16,20,30,.06);
+    --shadow-card:0 4px 24px rgba(16,20,30,.07), 0 1px 3px rgba(16,20,30,.06);
+  }
+  :root[data-theme="dark"]{
+    --bg:#0d1017; --surface:#0a0c11; --surface-2:#1b212c; --elevated:#141821;
+    --border:#262d3a; --border-strong:#323a49;
+    --text:#e7eaf0; --text-secondary:#9aa2b1; --text-muted:#6b7480;
+    --primary:#6366f1; --primary-hover:#7c80f7; --primary-fg:#ffffff; --primary-bg:rgba(99,102,241,.16); --primary-border:rgba(99,102,241,.42);
+    --success:#22c55e; --success-bg:rgba(34,197,94,.14); --success-fg:#4ade80; --success-border:rgba(34,197,94,.32);
+    --danger:#ef4444; --danger-bg:rgba(239,68,68,.14); --danger-fg:#f87171; --danger-border:rgba(239,68,68,.34);
+    --warning:#f59e0b; --warning-bg:rgba(245,158,11,.14); --warning-fg:#fbbf24; --warning-border:rgba(245,158,11,.32);
+    --neutral:#94a3b8; --neutral-bg:rgba(148,163,184,.14); --neutral-fg:#cbd5e1; --neutral-border:rgba(148,163,184,.26);
+    --info:#3b82f6; --info-bg:rgba(59,130,246,.16); --info-fg:#60a5fa; --info-border:rgba(59,130,246,.34);
+    --shadow:0 1px 2px rgba(0,0,0,.4); --shadow-card:0 12px 40px rgba(0,0,0,.5);
+  }
+  *{box-sizing:border-box;}
+  body{margin:0; background:var(--surface); color:var(--text); font-family:"Noto Sans JP", system-ui, sans-serif; font-size:14px; line-height:1.5; -webkit-font-smoothing:antialiased; font-feature-settings:"palt"; transition:background .18s ease, color .18s ease;}
+  ::selection{background:var(--primary-bg);}
+  @keyframes spin{to{transform:rotate(360deg);}}
+  @keyframes fadein{from{opacity:0; transform:translateY(6px);}to{opacity:1; transform:none;}}
+  @keyframes toastin{from{opacity:0; transform:translateY(8px) scale(.98);}to{opacity:1; transform:none;}}
+</style>
+</helmet>
+
+<div style="min-height:100vh; display:flex; flex-direction:column; position:relative; background:
+  radial-gradient(1100px 520px at 50% -10%, var(--primary-bg), transparent 70%), var(--surface);">
+
+  <!-- top bar: state preview + theme -->
+  <div style="display:flex; align-items:center; justify-content:space-between; gap:12px; padding:16px 20px; flex-wrap:wrap;">
+    <div style="display:flex; align-items:center; gap:6px;">
+      <span style="font-size:11px; color:var(--text-muted);">状態プレビュー</span>
+      <div style="display:inline-flex; padding:2px; background:var(--surface-2); border-radius:8px; gap:2px;">
+        <button onClick="{{ setDefault }}" style="height:26px; padding:0 10px; border:none; border-radius:6px; font-family:inherit; font-size:12px; cursor:pointer; background:{{ vDefault.bg }}; color:{{ vDefault.fg }}; font-weight:{{ vDefault.fw }};">既定</button>
+        <button onClick="{{ setAuth }}" style="height:26px; padding:0 10px; border:none; border-radius:6px; font-family:inherit; font-size:12px; cursor:pointer; background:{{ vAuth.bg }}; color:{{ vAuth.fg }}; font-weight:{{ vAuth.fw }};">認証中</button>
+        <button onClick="{{ setFailed }}" style="height:26px; padding:0 10px; border:none; border-radius:6px; font-family:inherit; font-size:12px; cursor:pointer; background:{{ vFailed.bg }}; color:{{ vFailed.fg }}; font-weight:{{ vFailed.fw }};">失敗</button>
+        <button onClick="{{ setExpired }}" style="height:26px; padding:0 10px; border:none; border-radius:6px; font-family:inherit; font-size:12px; cursor:pointer; background:{{ vExpired.bg }}; color:{{ vExpired.fg }}; font-weight:{{ vExpired.fw }};">セッション失効</button>
+      </div>
+    </div>
+    <button onClick="{{ toggleTheme }}" title="テーマ切替" style="width:34px; height:34px; flex:none; display:flex; align-items:center; justify-content:center; border:1px solid var(--border-strong); border-radius:9px; background:var(--elevated); color:var(--text-secondary); cursor:pointer;" style-hover="border-color:var(--primary); color:var(--primary);">{{ themeIcon }}</button>
+  </div>
+
+  <!-- center -->
+  <div style="flex:1; display:flex; flex-direction:column; align-items:center; justify-content:center; padding:20px 20px 60px;">
+
+    <div style="width:100%; max-width:392px;">
+
+      <!-- brand -->
+      <div style="display:flex; flex-direction:column; align-items:center; margin-bottom:22px;">
+        <div style="width:48px; height:48px; border-radius:13px; background:var(--primary); display:flex; align-items:center; justify-content:center; color:#fff; font-weight:700; font-size:23px; box-shadow:var(--shadow); margin-bottom:12px;">M</div>
+        <div style="font-size:20px; font-weight:700; letter-spacing:-.01em;">MobiGuard</div>
+        <div style="font-size:12.5px; color:var(--text-muted); margin-top:2px;">Android Enterprise EMM 管理コンソール</div>
+      </div>
+
+      <!-- CARD -->
+      <div style="background:var(--elevated); border:1px solid var(--border); border-radius:14px; box-shadow:var(--shadow-card); overflow:hidden;">
+
+        <!-- DEFAULT -->
+        <sc-if value="{{ isDefault }}" hint-placeholder-val="{{ true }}">
+          <div style="padding:28px 28px 24px; animation:fadein .25s ease;">
+            <div style="text-align:center; margin-bottom:22px;">
+              <div style="font-size:16px; font-weight:700; margin-bottom:5px;">サインイン</div>
+              <div style="font-size:12.5px; color:var(--text-secondary);">組織アカウント（OpenID Connect）で続行します。</div>
+            </div>
+            <button onClick="{{ login }}" style="width:100%; height:44px; border:none; border-radius:9px; background:var(--primary); color:var(--primary-fg); font-size:14px; font-weight:600; font-family:inherit; cursor:pointer; display:inline-flex; align-items:center; justify-content:center; gap:9px;" style-hover="background:var(--primary-hover);">
+              <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><circle cx="7.5" cy="15.5" r="3.5"/><path d="m11 12 8.5-8.5M15.5 7.5 18 10l3-3-2.5-2.5"/></svg>
+              OIDC でログイン
+            </button>
+            <div style="display:flex; align-items:flex-start; gap:8px; margin-top:16px; padding:11px 13px; background:var(--surface); border:1px solid var(--border); border-radius:9px;">
+              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="var(--text-muted)" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="flex:none; margin-top:1px;"><rect x="5" y="11" width="14" height="9" rx="2"/><path d="M8 11V8a4 4 0 0 1 8 0v3"/></svg>
+              <div style="font-size:11.5px; color:var(--text-secondary); line-height:1.55;">IdP（OpenID Connect プロバイダ）にリダイレクトします。ID・パスワードは本サービスでは保持しません。テナントはログイン後に自動判定されます。</div>
+            </div>
+          </div>
+        </sc-if>
+
+        <!-- AUTHENTICATING (callback) -->
+        <sc-if value="{{ isAuth }}" hint-placeholder-val="{{ false }}">
+          <div style="padding:48px 28px; display:flex; flex-direction:column; align-items:center; text-align:center; animation:fadein .25s ease;">
+            <div style="width:40px; height:40px; border-radius:50%; border:3px solid var(--surface-2); border-top-color:var(--primary); animation:spin .7s linear infinite; margin-bottom:18px;"></div>
+            <div style="font-size:15px; font-weight:600; margin-bottom:5px;">認証中…</div>
+            <div style="font-size:12.5px; color:var(--text-secondary); max-width:260px;">IdP からの応答（コールバック）を検証しています。このままお待ちください。</div>
+            <div style="font-size:11px; color:var(--text-muted); font-family:'IBM Plex Mono',monospace; margin-top:14px;">/callback?code=•••&amp;state=•••</div>
+          </div>
+        </sc-if>
+
+        <!-- FAILED -->
+        <sc-if value="{{ isFailed }}" hint-placeholder-val="{{ false }}">
+          <div style="padding:28px; animation:fadein .25s ease;">
+            <div style="display:flex; gap:11px; padding:13px 14px; background:var(--danger-bg); border:1px solid var(--danger-border); border-radius:10px; margin-bottom:18px;">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="var(--danger-fg)" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" style="flex:none; margin-top:1px;"><circle cx="12" cy="12" r="9"/><path d="M12 8v5M12 16h.01"/></svg>
+              <div>
+                <div style="font-size:13.5px; font-weight:700; color:var(--danger-fg); margin-bottom:3px;">ログインに失敗しました</div>
+                <div style="font-size:12px; color:var(--danger-fg); line-height:1.55; opacity:.92;">IdP での認証が拒否されたか、トークンの検証に失敗しました。<b>セッションは発行されていません。</b></div>
+              </div>
+            </div>
+            <div style="display:flex; justify-content:space-between; gap:10px; padding:9px 12px; background:var(--surface); border:1px solid var(--border); border-radius:8px; margin-bottom:18px;">
+              <span style="font-size:11.5px; color:var(--text-muted);">エラーコード</span>
+              <span style="font-size:11.5px; font-weight:500; font-family:'IBM Plex Mono',monospace;">invalid_token</span>
+            </div>
+            <button onClick="{{ login }}" style="width:100%; height:44px; border:none; border-radius:9px; background:var(--primary); color:var(--primary-fg); font-size:14px; font-weight:600; font-family:inherit; cursor:pointer; display:inline-flex; align-items:center; justify-content:center; gap:9px;" style-hover="background:var(--primary-hover);">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-3-6.7"/><path d="M21 4v5h-5"/></svg>
+              もう一度ログイン
+            </button>
+            <div style="text-align:center; margin-top:14px;"><span style="font-size:12px; color:var(--primary); cursor:pointer;" style-hover="text-decoration:underline;">別のアカウントでログイン</span></div>
+          </div>
+        </sc-if>
+
+        <!-- SESSION EXPIRED -->
+        <sc-if value="{{ isExpired }}" hint-placeholder-val="{{ false }}">
+          <div style="padding:28px; animation:fadein .25s ease;">
+            <div style="display:flex; gap:11px; padding:13px 14px; background:var(--warning-bg); border:1px solid var(--warning-border); border-radius:10px; margin-bottom:18px;">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="var(--warning-fg)" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" style="flex:none; margin-top:1px;"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg>
+              <div>
+                <div style="font-size:13.5px; font-weight:700; color:var(--warning-fg); margin-bottom:3px;">セッションの有効期限が切れました</div>
+                <div style="font-size:12px; color:var(--warning-fg); line-height:1.55; opacity:.92;">セキュリティのため自動的にサインアウトしました。続けるには再度ログインしてください。</div>
+              </div>
+            </div>
+            <button onClick="{{ login }}" style="width:100%; height:44px; border:none; border-radius:9px; background:var(--primary); color:var(--primary-fg); font-size:14px; font-weight:600; font-family:inherit; cursor:pointer; display:inline-flex; align-items:center; justify-content:center; gap:9px;" style-hover="background:var(--primary-hover);">
+              <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><circle cx="7.5" cy="15.5" r="3.5"/><path d="m11 12 8.5-8.5M15.5 7.5 18 10l3-3-2.5-2.5"/></svg>
+              再度ログイン
+            </button>
+          </div>
+        </sc-if>
+
+      </div>
+
+      <!-- footer -->
+      <div style="display:flex; align-items:center; justify-content:center; gap:10px; margin-top:20px; font-size:11.5px; color:var(--text-muted);">
+        <span style="cursor:pointer;" style-hover="color:var(--text-secondary);">利用規約</span>
+        <span style="opacity:.5;">·</span>
+        <span style="cursor:pointer;" style-hover="color:var(--text-secondary);">プライバシー</span>
+        <span style="opacity:.5;">·</span>
+        <span style="cursor:pointer;" style-hover="color:var(--text-secondary);">ステータス</span>
+      </div>
+      <div style="text-align:center; margin-top:8px; font-size:11px; color:var(--text-muted);">© 2026 MobiGuard, Inc.</div>
+
+    </div>
+  </div>
+
+  <!-- TOASTER -->
+  <div style="position:fixed; right:20px; bottom:20px; z-index:90; display:flex; flex-direction:column; gap:10px; width:320px; max-width:calc(100vw - 40px);">
+    <sc-for list="{{ toasts }}" as="t" hint-placeholder-count="0">
+      <div style="display:flex; align-items:flex-start; gap:11px; padding:13px 14px; background:var(--elevated); border:1px solid var(--border); border-left:3px solid {{ t.accent }}; border-radius:10px; box-shadow:var(--shadow-card); animation:toastin .2s ease;">
+        {{ t.icon }}
+        <div style="flex:1; min-width:0;"><div style="font-size:13px; font-weight:600;">{{ t.title }}</div><div style="font-size:12px; color:var(--text-secondary); margin-top:1px;">{{ t.desc }}</div></div>
+      </div>
+    </sc-for>
+  </div>
+
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props="{&quot;$preview&quot;:{&quot;width&quot;:1100,&quot;height&quot;:820},&quot;primary&quot;:{&quot;editor&quot;:&quot;color&quot;,&quot;default&quot;:&quot;#4f46e5&quot;,&quot;tsType&quot;:&quot;string&quot;},&quot;defaultTheme&quot;:{&quot;editor&quot;:&quot;enum&quot;,&quot;default&quot;:&quot;light&quot;,&quot;options&quot;:[&quot;light&quot;,&quot;dark&quot;],&quot;tsType&quot;:&quot;'light'|'dark'&quot;},&quot;defaultView&quot;:{&quot;editor&quot;:&quot;enum&quot;,&quot;default&quot;:&quot;default&quot;,&quot;options&quot;:[&quot;default&quot;,&quot;auth&quot;,&quot;failed&quot;,&quot;expired&quot;],&quot;tsType&quot;:&quot;string&quot;}}">
+class Component extends DCLogic {
+  state = {
+    mode: this.props.defaultTheme || 'light',
+    view: this.props.defaultView || 'default',
+    toasts: [],
+  };
+
+  el(t,p,...k){ return React.createElement(t,p,...k); }
+
+  toggleTheme = () => this.setState(s => ({ mode: s.mode==='light'?'dark':'light' }));
+
+  themeIconEl(){
+    if (this.state.mode==='light') return this.el('svg',{width:17,height:17,viewBox:'0 0 24 24',fill:'none',stroke:'currentColor',strokeWidth:1.9,strokeLinecap:'round',strokeLinejoin:'round'}, this.el('path',{key:'p',d:'M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8Z'}));
+    return this.el('svg',{width:17,height:17,viewBox:'0 0 24 24',fill:'none',stroke:'currentColor',strokeWidth:1.9,strokeLinecap:'round',strokeLinejoin:'round'}, this.el('circle',{key:'c',cx:12,cy:12,r:4}), this.el('path',{key:'p',d:'M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4'}));
+  }
+  toastIcon(kind){
+    if (kind==='pending') return this.el('div',{key:'i',style:{width:16,height:16,flex:'none',marginTop:1,borderRadius:'50%',border:'2px solid var(--border-strong)',borderTopColor:'var(--primary)',animation:'spin .7s linear infinite'}});
+    const color = kind==='success'?'var(--success-fg)':'var(--danger-fg)';
+    const path = kind==='success'?'M20 6 9 17l-5-5':'M18 6 6 18M6 6l12 12';
+    return this.el('svg',{key:'i',width:16,height:16,viewBox:'0 0 24 24',fill:'none',stroke:color,strokeWidth:2.4,strokeLinecap:'round',strokeLinejoin:'round',style:{flex:'none',marginTop:1}}, this.el('path',{key:'p',d:path}));
+  }
+
+  pushToast(t){ const id=Date.now()+Math.random(); this.setState(s=>({toasts:[...s.toasts,{id,...t}]})); return id; }
+  updateToast(id,p){ this.setState(s=>({toasts:s.toasts.map(t=>t.id===id?{...t,...p}:t)})); }
+  removeToast(id){ this.setState(s=>({toasts:s.toasts.filter(t=>t.id!==id)})); }
+
+  login = () => {
+    this.setState({ view:'auth' });
+    setTimeout(() => {
+      this.setState({ view:'default' });
+      const id = this.pushToast({ kind:'success', title:'認証に成功しました', desc:'/dashboard へ移動します…' });
+      setTimeout(()=>this.removeToast(id), 3200);
+    }, 2200);
+  };
+
+  seg(active){ return active ? {bg:'var(--elevated)',fg:'var(--primary)',fw:'600'} : {bg:'transparent',fg:'var(--text-secondary)',fw:'500'}; }
+
+  renderVals(){
+    document.documentElement.setAttribute('data-theme', this.state.mode);
+    if (this.props.primary) document.documentElement.style.setProperty('--primary', this.props.primary);
+    const v = this.state.view;
+    return {
+      themeIcon:this.themeIconEl(), toggleTheme:this.toggleTheme,
+      isDefault:v==='default', isAuth:v==='auth', isFailed:v==='failed', isExpired:v==='expired',
+      setDefault:()=>this.setState({view:'default'}), setAuth:()=>this.setState({view:'auth'}), setFailed:()=>this.setState({view:'failed'}), setExpired:()=>this.setState({view:'expired'}),
+      vDefault:this.seg(v==='default'), vAuth:this.seg(v==='auth'), vFailed:this.seg(v==='failed'), vExpired:this.seg(v==='expired'),
+      login:this.login,
+      toasts:this.state.toasts.map(t=>({ ...t, accent: t.kind==='success'?'var(--success)':t.kind==='error'?'var(--danger)':'var(--primary)', icon:this.toastIcon(t.kind) })),
+    };
+  }
+}
+</script>
+</body>
+</html>

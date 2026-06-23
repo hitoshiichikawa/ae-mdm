@@ -1,0 +1,256 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Noto+Sans+JP:wght@400;500;700&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+  :root{
+    --bg:#ffffff; --surface:#f7f8fa; --surface-2:#eef0f4; --elevated:#ffffff;
+    --border:#e4e7ec; --border-strong:#d3d8e0;
+    --text:#1b1f27; --text-secondary:#5a616e; --text-muted:#8a909c;
+    --primary:#4f46e5; --primary-hover:#4338ca; --primary-fg:#ffffff; --primary-bg:#eef0fe; --primary-border:#c9cdfa;
+    --success:#16a34a; --success-bg:#e8f6ed; --success-fg:#15803d; --success-border:#bfe6cc;
+    --danger:#dc2626; --danger-bg:#fdeaea; --danger-fg:#b91c1c; --danger-border:#f5c6c6;
+    --warning:#d97706; --warning-bg:#fdf2e0; --warning-fg:#b45309; --warning-border:#f2dbab;
+    --neutral:#6b7280; --neutral-bg:#eef0f3; --neutral-fg:#4b5563; --neutral-border:#dde1e7;
+    --info:#2563eb; --info-bg:#e8f0fe; --info-fg:#1d4ed8; --info-border:#c3d6fb;
+    --purple:#7c3aed; --purple-bg:#f1ebfd; --purple-fg:#6d28d9; --purple-border:#ddcdfa;
+    --pale-bg:#f3f4f6; --pale-fg:#9ca3af; --pale-border:#e6e8ec;
+    --shadow:0 1px 2px rgba(16,20,30,.04), 0 1px 3px rgba(16,20,30,.06);
+    --shadow-pop:0 4px 16px rgba(16,20,30,.12), 0 1px 3px rgba(16,20,30,.08);
+  }
+  :root[data-theme="dark"]{
+    --bg:#0d1017; --surface:#151922; --surface-2:#1b212c; --elevated:#171c25;
+    --border:#262d3a; --border-strong:#323a49;
+    --text:#e7eaf0; --text-secondary:#9aa2b1; --text-muted:#6b7480;
+    --primary:#6366f1; --primary-hover:#7c80f7; --primary-fg:#ffffff; --primary-bg:rgba(99,102,241,.16); --primary-border:rgba(99,102,241,.42);
+    --success:#22c55e; --success-bg:rgba(34,197,94,.14); --success-fg:#4ade80; --success-border:rgba(34,197,94,.32);
+    --danger:#ef4444; --danger-bg:rgba(239,68,68,.14); --danger-fg:#f87171; --danger-border:rgba(239,68,68,.34);
+    --warning:#f59e0b; --warning-bg:rgba(245,158,11,.14); --warning-fg:#fbbf24; --warning-border:rgba(245,158,11,.32);
+    --neutral:#94a3b8; --neutral-bg:rgba(148,163,184,.14); --neutral-fg:#cbd5e1; --neutral-border:rgba(148,163,184,.26);
+    --info:#3b82f6; --info-bg:rgba(59,130,246,.16); --info-fg:#60a5fa; --info-border:rgba(59,130,246,.34);
+    --purple:#8b5cf6; --purple-bg:rgba(139,92,246,.16); --purple-fg:#a78bfa; --purple-border:rgba(139,92,246,.34);
+    --pale-bg:rgba(148,163,184,.07); --pale-fg:#7b8494; --pale-border:rgba(148,163,184,.16);
+    --shadow:0 1px 2px rgba(0,0,0,.4); --shadow-pop:0 8px 28px rgba(0,0,0,.55);
+  }
+  *{box-sizing:border-box;}
+  body{margin:0; background:var(--bg); color:var(--text); font-family:"Noto Sans JP", system-ui, sans-serif; font-size:14px; line-height:1.45; -webkit-font-smoothing:antialiased; font-feature-settings:"palt"; transition:background .18s ease, color .18s ease;}
+  ::selection{background:var(--primary-bg);}
+</style>
+</helmet>
+
+<div style="display:flex; min-height:100vh; background:var(--bg);">
+
+  <!-- ============ SIDEBAR (admin-console) ============ -->
+  <aside style="width: {{ sidebarWidth }}; flex:none; background:var(--surface); border-right:1px solid var(--border); display:flex; flex-direction:column; position:sticky; top:0; height:100vh; transition:width .16s ease;">
+    <div style="height:52px; display:flex; align-items:center; gap:10px; padding:0 16px; border-bottom:1px solid var(--border);">
+      <div style="width:26px; height:26px; flex:none; border-radius:7px; background:var(--primary); display:flex; align-items:center; justify-content:center; color:#fff; font-weight:700; font-size:13px;">M</div>
+      <sc-if value="{{ showLabels }}" hint-placeholder-val="{{ true }}"><div style="font-weight:700; font-size:14px; white-space:nowrap; display:flex; align-items:center; gap:6px;">MobiGuard <span style="font-size:9px; font-weight:700; letter-spacing:.04em; padding:1px 5px; border-radius:4px; background:var(--purple-bg); color:var(--purple-fg);">ADMIN</span></div></sc-if>
+    </div>
+    <nav style="flex:1; padding:10px 10px; display:flex; flex-direction:column; gap:2px; overflow-y:auto;">
+      <sc-if value="{{ showLabels }}" hint-placeholder-val="{{ true }}"><div style="font-size:10px; font-weight:600; letter-spacing:.05em; color:var(--text-muted); padding:6px 10px 4px;">プラットフォーム運用</div></sc-if>
+      <div style="display:flex; align-items:center; gap:11px; padding:8px 10px; border-radius:8px; background:var(--primary-bg); color:var(--primary); font-weight:500; white-space:nowrap; cursor:pointer;">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" style="flex:none;"><rect x="5" y="3" width="14" height="18" rx="1.5"/><path d="M9 7h.01M15 7h.01M9 11h.01M15 11h.01M10 21v-3h4v3"/></svg>
+        <sc-if value="{{ showLabels }}" hint-placeholder-val="{{ true }}"><span>テナント</span></sc-if>
+      </div>
+      <div style="display:flex; align-items:center; gap:11px; padding:8px 10px; border-radius:8px; color:var(--text-secondary); white-space:nowrap; cursor:pointer;" style-hover="background:var(--surface-2); color:var(--text);">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" style="flex:none;"><circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3a14 14 0 0 1 0 18M12 3a14 14 0 0 0 0 18"/></svg>
+        <sc-if value="{{ showLabels }}" hint-placeholder-val="{{ true }}"><span>横断ダッシュボード</span></sc-if>
+      </div>
+      <div style="display:flex; align-items:center; gap:11px; padding:8px 10px; border-radius:8px; color:var(--text-secondary); white-space:nowrap; cursor:pointer;" style-hover="background:var(--surface-2); color:var(--text);">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" style="flex:none;"><path d="M22 12h-6l-2 3h-4l-2-3H2"/><path d="M5.5 5.5 2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.5-6.5A2 2 0 0 0 16.8 4H7.2a2 2 0 0 0-1.7 1.5Z"/></svg>
+        <sc-if value="{{ showLabels }}" hint-placeholder-val="{{ true }}"><span style="display:flex; align-items:center; gap:7px;">未割当（退避キュー）<span style="font-size:10px; font-weight:700; padding:0 6px; border-radius:9px; background:var(--warning-bg); color:var(--warning-fg);">7</span></span></sc-if>
+      </div>
+      <div style="display:flex; align-items:center; gap:11px; padding:8px 10px; border-radius:8px; color:var(--text-secondary); white-space:nowrap; cursor:pointer;" style-hover="background:var(--surface-2); color:var(--text);">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" style="flex:none;"><path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8l-5-5Z"/><path d="M14 3v5h5"/><line x1="9" y1="13" x2="15" y2="13"/><line x1="9" y1="17" x2="15" y2="17"/></svg>
+        <sc-if value="{{ showLabels }}" hint-placeholder-val="{{ true }}"><span>横断監査ログ</span></sc-if>
+      </div>
+    </nav>
+    <div style="border-top:1px solid var(--border); padding:10px;">
+      <div onClick="{{ toggleCollapse }}" style="display:flex; align-items:center; gap:11px; padding:8px 10px; border-radius:8px; color:var(--text-muted); cursor:pointer; white-space:nowrap;" style-hover="background:var(--surface-2); color:var(--text);">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" style="flex:none;"><rect x="3" y="4" width="18" height="16" rx="2"/><line x1="9" y1="4" x2="9" y2="20"/></svg>
+        <sc-if value="{{ showLabels }}" hint-placeholder-val="{{ true }}"><span>サイドバーを折りたたむ</span></sc-if>
+      </div>
+    </div>
+  </aside>
+
+  <!-- ============ MAIN ============ -->
+  <main style="flex:1; min-width:0; display:flex; flex-direction:column;">
+
+    <!-- TOPBAR -->
+    <header style="height:52px; flex:none; position:sticky; top:0; z-index:30; background:color-mix(in srgb, var(--bg) 88%, transparent); backdrop-filter:blur(8px); border-bottom:1px solid var(--border); display:flex; align-items:center; gap:14px; padding:0 18px;">
+      <div style="display:flex; align-items:center; gap:8px;"><span style="font-weight:700; font-size:14.5px; white-space:nowrap;">admin-console シェル</span><span style="font-size:11px; color:var(--text-muted); font-family:'IBM Plex Mono',monospace;">/api/admin</span></div>
+      <div style="flex:1;"></div>
+      <button onClick="{{ toggleTheme }}" title="テーマ切替" style="width:32px; height:32px; flex:none; display:flex; align-items:center; justify-content:center; border:1px solid var(--border-strong); border-radius:8px; background:var(--surface); color:var(--text-secondary); cursor:pointer;" style-hover="border-color:var(--primary); color:var(--primary);">{{ themeIcon }}</button>
+      <div style="width:1px; height:24px; background:var(--border);"></div>
+      <div style="display:flex; align-items:center; gap:9px; cursor:pointer; padding:3px 4px 3px 6px; border-radius:8px;" style-hover="background:var(--surface-2);">
+        <div style="text-align:right; line-height:1.25;">
+          <div style="font-size:12.5px; font-weight:500;"><a href="/cdn-cgi/l/email-protection" class="__cf_email__" data-cfemail="ccbca0adb8aaa3bea1e1a3bcbf8ca1a3aea5abb9adbea8e2a5a3">[email&#160;protected]</a></div>
+          <div style="display:flex; justify-content:flex-end;"><span style="font-size:10px; font-weight:600; padding:1px 6px; border-radius:5px; background:var(--purple-bg); color:var(--purple-fg);">SuperAdmin</span></div>
+        </div>
+        <div style="width:30px; height:30px; flex:none; border-radius:50%; background:var(--primary); color:#fff; display:flex; align-items:center; justify-content:center; font-size:12px; font-weight:600;">SU</div>
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="var(--text-muted)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m6 9 6 6 6-6"/></svg>
+      </div>
+    </header>
+
+    <!-- SUB-NAV -->
+    <div style="position:sticky; top:52px; z-index:20; background:var(--bg); border-bottom:1px solid var(--border); padding:0 26px; display:flex; gap:2px; overflow-x:auto;">
+      <a href="#shell" style="padding:11px 12px; font-size:13px; color:var(--text-secondary); text-decoration:none; white-space:nowrap; border-bottom:2px solid transparent;" style-hover="color:var(--text); border-bottom-color:var(--border-strong);">シェル</a>
+      <a href="#nav" style="padding:11px 12px; font-size:13px; color:var(--text-secondary); text-decoration:none; white-space:nowrap; border-bottom:2px solid transparent;" style-hover="color:var(--text); border-bottom-color:var(--border-strong);">ナビゲーション</a>
+      <a href="#topbar" style="padding:11px 12px; font-size:13px; color:var(--text-secondary); text-decoration:none; white-space:nowrap; border-bottom:2px solid transparent;" style-hover="color:var(--text); border-bottom-color:var(--border-strong);">トップバー</a>
+      <a href="#badges" style="padding:11px 12px; font-size:13px; color:var(--text-secondary); text-decoration:none; white-space:nowrap; border-bottom:2px solid transparent;" style-hover="color:var(--text); border-bottom-color:var(--border-strong);">追加コンポーネント</a>
+      <a href="#reuse" style="padding:11px 12px; font-size:13px; color:var(--text-secondary); text-decoration:none; white-space:nowrap; border-bottom:2px solid transparent;" style-hover="color:var(--text); border-bottom-color:var(--border-strong);">流用</a>
+    </div>
+
+    <div style="padding:28px 26px 80px; max-width:1080px; width:100%;">
+
+      <!-- intro -->
+      <div id="shell" style="scroll-margin-top:104px; margin-bottom:38px;">
+        <div style="display:flex; align-items:center; gap:8px; margin-bottom:8px;">
+          <span style="font-size:11px; font-weight:600; letter-spacing:.08em; color:var(--purple-fg); text-transform:uppercase;">admin-console</span>
+          <span style="font-size:11px; font-weight:700; letter-spacing:.04em; padding:1px 6px; border-radius:5px; background:var(--purple-bg); color:var(--purple-fg);">SuperAdmin 専用</span>
+        </div>
+        <h1 style="margin:0 0 8px; font-size:24px; font-weight:700; letter-spacing:-.01em;">admin-console シェル・リファレンス</h1>
+        <p style="margin:0 0 16px; max-width:660px; color:var(--text-secondary); font-size:13.5px;">SaaS 運用者（SuperAdmin）が顧客テナントそのものを管理する運用コンソール。tenant-console とは<b style="color:var(--text);">別アプリ・別 OIDC クライアント</b>ですが、<b style="color:var(--text);">同一のデザイン言語（トークン・共通コンポーネント）</b>を共有します。backend は同一で <span style="font-family:'IBM Plex Mono',monospace; font-size:12.5px;">/api/admin</span> 系を叩きます。</p>
+        <div style="display:flex; gap:12px; flex-wrap:wrap;">
+          <div style="display:flex; align-items:center; gap:8px; padding:9px 13px; border:1px solid var(--border); background:var(--surface); border-radius:9px; font-size:12.5px; color:var(--text-secondary);"><span style="width:8px; height:8px; border-radius:50%; background:var(--purple);"></span>ADMIN バッジでアプリを識別</div>
+          <div style="display:flex; align-items:center; gap:8px; padding:9px 13px; border:1px solid var(--border); background:var(--surface); border-radius:9px; font-size:12.5px; color:var(--text-secondary);"><span style="width:8px; height:8px; border-radius:50%; background:var(--info);"></span>横断が前提（テナント切替なし）</div>
+          <div style="display:flex; align-items:center; gap:8px; padding:9px 13px; border:1px solid var(--border); background:var(--surface); border-radius:9px; font-size:12.5px; color:var(--text-secondary);"><span style="width:8px; height:8px; border-radius:50%; background:var(--success);"></span>トークン・部品は tenant-console と共通</div>
+        </div>
+      </div>
+
+      <!-- NAV -->
+      <section id="nav" style="scroll-margin-top:104px; margin-bottom:38px;">
+        <h2 style="margin:0 0 4px; font-size:17px; font-weight:700;">ナビゲーション</h2>
+        <p style="margin:0 0 16px; font-size:13px; color:var(--text-secondary);">左サイドバーの項目は 4 つ。tenant-console の業務ナビ（デバイス/ポリシー等）は持たず、プラットフォーム運用に特化します。</p>
+        <div style="border:1px solid var(--border); border-radius:12px; background:var(--elevated); overflow:hidden;">
+          <div style="display:grid; grid-template-columns:200px 1fr; border-bottom:1px solid var(--border);">
+            <div style="padding:13px 16px; display:flex; align-items:center; gap:10px; border-right:1px solid var(--border);"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="var(--primary)" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="5" y="3" width="14" height="18" rx="1.5"/><path d="M10 21v-3h4v3"/></svg><span style="font-size:13px; font-weight:600;">テナント</span></div>
+            <div style="padding:13px 16px; font-size:12.5px; color:var(--text-secondary);">顧客テナントの一覧・作成・Enterprise バインド・無効化。<span style="color:var(--text-muted);">/tenants</span></div>
+          </div>
+          <div style="display:grid; grid-template-columns:200px 1fr; border-bottom:1px solid var(--border);">
+            <div style="padding:13px 16px; display:flex; align-items:center; gap:10px; border-right:1px solid var(--border);"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="var(--text-secondary)" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3a14 14 0 0 1 0 18M12 3a14 14 0 0 0 0 18"/></svg><span style="font-size:13px; font-weight:600;">横断ダッシュボード</span></div>
+            <div style="padding:13px 16px; font-size:12.5px; color:var(--text-secondary);">全テナント横断の稼働・コンプライアンス・容量サマリ。<span style="color:var(--text-muted);">/overview</span></div>
+          </div>
+          <div style="display:grid; grid-template-columns:200px 1fr; border-bottom:1px solid var(--border);">
+            <div style="padding:13px 16px; display:flex; align-items:center; gap:10px; border-right:1px solid var(--border);"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="var(--text-secondary)" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M22 12h-6l-2 3h-4l-2-3H2"/><path d="M5.5 5.5 2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.5-6.5A2 2 0 0 0 16.8 4H7.2a2 2 0 0 0-1.7 1.5Z"/></svg><span style="font-size:13px; font-weight:600;">未割当（退避キュー）</span></div>
+            <div style="padding:13px 16px; font-size:12.5px; color:var(--text-secondary);">テナント未割当・バインド未完了などで退避中の端末/リソース。件数バッジで滞留を可視化。<span style="color:var(--text-muted);">/unassigned</span></div>
+          </div>
+          <div style="display:grid; grid-template-columns:200px 1fr;">
+            <div style="padding:13px 16px; display:flex; align-items:center; gap:10px; border-right:1px solid var(--border);"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="var(--text-secondary)" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8l-5-5Z"/><path d="M14 3v5h5"/></svg><span style="font-size:13px; font-weight:600;">横断監査ログ</span></div>
+            <div style="padding:13px 16px; font-size:12.5px; color:var(--text-secondary);">全テナント横断の監査ログ（テナント列つき・追記専用）。<span style="color:var(--text-muted);">/audit</span></div>
+          </div>
+        </div>
+      </section>
+
+      <!-- TOPBAR -->
+      <section id="topbar" style="scroll-margin-top:104px; margin-bottom:38px;">
+        <h2 style="margin:0 0 4px; font-size:17px; font-weight:700;">トップバー</h2>
+        <p style="margin:0 0 16px; font-size:13px; color:var(--text-secondary);">ページタイトル + 現在ユーザー（SuperAdmin）+ ユーザーメニュー。<b style="color:var(--text);">テナント切替は持ちません</b>（常に全テナント横断）。このページ上部がライブのトップバーです。</p>
+        <div style="display:grid; grid-template-columns:repeat(auto-fit, minmax(230px,1fr)); gap:12px;">
+          <div style="border:1px solid var(--border); border-radius:12px; padding:14px 16px; background:var(--elevated);"><div style="font-size:13px; font-weight:600; margin-bottom:5px;">識別</div><div style="font-size:12.5px; color:var(--text-secondary); line-height:1.6;">ロゴ横の <b style="color:var(--text);">ADMIN</b> バッジで tenant-console と視覚的に区別。誤操作防止。</div></div>
+          <div style="border:1px solid var(--border); border-radius:12px; padding:14px 16px; background:var(--elevated);"><div style="font-size:13px; font-weight:600; margin-bottom:5px;">ユーザー</div><div style="font-size:12.5px; color:var(--text-secondary); line-height:1.6;">SuperAdmin 固定（紫バッジ）。OIDC クライアントは tenant-console と分離。</div></div>
+          <div style="border:1px solid var(--border); border-radius:12px; padding:14px 16px; background:var(--elevated);"><div style="font-size:13px; font-weight:600; margin-bottom:5px;">テナント切替なし</div><div style="font-size:12.5px; color:var(--text-secondary); line-height:1.6;">単一テナントに切り替える概念はなく、各画面が横断ビュー + テナント列で表現。</div></div>
+        </div>
+      </section>
+
+      <!-- ADDED COMPONENTS -->
+      <section id="badges" style="scroll-margin-top:104px; margin-bottom:38px;">
+        <h2 style="margin:0 0 4px; font-size:17px; font-weight:700;">追加コンポーネント</h2>
+        <p style="margin:0 0 16px; font-size:13px; color:var(--text-secondary);">admin-console で新たに共通シートへ追加する部品。</p>
+
+        <div style="border:1px solid var(--border); border-radius:12px; background:var(--elevated); overflow:hidden; margin-bottom:16px;">
+          <div style="display:grid; grid-template-columns:180px 1fr;">
+            <div style="padding:14px 16px; font-size:12px; font-weight:600; color:var(--text-secondary); border-right:1px solid var(--border);">テナント状態バッジ</div>
+            <div style="padding:14px 16px; display:flex; flex-wrap:wrap; gap:8px; align-items:center;">
+              <span style="display:inline-flex; align-items:center; gap:6px; font-size:12px; font-weight:600; padding:3px 9px; border-radius:6px; background:var(--warning-bg); color:var(--warning-fg); border:1px solid var(--warning-border);"><span style="width:6px; height:6px; border-radius:50%; background:var(--warning);"></span>バインド未完了</span>
+              <span style="display:inline-flex; align-items:center; gap:6px; font-size:12px; font-weight:600; padding:3px 9px; border-radius:6px; background:var(--success-bg); color:var(--success-fg); border:1px solid var(--success-border);"><span style="width:6px; height:6px; border-radius:50%; background:var(--success);"></span>有効</span>
+              <span style="display:inline-flex; align-items:center; gap:6px; font-size:12px; font-weight:600; padding:3px 9px; border-radius:6px; background:var(--neutral-bg); color:var(--neutral-fg); border:1px solid var(--neutral-border);"><span style="width:6px; height:6px; border-radius:50%; background:var(--neutral);"></span>無効</span>
+              <span style="font-size:11.5px; color:var(--text-muted); margin-left:4px;">※ バインド未完了は端末・ポリシー操作不可</span>
+            </div>
+          </div>
+        </div>
+
+        <div style="font-size:12px; font-weight:600; color:var(--text-secondary); margin:0 0 8px;">横断テーブル（テナント列つき）</div>
+        <div style="border:1px solid var(--border); border-radius:12px; background:var(--elevated); overflow:hidden; box-shadow:var(--shadow);">
+          <div style="overflow-x:auto;">
+            <table style="width:100%; border-collapse:collapse; font-size:13px; min-width:560px;">
+              <thead><tr style="background:var(--surface);">
+                <th style="text-align:left; font-weight:600; color:var(--text-secondary); font-size:12px; padding:9px 14px; border-bottom:1px solid var(--border);">テナント</th>
+                <th style="text-align:left; font-weight:600; color:var(--text-secondary); font-size:12px; padding:9px 14px; border-bottom:1px solid var(--border);">状態</th>
+                <th style="text-align:left; font-weight:600; color:var(--text-secondary); font-size:12px; padding:9px 14px; border-bottom:1px solid var(--border);">Enterprise</th>
+                <th style="text-align:right; font-weight:600; color:var(--text-secondary); font-size:12px; padding:9px 14px; border-bottom:1px solid var(--border);">端末数</th>
+              </tr></thead>
+              <tbody>
+                <sc-for list="{{ sampleRows }}" as="row" hint-placeholder-count="3">
+                  <tr style="border-bottom:1px solid var(--border); background:{{ row.rowBg }};">
+                    <td style="padding:10px 14px;"><span style="display:inline-flex; align-items:center; font-size:11.5px; font-weight:600; padding:2px 8px; border-radius:6px; background:var(--surface-2); color:var(--text-secondary); border:1px solid var(--border);">{{ row.tenant }}</span></td>
+                    <td style="padding:10px 14px;"><span style="display:inline-flex; align-items:center; gap:5px; font-size:11.5px; font-weight:600; padding:2px 8px; border-radius:6px; background:{{ row.stBg }}; color:{{ row.stFg }}; border:1px solid {{ row.stBorder }}; white-space:nowrap;"><span style="width:5px; height:5px; border-radius:50%; background:{{ row.stDot }};"></span>{{ row.status }}</span></td>
+                    <td style="padding:10px 14px; color:{{ row.entColor }}; font-family:'IBM Plex Mono',monospace; font-size:12px;">{{ row.enterprise }}</td>
+                    <td style="padding:10px 14px; text-align:right; font-variant-numeric:tabular-nums; color:var(--text-secondary);">{{ row.devices }}</td>
+                  </tr>
+                </sc-for>
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </section>
+
+      <!-- REUSE -->
+      <section id="reuse" style="scroll-margin-top:104px;">
+        <h2 style="margin:0 0 4px; font-size:17px; font-weight:700;">tenant-console から流用</h2>
+        <p style="margin:0 0 16px; font-size:13px; color:var(--text-secondary);">以下は共通デザインシステムのまま再利用します（再定義しません）。</p>
+        <div style="display:grid; grid-template-columns:repeat(auto-fill, minmax(180px,1fr)); gap:10px;">
+          <div style="border:1px solid var(--border); border-radius:10px; padding:12px 14px; background:var(--elevated); font-size:12.5px; font-weight:500;">カラートークン（L/D）</div>
+          <div style="border:1px solid var(--border); border-radius:10px; padding:12px 14px; background:var(--elevated); font-size:12.5px; font-weight:500;">タイポ / spacing / radius</div>
+          <div style="border:1px solid var(--border); border-radius:10px; padding:12px 14px; background:var(--elevated); font-size:12.5px; font-weight:500;">DataTable（密・ソート/行アクション）</div>
+          <div style="border:1px solid var(--border); border-radius:10px; padding:12px 14px; background:var(--elevated); font-size:12.5px; font-weight:500;">メトリクスカード</div>
+          <div style="border:1px solid var(--border); border-radius:10px; padding:12px 14px; background:var(--elevated); font-size:12.5px; font-weight:500;">ConfirmDialog（二段階）</div>
+          <div style="border:1px solid var(--border); border-radius:10px; padding:12px 14px; background:var(--elevated); font-size:12.5px; font-weight:500;">Steps（バインド可視化）</div>
+          <div style="border:1px solid var(--border); border-radius:10px; padding:12px 14px; background:var(--elevated); font-size:12.5px; font-weight:500;">トースト（非同期）</div>
+          <div style="border:1px solid var(--border); border-radius:10px; padding:12px 14px; background:var(--elevated); font-size:12.5px; font-weight:500;">空 / ローディング / エラー / 403</div>
+        </div>
+      </section>
+
+    </div>
+  </main>
+
+</div>
+</x-dc>
+<script data-cfasync="false" src="/cdn-cgi/scripts/5c5dd728/cloudflare-static/email-decode.min.js"></script><script type="text/x-dc" data-dc-script data-props="{&quot;$preview&quot;:{&quot;width&quot;:1180,&quot;height&quot;:860},&quot;primary&quot;:{&quot;editor&quot;:&quot;color&quot;,&quot;default&quot;:&quot;#4f46e5&quot;,&quot;tsType&quot;:&quot;string&quot;},&quot;defaultTheme&quot;:{&quot;editor&quot;:&quot;enum&quot;,&quot;default&quot;:&quot;light&quot;,&quot;options&quot;:[&quot;light&quot;,&quot;dark&quot;],&quot;tsType&quot;:&quot;'light'|'dark'&quot;}}">
+class Component extends DCLogic {
+  state = { mode: this.props.defaultTheme || 'light', collapsed: false };
+
+  el(t,p,...k){ return React.createElement(t,p,...k); }
+  toggleTheme=()=>this.setState(s=>({mode:s.mode==='light'?'dark':'light'}));
+  toggleCollapse=()=>this.setState(s=>({collapsed:!s.collapsed}));
+  themeIconEl(){ if(this.state.mode==='light') return this.el('svg',{width:17,height:17,viewBox:'0 0 24 24',fill:'none',stroke:'currentColor',strokeWidth:1.9,strokeLinecap:'round',strokeLinejoin:'round'}, this.el('path',{key:'p',d:'M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8Z'})); return this.el('svg',{width:17,height:17,viewBox:'0 0 24 24',fill:'none',stroke:'currentColor',strokeWidth:1.9,strokeLinecap:'round',strokeLinejoin:'round'}, this.el('circle',{key:'c',cx:12,cy:12,r:4}), this.el('path',{key:'p',d:'M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4'})); }
+
+  renderVals(){
+    document.documentElement.setAttribute('data-theme', this.state.mode);
+    if (this.props.primary) document.documentElement.style.setProperty('--primary', this.props.primary);
+    const tok={ '有効':['var(--success-bg)','var(--success-fg)','var(--success-border)','var(--success)'], 'バインド未完了':['var(--warning-bg)','var(--warning-fg)','var(--warning-border)','var(--warning)'], '無効':['var(--neutral-bg)','var(--neutral-fg)','var(--neutral-border)','var(--neutral)'] };
+    const raw=[
+      ['Acme 株式会社','有効','LC04f9k2a1',2481],
+      ['Hooli','バインド未完了','（未作成）',0],
+      ['Umbrella Corp.','無効','LC0aa77xx2',0],
+    ];
+    const sampleRows=raw.map(r=>{ const t=tok[r[1]]; return { tenant:r[0], status:r[1], stBg:t[0], stFg:t[1], stBorder:t[2], stDot:t[3], enterprise:r[2], entColor: r[2]==='（未作成）'?'var(--text-muted)':'var(--text-secondary)', devices:r[3].toLocaleString()+' 台', rowBg: r[1]==='バインド未完了'?'var(--warning-bg)':'transparent' }; });
+    return {
+      sidebarWidth:this.state.collapsed?'64px':'240px', showLabels:!this.state.collapsed,
+      themeIcon:this.themeIconEl(), toggleTheme:this.toggleTheme, toggleCollapse:this.toggleCollapse,
+      sampleRows,
+    };
+  }
+}
+</script>
+</body>
+</html>

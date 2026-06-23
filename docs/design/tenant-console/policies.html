@@ -1,0 +1,374 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Noto+Sans+JP:wght@400;500;700&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+  :root{
+    --bg:#ffffff; --surface:#f7f8fa; --surface-2:#eef0f4; --elevated:#ffffff;
+    --border:#e4e7ec; --border-strong:#d3d8e0;
+    --text:#1b1f27; --text-secondary:#5a616e; --text-muted:#8a909c;
+    --primary:#4f46e5; --primary-hover:#4338ca; --primary-fg:#ffffff; --primary-bg:#eef0fe; --primary-border:#c9cdfa;
+    --success:#16a34a; --success-bg:#e8f6ed; --success-fg:#15803d; --success-border:#bfe6cc;
+    --danger:#dc2626; --danger-bg:#fdeaea; --danger-fg:#b91c1c; --danger-border:#f5c6c6;
+    --warning:#d97706; --warning-bg:#fdf2e0; --warning-fg:#b45309; --warning-border:#f2dbab;
+    --neutral:#6b7280; --neutral-bg:#eef0f3; --neutral-fg:#4b5563; --neutral-border:#dde1e7;
+    --info:#2563eb; --info-bg:#e8f0fe; --info-fg:#1d4ed8; --info-border:#c3d6fb;
+    --purple:#7c3aed; --purple-bg:#f1ebfd; --purple-fg:#6d28d9; --purple-border:#ddcdfa;
+    --pale-bg:#f3f4f6; --pale-fg:#9ca3af; --pale-border:#e6e8ec;
+    --shadow:0 1px 2px rgba(16,20,30,.04), 0 1px 3px rgba(16,20,30,.06);
+    --shadow-pop:0 4px 16px rgba(16,20,30,.12), 0 1px 3px rgba(16,20,30,.08);
+  }
+  :root[data-theme="dark"]{
+    --bg:#0d1017; --surface:#151922; --surface-2:#1b212c; --elevated:#171c25;
+    --border:#262d3a; --border-strong:#323a49;
+    --text:#e7eaf0; --text-secondary:#9aa2b1; --text-muted:#6b7480;
+    --primary:#6366f1; --primary-hover:#7c80f7; --primary-fg:#ffffff; --primary-bg:rgba(99,102,241,.16); --primary-border:rgba(99,102,241,.42);
+    --success:#22c55e; --success-bg:rgba(34,197,94,.14); --success-fg:#4ade80; --success-border:rgba(34,197,94,.32);
+    --danger:#ef4444; --danger-bg:rgba(239,68,68,.14); --danger-fg:#f87171; --danger-border:rgba(239,68,68,.34);
+    --warning:#f59e0b; --warning-bg:rgba(245,158,11,.14); --warning-fg:#fbbf24; --warning-border:rgba(245,158,11,.32);
+    --neutral:#94a3b8; --neutral-bg:rgba(148,163,184,.14); --neutral-fg:#cbd5e1; --neutral-border:rgba(148,163,184,.26);
+    --info:#3b82f6; --info-bg:rgba(59,130,246,.16); --info-fg:#60a5fa; --info-border:rgba(59,130,246,.34);
+    --purple:#8b5cf6; --purple-bg:rgba(139,92,246,.16); --purple-fg:#a78bfa; --purple-border:rgba(139,92,246,.34);
+    --pale-bg:rgba(148,163,184,.07); --pale-fg:#7b8494; --pale-border:rgba(148,163,184,.16);
+    --shadow:0 1px 2px rgba(0,0,0,.4); --shadow-pop:0 8px 28px rgba(0,0,0,.55);
+  }
+  *{box-sizing:border-box;}
+  body{margin:0; background:var(--bg); color:var(--text); font-family:"Noto Sans JP", system-ui, sans-serif; font-size:14px; line-height:1.45; -webkit-font-smoothing:antialiased; font-feature-settings:"palt"; transition:background .18s ease, color .18s ease;}
+  ::selection{background:var(--primary-bg);}
+  @keyframes shimmer{0%{background-position:-180% 0;}100%{background-position:180% 0;}}
+  @keyframes spin{to{transform:rotate(360deg);}}
+  @keyframes toastin{from{opacity:0; transform:translateY(8px) scale(.98);}to{opacity:1; transform:none;}}
+</style>
+</helmet>
+
+<div style="display:flex; min-height:100vh; background:var(--bg);">
+
+  <!-- ============ SIDEBAR ============ -->
+  <aside style="width: {{ sidebarWidth }}; flex:none; background:var(--surface); border-right:1px solid var(--border); display:flex; flex-direction:column; position:sticky; top:0; height:100vh; transition:width .16s ease;">
+    <div style="height:52px; display:flex; align-items:center; gap:10px; padding:0 16px; border-bottom:1px solid var(--border);">
+      <div style="width:26px; height:26px; flex:none; border-radius:7px; background:var(--primary); display:flex; align-items:center; justify-content:center; color:#fff; font-weight:700; font-size:13px;">M</div>
+      <sc-if value="{{ showLabels }}" hint-placeholder-val="{{ true }}"><div style="font-weight:700; font-size:14px; white-space:nowrap;">MobiGuard</div></sc-if>
+    </div>
+    <nav style="flex:1; padding:10px 10px; display:flex; flex-direction:column; gap:2px; overflow-y:auto;">
+      <div style="display:flex; align-items:center; gap:11px; padding:8px 10px; border-radius:8px; color:var(--text-secondary); white-space:nowrap; cursor:pointer;" style-hover="background:var(--surface-2); color:var(--text);">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" style="flex:none;"><rect x="3" y="3" width="7" height="7" rx="1.3"/><rect x="14" y="3" width="7" height="7" rx="1.3"/><rect x="14" y="14" width="7" height="7" rx="1.3"/><rect x="3" y="14" width="7" height="7" rx="1.3"/></svg>
+        <sc-if value="{{ showLabels }}" hint-placeholder-val="{{ true }}"><span>ダッシュボード</span></sc-if>
+      </div>
+      <div style="display:flex; align-items:center; gap:11px; padding:8px 10px; border-radius:8px; color:var(--text-secondary); white-space:nowrap; cursor:pointer;" style-hover="background:var(--surface-2); color:var(--text);">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" style="flex:none;"><rect x="7" y="2.5" width="10" height="19" rx="2.5"/><line x1="10.5" y1="18.4" x2="13.5" y2="18.4"/></svg>
+        <sc-if value="{{ showLabels }}" hint-placeholder-val="{{ true }}"><span>デバイス</span></sc-if>
+      </div>
+      <div style="display:flex; align-items:center; gap:11px; padding:8px 10px; border-radius:8px; background:var(--primary-bg); color:var(--primary); font-weight:500; white-space:nowrap; cursor:pointer;">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" style="flex:none;"><path d="M12 3 4.5 6v5c0 4.4 3.2 7.4 7.5 9 4.3-1.6 7.5-4.6 7.5-9V6L12 3Z"/></svg>
+        <sc-if value="{{ showLabels }}" hint-placeholder-val="{{ true }}"><span>ポリシー</span></sc-if>
+      </div>
+      <div style="display:flex; align-items:center; gap:11px; padding:8px 10px; border-radius:8px; color:var(--text-secondary); white-space:nowrap; cursor:pointer;" style-hover="background:var(--surface-2); color:var(--text);">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" style="flex:none;"><rect x="3" y="3" width="7" height="7" rx="1.3"/><rect x="14" y="3" width="7" height="7" rx="1.3"/><rect x="3" y="14" width="7" height="7" rx="1.3"/><path d="M14 14h3v3M21 14v.01M17 21h.01M21 18v3h-3"/></svg>
+        <sc-if value="{{ showLabels }}" hint-placeholder-val="{{ true }}"><span>エンロール</span></sc-if>
+      </div>
+      <div style="display:flex; align-items:center; gap:11px; padding:8px 10px; border-radius:8px; color:var(--text-secondary); white-space:nowrap; cursor:pointer;" style-hover="background:var(--surface-2); color:var(--text);">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" style="flex:none;"><path d="M21 8 12 3 3 8v8l9 5 9-5V8Z"/><path d="m3 8 9 5 9-5M12 13v8"/></svg>
+        <sc-if value="{{ showLabels }}" hint-placeholder-val="{{ true }}"><span>アプリ</span></sc-if>
+      </div>
+      <div style="display:flex; align-items:center; gap:11px; padding:8px 10px; border-radius:8px; color:var(--text-secondary); white-space:nowrap; cursor:pointer;" style-hover="background:var(--surface-2); color:var(--text);">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" style="flex:none;"><path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8l-5-5Z"/><path d="M14 3v5h5"/><line x1="9" y1="13" x2="15" y2="13"/><line x1="9" y1="17" x2="15" y2="17"/></svg>
+        <sc-if value="{{ showLabels }}" hint-placeholder-val="{{ true }}"><span>監査ログ</span></sc-if>
+      </div>
+      <sc-if value="{{ canSeeAdmins }}" hint-placeholder-val="{{ true }}">
+        <div style="display:flex; align-items:center; gap:11px; padding:8px 10px; border-radius:8px; color:var(--text-secondary); white-space:nowrap; cursor:pointer;" style-hover="background:var(--surface-2); color:var(--text);">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" style="flex:none;"><circle cx="9" cy="8" r="3.1"/><path d="M3.6 20a5.4 5.4 0 0 1 10.8 0"/><path d="M16.2 5.3a3.1 3.1 0 0 1 0 5.4M20.4 20a5.4 5.4 0 0 0-3.9-5.2"/></svg>
+          <sc-if value="{{ showLabels }}" hint-placeholder-val="{{ true }}"><span>管理者</span></sc-if>
+        </div>
+      </sc-if>
+    </nav>
+    <div style="border-top:1px solid var(--border); padding:10px;">
+      <div onClick="{{ toggleCollapse }}" style="display:flex; align-items:center; gap:11px; padding:8px 10px; border-radius:8px; color:var(--text-muted); cursor:pointer; white-space:nowrap;" style-hover="background:var(--surface-2); color:var(--text);">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" style="flex:none;"><rect x="3" y="4" width="18" height="16" rx="2"/><line x1="9" y1="4" x2="9" y2="20"/></svg>
+        <sc-if value="{{ showLabels }}" hint-placeholder-val="{{ true }}"><span>サイドバーを折りたたむ</span></sc-if>
+      </div>
+    </div>
+  </aside>
+
+  <!-- ============ MAIN ============ -->
+  <main style="flex:1; min-width:0; display:flex; flex-direction:column;">
+
+    <!-- TOPBAR -->
+    <header style="height:52px; flex:none; position:sticky; top:0; z-index:30; background:color-mix(in srgb, var(--bg) 88%, transparent); backdrop-filter:blur(8px); border-bottom:1px solid var(--border); display:flex; align-items:center; gap:14px; padding:0 18px;">
+      <div style="display:flex; align-items:center; gap:8px;"><span style="font-weight:700; font-size:14.5px; white-space:nowrap;">ポリシー</span><span style="font-size:12px; color:var(--text-muted);">/policies</span></div>
+      <div style="flex:1;"></div>
+      <button onClick="{{ toggleTheme }}" title="テーマ切替" style="width:32px; height:32px; flex:none; display:flex; align-items:center; justify-content:center; border:1px solid var(--border-strong); border-radius:8px; background:var(--surface); color:var(--text-secondary); cursor:pointer;" style-hover="border-color:var(--primary); color:var(--primary);">{{ themeIcon }}</button>
+      <div style="display:flex; align-items:center; gap:6px;">
+        <span style="font-size:11px; color:var(--text-muted);">ロール</span>
+        <select value="{{ role }}" onChange="{{ onRoleChange }}" style="height:32px; padding:0 8px; border:1px solid var(--border-strong); border-radius:8px; background:var(--surface); color:var(--text); font-size:13px; font-family:inherit; cursor:pointer;">
+          <option value="SuperAdmin">SuperAdmin</option>
+          <option value="TenantAdmin">TenantAdmin</option>
+          <option value="Operator">Operator</option>
+          <option value="Viewer">Viewer</option>
+        </select>
+      </div>
+      <div style="width:1px; height:24px; background:var(--border);"></div>
+      <div style="display:flex; align-items:center; gap:9px; cursor:pointer; padding:3px 4px 3px 6px; border-radius:8px;" style-hover="background:var(--surface-2);">
+        <div style="text-align:right; line-height:1.25;"><div style="font-size:12.5px; font-weight:500;">{{ userEmail }}</div><div style="display:flex; justify-content:flex-end;"><span style="font-size:10px; font-weight:600; padding:1px 6px; border-radius:5px; background: {{ roleBadgeBg }}; color: {{ roleBadgeFg }};">{{ role }}</span></div></div>
+        <div style="width:30px; height:30px; flex:none; border-radius:50%; background:var(--primary); color:#fff; display:flex; align-items:center; justify-content:center; font-size:12px; font-weight:600;">{{ userInitials }}</div>
+      </div>
+    </header>
+
+    <div style="padding:22px 26px 80px;">
+
+      <!-- PAGE HEADER -->
+      <div style="display:flex; align-items:flex-start; justify-content:space-between; gap:16px; flex-wrap:wrap; margin-bottom:18px;">
+        <div>
+          <h1 style="margin:0 0 3px; font-size:21px; font-weight:700; letter-spacing:-.01em;">ポリシー</h1>
+          <p style="margin:0; font-size:13px; color:var(--text-secondary);">{{ tenantLabel }} の構成ポリシーと端末への適用状況。</p>
+        </div>
+        <div style="display:flex; align-items:center; gap:14px; flex-wrap:wrap;">
+          <div style="display:flex; align-items:center; gap:6px;">
+            <span style="font-size:11px; color:var(--text-muted);">状態プレビュー</span>
+            <div style="display:inline-flex; padding:2px; background:var(--surface-2); border-radius:8px; gap:2px;">
+              <button onClick="{{ setViewList }}" style="height:26px; padding:0 9px; border:none; border-radius:6px; font-family:inherit; font-size:12px; cursor:pointer; background:{{ vList.bg }}; color:{{ vList.fg }}; font-weight:{{ vList.fw }};">一覧</button>
+              <button onClick="{{ setViewEmpty }}" style="height:26px; padding:0 9px; border:none; border-radius:6px; font-family:inherit; font-size:12px; cursor:pointer; background:{{ vEmpty.bg }}; color:{{ vEmpty.fg }}; font-weight:{{ vEmpty.fw }};">空</button>
+              <button onClick="{{ setViewLoading }}" style="height:26px; padding:0 9px; border:none; border-radius:6px; font-family:inherit; font-size:12px; cursor:pointer; background:{{ vLoad.bg }}; color:{{ vLoad.fg }}; font-weight:{{ vLoad.fw }};">読込中</button>
+              <button onClick="{{ setViewError }}" style="height:26px; padding:0 9px; border:none; border-radius:6px; font-family:inherit; font-size:12px; cursor:pointer; background:{{ vError.bg }}; color:{{ vError.fg }}; font-weight:{{ vError.fw }};">エラー</button>
+            </div>
+          </div>
+          <button onClick="{{ onCreate }}" disabled="{{ editDisabled }}" title="{{ editTip }}" style="display:inline-flex; align-items:center; gap:7px; height:36px; padding:0 15px; border:none; border-radius:8px; background:var(--primary); color:var(--primary-fg); font-size:13px; font-weight:600; font-family:inherit; cursor:{{ editCursor }}; opacity:{{ editOpacity }};" style-hover="background:var(--primary-hover);">
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14M5 12h14"/></svg>新規作成
+          </button>
+        </div>
+      </div>
+
+      <!-- read-only banner for non-editors -->
+      <sc-if value="{{ readOnly }}" hint-placeholder-val="{{ false }}">
+        <div style="display:flex; align-items:center; gap:10px; padding:10px 14px; border:1px solid var(--border); background:var(--surface); border-radius:10px; margin-bottom:16px;">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="var(--text-muted)" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="flex:none;"><path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7-10-7-10-7Z"/><circle cx="12" cy="12" r="2.5"/></svg>
+          <div style="font-size:12.5px; color:var(--text-secondary);">閲覧専用モード（現在のロール: <b style="color:var(--text);">{{ role }}</b>）。ポリシーの作成・編集・割当には <b style="color:var(--text);">TenantAdmin 以上</b>の権限が必要です。</div>
+        </div>
+      </sc-if>
+
+      <!-- LOADING -->
+      <sc-if value="{{ isLoading }}" hint-placeholder-val="{{ false }}">
+        <div style="border:1px solid var(--border); border-radius:12px; background:var(--elevated); overflow:hidden;">
+          <div style="height:46px; border-bottom:1px solid var(--border); background:var(--surface);"></div>
+          <div style="padding:0 16px;">
+            <sc-for list="{{ skeletonRows }}" as="s" hint-placeholder-count="6">
+              <div style="display:flex; align-items:center; gap:18px; padding:14px 0; border-bottom:1px solid var(--border);">
+                <div style="height:11px; width:230px; border-radius:4px; background:linear-gradient(90deg,var(--surface-2) 25%,var(--border) 37%,var(--surface-2) 63%); background-size:200% 100%; animation:shimmer 1.4s ease-in-out infinite;"></div>
+                <div style="height:11px; width:50px; border-radius:4px; background:linear-gradient(90deg,var(--surface-2) 25%,var(--border) 37%,var(--surface-2) 63%); background-size:200% 100%; animation:shimmer 1.4s ease-in-out infinite;"></div>
+                <div style="height:11px; width:90px; border-radius:4px; background:linear-gradient(90deg,var(--surface-2) 25%,var(--border) 37%,var(--surface-2) 63%); background-size:200% 100%; animation:shimmer 1.4s ease-in-out infinite;"></div>
+                <div style="flex:1;"></div>
+                <div style="height:11px; width:160px; border-radius:4px; background:linear-gradient(90deg,var(--surface-2) 25%,var(--border) 37%,var(--surface-2) 63%); background-size:200% 100%; animation:shimmer 1.4s ease-in-out infinite;"></div>
+              </div>
+            </sc-for>
+          </div>
+        </div>
+      </sc-if>
+
+      <!-- ERROR -->
+      <sc-if value="{{ isError }}" hint-placeholder-val="{{ false }}">
+        <div style="border:1px solid var(--border); border-radius:12px; background:var(--elevated); padding:56px 24px; display:flex; flex-direction:column; align-items:center; text-align:center;">
+          <div style="width:52px; height:52px; border-radius:13px; background:var(--danger-bg); display:flex; align-items:center; justify-content:center; margin-bottom:14px;"><svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="var(--danger-fg)" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2 2 20h20L12 2Z"/><line x1="12" y1="9" x2="12" y2="14"/><line x1="12" y1="17.5" x2="12" y2="17.51"/></svg></div>
+          <div style="font-size:16px; font-weight:600; margin-bottom:6px;">ポリシー一覧の取得に失敗しました</div>
+          <div style="font-size:13px; color:var(--text-secondary); max-width:420px; margin-bottom:18px;">サーバーとの通信中にエラーが発生しました。時間をおいて再試行してください。</div>
+          <button onClick="{{ setViewList }}" style="display:inline-flex; align-items:center; gap:7px; height:36px; padding:0 16px; border:1px solid var(--border-strong); border-radius:8px; background:var(--bg); color:var(--text); font-size:13px; font-weight:500; font-family:inherit; cursor:pointer;" style-hover="border-color:var(--primary); color:var(--primary);"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-3-6.7"/><path d="M21 4v5h-5"/></svg>再試行</button>
+        </div>
+      </sc-if>
+
+      <!-- EMPTY -->
+      <sc-if value="{{ isEmpty }}" hint-placeholder-val="{{ false }}">
+        <div style="border:1px dashed var(--border-strong); border-radius:12px; background:var(--elevated); padding:60px 24px; display:flex; flex-direction:column; align-items:center; text-align:center;">
+          <div style="width:56px; height:56px; border-radius:14px; background:var(--primary-bg); display:flex; align-items:center; justify-content:center; margin-bottom:16px;"><svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="var(--primary)" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3 4.5 6v5c0 4.4 3.2 7.4 7.5 9 4.3-1.6 7.5-4.6 7.5-9V6L12 3Z"/></svg></div>
+          <div style="font-size:17px; font-weight:700; margin-bottom:6px;">ポリシーがありません</div>
+          <div style="font-size:13px; color:var(--text-secondary); max-width:400px; margin-bottom:20px;">構成ポリシーを作成すると、端末へポリシーを配信できるようになります。</div>
+          <button onClick="{{ onCreate }}" disabled="{{ editDisabled }}" title="{{ editTip }}" style="display:inline-flex; align-items:center; gap:7px; height:38px; padding:0 18px; border:none; border-radius:8px; background:var(--primary); color:var(--primary-fg); font-size:13.5px; font-weight:600; font-family:inherit; cursor:{{ editCursor }}; opacity:{{ editOpacity }};" style-hover="background:var(--primary-hover);"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14M5 12h14"/></svg>ポリシーを作成</button>
+        </div>
+      </sc-if>
+
+      <!-- LIST -->
+      <sc-if value="{{ isList }}" hint-placeholder-val="{{ true }}">
+        <div style="border:1px solid var(--border); border-radius:12px; background:var(--elevated); overflow:hidden; box-shadow:var(--shadow);">
+          <!-- toolbar -->
+          <div style="display:flex; align-items:center; gap:10px; padding:11px 14px; border-bottom:1px solid var(--border); flex-wrap:wrap;">
+            <div style="display:flex; align-items:center; gap:7px; height:34px; flex:1; min-width:180px; max-width:300px; padding:0 10px; border:1px solid var(--border-strong); border-radius:8px; background:var(--bg);">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="var(--text-muted)" stroke-width="2" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><path d="m20 20-3-3"/></svg>
+              <input value="{{ search }}" onInput="{{ onSearch }}" placeholder="ポリシー名で検索" style="border:none; outline:none; background:transparent; font-family:inherit; font-size:13px; color:var(--text); width:100%;" />
+            </div>
+            <div style="flex:1;"></div>
+            <span style="font-size:12px; color:var(--text-muted); white-space:nowrap;"><span style="font-variant-numeric:tabular-nums;">{{ rowCount }}</span> 件</span>
+          </div>
+          <!-- table -->
+          <div style="overflow-x:auto;">
+            <table style="width:100%; border-collapse:collapse; table-layout:fixed; font-size:13px; min-width:760px;">
+              <colgroup><col style="width:34%;" /><col style="width:12%;" /><col style="width:17%;" /><col style="width:25%;" /><col style="width:52px;" /></colgroup>
+              <thead>
+                <tr style="background:var(--surface);">
+                  <th onClick="{{ sortByName }}" style="text-align:left; font-weight:600; color:var(--text-secondary); font-size:12px; padding:10px 14px; border-bottom:1px solid var(--border); cursor:pointer; user-select:none;">ポリシー名 {{ nameArrow }}</th>
+                  <th style="text-align:left; font-weight:600; color:var(--text-secondary); font-size:12px; padding:10px 14px; border-bottom:1px solid var(--border);">バージョン</th>
+                  <th onClick="{{ sortByDevices }}" style="text-align:right; font-weight:600; color:var(--text-secondary); font-size:12px; padding:10px 14px; border-bottom:1px solid var(--border); cursor:pointer; user-select:none;">適用端末数 {{ devArrow }}</th>
+                  <th onClick="{{ sortByUpdated }}" style="text-align:left; font-weight:600; color:var(--text-secondary); font-size:12px; padding:10px 14px; border-bottom:1px solid var(--border); cursor:pointer; user-select:none;">最終更新 {{ updArrow }}</th>
+                  <th style="border-bottom:1px solid var(--border);"></th>
+                </tr>
+              </thead>
+              <tbody>
+                <sc-for list="{{ policies }}" as="pol" hint-placeholder-count="0">
+                  <tr onClick="{{ pol.onRow }}" style="border-bottom:1px solid var(--border); cursor:pointer;" style-hover="background:var(--surface);">
+                    <td style="padding:11px 14px;">
+                      <div style="display:flex; align-items:center; gap:9px; min-width:0;">
+                        <span style="width:8px; height:8px; flex:none; border-radius:3px; background:{{ pol.dot }};"></span>
+                        <div style="min-width:0;"><div style="font-weight:500; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">{{ pol.name }}</div><div style="font-size:11px; color:var(--text-muted); white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">{{ pol.kind }}</div></div>
+                      </div>
+                    </td>
+                    <td style="padding:11px 14px;"><span style="display:inline-flex; align-items:center; font-size:11.5px; font-weight:600; padding:2px 8px; border-radius:6px; background:var(--neutral-bg); color:var(--neutral-fg); border:1px solid var(--neutral-border); font-family:'IBM Plex Mono',monospace;">{{ pol.version }}</span></td>
+                    <td style="padding:11px 14px; text-align:right; font-variant-numeric:tabular-nums; color:{{ pol.devColor }}; white-space:nowrap;">{{ pol.devices }}</td>
+                    <td style="padding:11px 14px;"><div style="white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">{{ pol.updatedAt }}</div><div style="font-size:11px; color:var(--text-muted); white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">{{ pol.updatedBy }}</div></td>
+                    <td style="padding:11px 6px; text-align:center; position:relative;">
+                      <button onClick="{{ pol.onMenu }}" style="width:28px; height:28px; border:none; background:transparent; border-radius:7px; color:var(--text-muted); cursor:pointer; display:inline-flex; align-items:center; justify-content:center;" style-hover="background:var(--surface-2); color:var(--text);"><svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><circle cx="12" cy="5" r="1.7"/><circle cx="12" cy="12" r="1.7"/><circle cx="12" cy="19" r="1.7"/></svg></button>
+                      <sc-if value="{{ pol.menuOpen }}" hint-placeholder-val="{{ false }}">
+                        <div style="position:absolute; right:8px; top:36px; z-index:40; width:168px; background:var(--elevated); border:1px solid var(--border); border-radius:10px; box-shadow:var(--shadow-pop); padding:5px; text-align:left;">
+                          <div onClick="{{ pol.onRow }}" style="display:flex; align-items:center; gap:8px; padding:7px 9px; font-size:12.5px; border-radius:6px; cursor:pointer;" style-hover="background:var(--surface-2);"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7-10-7-10-7Z"/><circle cx="12" cy="12" r="2.5"/></svg>詳細を表示</div>
+                          <div style="height:1px; background:var(--border); margin:4px 0;"></div>
+                          <div onClick="{{ pol.onEdit }}" style="display:flex; align-items:center; gap:8px; padding:7px 9px; font-size:12.5px; border-radius:6px; cursor:{{ editCursor }}; color:{{ editTextColor }};" style-hover="background:var(--surface-2);" title="{{ editTip }}"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4Z"/></svg>編集</div>
+                          <div onClick="{{ pol.onDuplicate }}" style="display:flex; align-items:center; gap:8px; padding:7px 9px; font-size:12.5px; border-radius:6px; cursor:{{ editCursor }}; color:{{ editTextColor }};" style-hover="background:var(--surface-2);" title="{{ editTip }}"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15V5a2 2 0 0 1 2-2h10"/></svg>複製</div>
+                          <div onClick="{{ pol.onAssign }}" style="display:flex; align-items:center; gap:8px; padding:7px 9px; font-size:12.5px; border-radius:6px; cursor:{{ editCursor }}; color:{{ editTextColor }};" style-hover="background:var(--surface-2);" title="{{ editTip }}"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="7" y="2.5" width="10" height="19" rx="2.5"/><path d="m9 12 2 2 4-4"/></svg>端末へ割当</div>
+                        </div>
+                      </sc-if>
+                    </td>
+                  </tr>
+                </sc-for>
+              </tbody>
+            </table>
+          </div>
+          <sc-if value="{{ noResults }}" hint-placeholder-val="{{ false }}">
+            <div style="padding:48px 24px; text-align:center;"><div style="font-size:13.5px; font-weight:600; color:var(--text-secondary); margin-bottom:4px;">条件に一致するポリシーがありません</div><div style="font-size:12.5px; color:var(--text-muted);">検索語を変更してください。</div></div>
+          </sc-if>
+        </div>
+      </sc-if>
+
+    </div>
+  </main>
+
+  <!-- TOASTER -->
+  <div style="position:fixed; right:20px; bottom:20px; z-index:90; display:flex; flex-direction:column; gap:10px; width:330px; max-width:calc(100vw - 40px);">
+    <sc-for list="{{ toasts }}" as="t" hint-placeholder-count="0">
+      <div style="display:flex; align-items:flex-start; gap:11px; padding:13px 14px; background:var(--elevated); border:1px solid var(--border); border-left:3px solid {{ t.accent }}; border-radius:10px; box-shadow:var(--shadow-pop); animation:toastin .2s ease;">
+        {{ t.icon }}
+        <div style="flex:1; min-width:0;"><div style="font-size:13px; font-weight:600;">{{ t.title }}</div><div style="font-size:12px; color:var(--text-secondary); margin-top:1px;">{{ t.desc }}</div></div>
+      </div>
+    </sc-for>
+  </div>
+
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props="{&quot;$preview&quot;:{&quot;width&quot;:1320,&quot;height&quot;:900},&quot;primary&quot;:{&quot;editor&quot;:&quot;color&quot;,&quot;default&quot;:&quot;#4f46e5&quot;,&quot;tsType&quot;:&quot;string&quot;},&quot;defaultTheme&quot;:{&quot;editor&quot;:&quot;enum&quot;,&quot;default&quot;:&quot;light&quot;,&quot;options&quot;:[&quot;light&quot;,&quot;dark&quot;],&quot;tsType&quot;:&quot;'light'|'dark'&quot;},&quot;defaultRole&quot;:{&quot;editor&quot;:&quot;enum&quot;,&quot;default&quot;:&quot;TenantAdmin&quot;,&quot;options&quot;:[&quot;SuperAdmin&quot;,&quot;TenantAdmin&quot;,&quot;Operator&quot;,&quot;Viewer&quot;],&quot;tsType&quot;:&quot;string&quot;}}">
+class Component extends DCLogic {
+  state = {
+    mode: this.props.defaultTheme || 'light',
+    role: this.props.defaultRole || 'TenantAdmin',
+    collapsed: false,
+    view: 'list',
+    search: '',
+    sort: { key:'updated', dir:'desc' },
+    menuRow: null,
+    toasts: [],
+    skeletonRows: [1,2,3,4,5,6],
+  };
+
+  el(t,p,...k){ return React.createElement(t,p,...k); }
+  perms(){ const r=this.state.role; return { edit: r==='TenantAdmin'||r==='SuperAdmin', admins: r==='TenantAdmin'||r==='SuperAdmin' }; }
+
+  toggleTheme=()=>this.setState(s=>({mode:s.mode==='light'?'dark':'light'}));
+  toggleCollapse=()=>this.setState(s=>({collapsed:!s.collapsed}));
+  onRoleChange=(e)=>this.setState({role:e.target.value, menuRow:null});
+  onSearch=(e)=>this.setState({search:e.target.value});
+  setSort(key){ this.setState(s=> s.sort.key===key ? {sort:{key,dir:s.sort.dir==='asc'?'desc':'asc'}} : {sort:{key, dir: key==='name'?'asc':'desc'}}); }
+  seg(active){ return active ? {bg:'var(--elevated)',fg:'var(--primary)',fw:'600'} : {bg:'transparent',fg:'var(--text-secondary)',fw:'500'}; }
+
+  themeIconEl(){ if(this.state.mode==='light') return this.el('svg',{width:17,height:17,viewBox:'0 0 24 24',fill:'none',stroke:'currentColor',strokeWidth:1.9,strokeLinecap:'round',strokeLinejoin:'round'}, this.el('path',{key:'p',d:'M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8Z'})); return this.el('svg',{width:17,height:17,viewBox:'0 0 24 24',fill:'none',stroke:'currentColor',strokeWidth:1.9,strokeLinecap:'round',strokeLinejoin:'round'}, this.el('circle',{key:'c',cx:12,cy:12,r:4}), this.el('path',{key:'p',d:'M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4'})); }
+  toastIcon(kind){ if(kind==='pending') return this.el('div',{key:'i',style:{width:16,height:16,flex:'none',marginTop:1,borderRadius:'50%',border:'2px solid var(--border-strong)',borderTopColor:'var(--primary)',animation:'spin .7s linear infinite'}}); const color=kind==='success'?'var(--success-fg)':'var(--danger-fg)'; const path=kind==='success'?'M20 6 9 17l-5-5':'M18 6 6 18M6 6l12 12'; return this.el('svg',{key:'i',width:16,height:16,viewBox:'0 0 24 24',fill:'none',stroke:color,strokeWidth:2.4,strokeLinecap:'round',strokeLinejoin:'round',style:{flex:'none',marginTop:1}}, this.el('path',{key:'p',d:path})); }
+
+  pushToast(t){ const id=Date.now()+Math.random(); this.setState(s=>({toasts:[...s.toasts,{id,...t}]})); return id; }
+  removeToast(id){ this.setState(s=>({toasts:s.toasts.filter(t=>t.id!==id)})); }
+  flash(t,ms){ const id=this.pushToast(t); setTimeout(()=>this.removeToast(id), ms||2000); }
+
+  raw(){
+    return [
+      ['標準業務ポリシー','Fully Managed・全社', 'managed', 8, 1204, 'admin@acme.co.jp', '2025-06-18 14:20', 1718],
+      ['営業部ポリシー','Fully Managed・部署', 'managed', 5, 312, 'admin@acme.co.jp', '2025-06-20 09:05', 1813],
+      ['店頭サイネージ Kiosk','Dedicated (Kiosk)', 'kiosk', 3, 88, 'admin@acme.co.jp', '2025-05-30 11:42', 1495],
+      ['在庫スキャナ Kiosk','Dedicated (Kiosk)', 'kiosk', 2, 47, 'admin@acme.co.jp', '2025-06-10 16:30', 1610],
+      ['受付端末 Kiosk','Dedicated (Kiosk)', 'kiosk', 1, 12, 'operator@acme.co.jp', '2025-06-01 10:08', 1517],
+      ['開発検証ポリシー','Fully Managed・検証', 'managed', 12, 6, 'admin@acme.co.jp', '2025-06-21 18:55', 1850],
+      ['BYOD 制限ポリシー','Work Profile', 'byod', 4, 0, 'admin@acme.co.jp', '2025-04-15 13:00', 1200],
+    ];
+  }
+
+  renderVals(){
+    document.documentElement.setAttribute('data-theme', this.state.mode);
+    if (this.props.primary) document.documentElement.style.setProperty('--primary', this.props.primary);
+    const r=this.state.role, p=this.perms();
+    const emails={ SuperAdmin:'platform-ops@mobiguard.io', TenantAdmin:'admin@acme.co.jp', Operator:'operator@acme.co.jp', Viewer:'viewer@acme.co.jp' };
+    const roleKind={ SuperAdmin:['var(--purple-bg)','var(--purple-fg)'], TenantAdmin:['var(--info-bg)','var(--info-fg)'], Operator:['var(--success-bg)','var(--success-fg)'], Viewer:['var(--neutral-bg)','var(--neutral-fg)'] }[r];
+
+    const kindDot={ managed:'var(--info)', kiosk:'var(--purple)', byod:'var(--success)' };
+
+    let list=this.raw().map(a=>({ name:a[0], kind:a[1], type:a[2], version:'v'+a[3], devices:a[4], by:a[5], at:a[6], ts:a[7] }));
+    const q=this.state.search.trim().toLowerCase();
+    if (q) list=list.filter(d=>d.name.toLowerCase().includes(q));
+    const k=this.state.sort.key, dir=this.state.sort.dir, mul=dir==='asc'?1:-1;
+    list.sort((a,b)=>{
+      if(k==='name') return String(a.name).localeCompare(String(b.name),'ja')*mul;
+      if(k==='devices') return (a.devices-b.devices)*mul;
+      return (a.ts-b.ts)*mul;
+    });
+
+    const editTip = p.edit ? '' : '作成・編集・割当には TenantAdmin 以上の権限が必要です';
+    const policies=list.map((d,i)=>({
+      name:d.name, kind:d.kind, version:d.version,
+      devices: d.devices.toLocaleString()+' 台',
+      devColor: d.devices===0 ? 'var(--text-muted)' : 'var(--text-secondary)',
+      dot: kindDot[d.type] || 'var(--neutral)',
+      updatedAt:d.at, updatedBy:d.by,
+      menuOpen:this.state.menuRow===i,
+      onMenu:(e)=>{ e.stopPropagation(); this.setState(s=>({menuRow:s.menuRow===i?null:i})); },
+      onRow:(e)=>{ if(e&&e.stopPropagation)e.stopPropagation(); this.setState({menuRow:null}); this.flash({kind:'pending',title:'詳細を開く — '+d.name,desc:'/policies/:id へ遷移'},1600); },
+      onEdit:()=>{ if(p.edit){ this.setState({menuRow:null}); this.flash({kind:'pending',title:'編集 — '+d.name,desc:'ポリシーエディタへ遷移'},1600);} },
+      onDuplicate:()=>{ if(p.edit){ this.setState({menuRow:null}); this.flash({kind:'success',title:'ポリシーを複製しました',desc:d.name+' のコピーを作成'},2400);} },
+      onAssign:()=>{ if(p.edit){ this.setState({menuRow:null}); this.flash({kind:'pending',title:'端末へ割当 — '+d.name,desc:'割当ダイアログを開く'},1600);} },
+    }));
+
+    const arrow=dir==='asc'?'↑':'↓';
+    return {
+      mode:this.state.mode, role:r, userEmail:emails[r], userInitials:r.slice(0,2).toUpperCase(),
+      roleBadgeBg:roleKind[0], roleBadgeFg:roleKind[1], canSeeAdmins:p.admins,
+      tenantLabel:'Acme 株式会社', sidebarWidth:this.state.collapsed?'64px':'240px', showLabels:!this.state.collapsed,
+      themeIcon:this.themeIconEl(), toggleTheme:this.toggleTheme, toggleCollapse:this.toggleCollapse, onRoleChange:this.onRoleChange,
+
+      isList:this.state.view==='list', isEmpty:this.state.view==='empty', isLoading:this.state.view==='loading', isError:this.state.view==='error',
+      setViewList:()=>this.setState({view:'list'}), setViewEmpty:()=>this.setState({view:'empty'}), setViewLoading:()=>this.setState({view:'loading'}), setViewError:()=>this.setState({view:'error'}),
+      vList:this.seg(this.state.view==='list'), vEmpty:this.seg(this.state.view==='empty'), vLoad:this.seg(this.state.view==='loading'), vError:this.seg(this.state.view==='error'),
+      skeletonRows:this.state.skeletonRows,
+
+      readOnly:!p.edit,
+      editDisabled:!p.edit, editTip, editCursor:p.edit?'pointer':'not-allowed', editTextColor:p.edit?'var(--text)':'var(--text-muted)', editOpacity:p.edit?'1':'.55',
+      onCreate:()=>{ if(p.edit) this.flash({kind:'pending',title:'新規ポリシーを作成',desc:'ポリシーエディタへ遷移'},1600); },
+
+      search:this.state.search, onSearch:this.onSearch, rowCount:list.length, noResults:list.length===0,
+      policies,
+      nameArrow:k==='name'?arrow:'', devArrow:k==='devices'?arrow:'', updArrow:k==='updated'?arrow:'',
+      sortByName:()=>this.setSort('name'), sortByDevices:()=>this.setSort('devices'), sortByUpdated:()=>this.setSort('updated'),
+
+      toasts:this.state.toasts.map(t=>({ ...t, accent:t.kind==='success'?'var(--success)':t.kind==='error'?'var(--danger)':'var(--primary)', icon:this.toastIcon(t.kind) })),
+    };
+  }
+}
+</script>
+</body>
+</html>

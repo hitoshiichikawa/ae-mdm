@@ -1,0 +1,368 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Noto+Sans+JP:wght@400;500;700&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+  :root{
+    --bg:#ffffff; --surface:#f7f8fa; --surface-2:#eef0f4; --elevated:#ffffff;
+    --border:#e4e7ec; --border-strong:#d3d8e0;
+    --text:#1b1f27; --text-secondary:#5a616e; --text-muted:#8a909c;
+    --primary:#4f46e5; --primary-hover:#4338ca; --primary-fg:#ffffff; --primary-bg:#eef0fe; --primary-border:#c9cdfa;
+    --success:#16a34a; --success-bg:#e8f6ed; --success-fg:#15803d; --success-border:#bfe6cc;
+    --danger:#dc2626; --danger-bg:#fdeaea; --danger-fg:#b91c1c; --danger-border:#f5c6c6;
+    --warning:#d97706; --warning-bg:#fdf2e0; --warning-fg:#b45309; --warning-border:#f2dbab;
+    --neutral:#6b7280; --neutral-bg:#eef0f3; --neutral-fg:#4b5563; --neutral-border:#dde1e7;
+    --info:#2563eb; --info-bg:#e8f0fe; --info-fg:#1d4ed8; --info-border:#c3d6fb;
+    --purple:#7c3aed; --purple-bg:#f1ebfd; --purple-fg:#6d28d9; --purple-border:#ddcdfa;
+    --pale-bg:#f3f4f6; --pale-fg:#9ca3af; --pale-border:#e6e8ec;
+    --shadow:0 1px 2px rgba(16,20,30,.04), 0 1px 3px rgba(16,20,30,.06);
+    --shadow-pop:0 4px 16px rgba(16,20,30,.12), 0 1px 3px rgba(16,20,30,.08);
+  }
+  :root[data-theme="dark"]{
+    --bg:#0d1017; --surface:#151922; --surface-2:#1b212c; --elevated:#171c25;
+    --border:#262d3a; --border-strong:#323a49;
+    --text:#e7eaf0; --text-secondary:#9aa2b1; --text-muted:#6b7480;
+    --primary:#6366f1; --primary-hover:#7c80f7; --primary-fg:#ffffff; --primary-bg:rgba(99,102,241,.16); --primary-border:rgba(99,102,241,.42);
+    --success:#22c55e; --success-bg:rgba(34,197,94,.14); --success-fg:#4ade80; --success-border:rgba(34,197,94,.32);
+    --danger:#ef4444; --danger-bg:rgba(239,68,68,.14); --danger-fg:#f87171; --danger-border:rgba(239,68,68,.34);
+    --warning:#f59e0b; --warning-bg:rgba(245,158,11,.14); --warning-fg:#fbbf24; --warning-border:rgba(245,158,11,.32);
+    --neutral:#94a3b8; --neutral-bg:rgba(148,163,184,.14); --neutral-fg:#cbd5e1; --neutral-border:rgba(148,163,184,.26);
+    --info:#3b82f6; --info-bg:rgba(59,130,246,.16); --info-fg:#60a5fa; --info-border:rgba(59,130,246,.34);
+    --purple:#8b5cf6; --purple-bg:rgba(139,92,246,.16); --purple-fg:#a78bfa; --purple-border:rgba(139,92,246,.34);
+    --pale-bg:rgba(148,163,184,.07); --pale-fg:#7b8494; --pale-border:rgba(148,163,184,.16);
+    --shadow:0 1px 2px rgba(0,0,0,.4); --shadow-pop:0 8px 28px rgba(0,0,0,.55);
+  }
+  *{box-sizing:border-box;}
+  body{margin:0; background:var(--bg); color:var(--text); font-family:"Noto Sans JP", system-ui, sans-serif; font-size:14px; line-height:1.45; -webkit-font-smoothing:antialiased; font-feature-settings:"palt"; transition:background .18s ease, color .18s ease;}
+  ::selection{background:var(--primary-bg);}
+  @keyframes shimmer{0%{background-position:-180% 0;}100%{background-position:180% 0;}}
+  @keyframes spin{to{transform:rotate(360deg);}}
+  @keyframes toastin{from{opacity:0; transform:translateY(8px) scale(.98);}to{opacity:1; transform:none;}}
+</style>
+</helmet>
+
+<div style="display:flex; min-height:100vh; background:var(--bg);">
+
+  <!-- ============ SIDEBAR ============ -->
+  <aside style="width: {{ sidebarWidth }}; flex:none; background:var(--surface); border-right:1px solid var(--border); display:flex; flex-direction:column; position:sticky; top:0; height:100vh; transition:width .16s ease;">
+    <div style="height:52px; display:flex; align-items:center; gap:10px; padding:0 16px; border-bottom:1px solid var(--border);">
+      <div style="width:26px; height:26px; flex:none; border-radius:7px; background:var(--primary); display:flex; align-items:center; justify-content:center; color:#fff; font-weight:700; font-size:13px;">M</div>
+      <sc-if value="{{ showLabels }}" hint-placeholder-val="{{ true }}"><div style="font-weight:700; font-size:14px; white-space:nowrap;">MobiGuard</div></sc-if>
+    </div>
+    <nav style="flex:1; padding:10px 10px; display:flex; flex-direction:column; gap:2px; overflow-y:auto;">
+      <div style="display:flex; align-items:center; gap:11px; padding:8px 10px; border-radius:8px; background:var(--primary-bg); color:var(--primary); font-weight:500; white-space:nowrap; cursor:pointer;">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" style="flex:none;"><rect x="3" y="3" width="7" height="7" rx="1.3"/><rect x="14" y="3" width="7" height="7" rx="1.3"/><rect x="14" y="14" width="7" height="7" rx="1.3"/><rect x="3" y="14" width="7" height="7" rx="1.3"/></svg>
+        <sc-if value="{{ showLabels }}" hint-placeholder-val="{{ true }}"><span>ダッシュボード</span></sc-if>
+      </div>
+      <div style="display:flex; align-items:center; gap:11px; padding:8px 10px; border-radius:8px; color:var(--text-secondary); white-space:nowrap; cursor:pointer;" style-hover="background:var(--surface-2); color:var(--text);">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" style="flex:none;"><rect x="7" y="2.5" width="10" height="19" rx="2.5"/><line x1="10.5" y1="18.4" x2="13.5" y2="18.4"/></svg>
+        <sc-if value="{{ showLabels }}" hint-placeholder-val="{{ true }}"><span>デバイス</span></sc-if>
+      </div>
+      <div style="display:flex; align-items:center; gap:11px; padding:8px 10px; border-radius:8px; color:var(--text-secondary); white-space:nowrap; cursor:pointer;" style-hover="background:var(--surface-2); color:var(--text);">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" style="flex:none;"><path d="M12 3 4.5 6v5c0 4.4 3.2 7.4 7.5 9 4.3-1.6 7.5-4.6 7.5-9V6L12 3Z"/></svg>
+        <sc-if value="{{ showLabels }}" hint-placeholder-val="{{ true }}"><span>ポリシー</span></sc-if>
+      </div>
+      <div style="display:flex; align-items:center; gap:11px; padding:8px 10px; border-radius:8px; color:var(--text-secondary); white-space:nowrap; cursor:pointer;" style-hover="background:var(--surface-2); color:var(--text);">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" style="flex:none;"><rect x="3" y="3" width="7" height="7" rx="1.3"/><rect x="14" y="3" width="7" height="7" rx="1.3"/><rect x="3" y="14" width="7" height="7" rx="1.3"/><path d="M14 14h3v3M21 14v.01M17 21h.01M21 18v3h-3"/></svg>
+        <sc-if value="{{ showLabels }}" hint-placeholder-val="{{ true }}"><span>エンロール</span></sc-if>
+      </div>
+      <div style="display:flex; align-items:center; gap:11px; padding:8px 10px; border-radius:8px; color:var(--text-secondary); white-space:nowrap; cursor:pointer;" style-hover="background:var(--surface-2); color:var(--text);">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" style="flex:none;"><path d="M21 8 12 3 3 8v8l9 5 9-5V8Z"/><path d="m3 8 9 5 9-5M12 13v8"/></svg>
+        <sc-if value="{{ showLabels }}" hint-placeholder-val="{{ true }}"><span>アプリ</span></sc-if>
+      </div>
+      <div style="display:flex; align-items:center; gap:11px; padding:8px 10px; border-radius:8px; color:var(--text-secondary); white-space:nowrap; cursor:pointer;" style-hover="background:var(--surface-2); color:var(--text);">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" style="flex:none;"><path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8l-5-5Z"/><path d="M14 3v5h5"/><line x1="9" y1="13" x2="15" y2="13"/><line x1="9" y1="17" x2="15" y2="17"/></svg>
+        <sc-if value="{{ showLabels }}" hint-placeholder-val="{{ true }}"><span>監査ログ</span></sc-if>
+      </div>
+      <sc-if value="{{ canSeeAdmins }}" hint-placeholder-val="{{ true }}">
+        <div style="display:flex; align-items:center; gap:11px; padding:8px 10px; border-radius:8px; color:var(--text-secondary); white-space:nowrap; cursor:pointer;" style-hover="background:var(--surface-2); color:var(--text);">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" style="flex:none;"><circle cx="9" cy="8" r="3.1"/><path d="M3.6 20a5.4 5.4 0 0 1 10.8 0"/><path d="M16.2 5.3a3.1 3.1 0 0 1 0 5.4M20.4 20a5.4 5.4 0 0 0-3.9-5.2"/></svg>
+          <sc-if value="{{ showLabels }}" hint-placeholder-val="{{ true }}"><span>管理者</span></sc-if>
+        </div>
+      </sc-if>
+    </nav>
+    <div style="border-top:1px solid var(--border); padding:10px;">
+      <div onClick="{{ toggleCollapse }}" style="display:flex; align-items:center; gap:11px; padding:8px 10px; border-radius:8px; color:var(--text-muted); cursor:pointer; white-space:nowrap;" style-hover="background:var(--surface-2); color:var(--text);">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" style="flex:none;"><rect x="3" y="4" width="18" height="16" rx="2"/><line x1="9" y1="4" x2="9" y2="20"/></svg>
+        <sc-if value="{{ showLabels }}" hint-placeholder-val="{{ true }}"><span>サイドバーを折りたたむ</span></sc-if>
+      </div>
+    </div>
+  </aside>
+
+  <!-- ============ MAIN ============ -->
+  <main style="flex:1; min-width:0; display:flex; flex-direction:column;">
+
+    <!-- TOPBAR -->
+    <header style="height:52px; flex:none; position:sticky; top:0; z-index:30; background:color-mix(in srgb, var(--bg) 88%, transparent); backdrop-filter:blur(8px); border-bottom:1px solid var(--border); display:flex; align-items:center; gap:14px; padding:0 18px;">
+      <div style="display:flex; align-items:center; gap:8px;"><span style="font-weight:700; font-size:14.5px; white-space:nowrap;">ダッシュボード</span></div>
+      <div style="flex:1;"></div>
+      <button onClick="{{ toggleTheme }}" title="テーマ切替" style="width:32px; height:32px; flex:none; display:flex; align-items:center; justify-content:center; border:1px solid var(--border-strong); border-radius:8px; background:var(--surface); color:var(--text-secondary); cursor:pointer;" style-hover="border-color:var(--primary); color:var(--primary);">{{ themeIcon }}</button>
+      <div style="display:flex; align-items:center; gap:6px;">
+        <span style="font-size:11px; color:var(--text-muted);">ロール</span>
+        <select value="{{ role }}" onChange="{{ onRoleChange }}" style="height:32px; padding:0 8px; border:1px solid var(--border-strong); border-radius:8px; background:var(--surface); color:var(--text); font-size:13px; font-family:inherit; cursor:pointer;">
+          <option value="SuperAdmin">SuperAdmin</option>
+          <option value="TenantAdmin">TenantAdmin</option>
+          <option value="Operator">Operator</option>
+          <option value="Viewer">Viewer</option>
+        </select>
+      </div>
+      <div style="width:1px; height:24px; background:var(--border);"></div>
+      <div style="display:flex; align-items:center; gap:9px; cursor:pointer; padding:3px 4px 3px 6px; border-radius:8px;" style-hover="background:var(--surface-2);">
+        <div style="text-align:right; line-height:1.25;"><div style="font-size:12.5px; font-weight:500;">{{ userEmail }}</div><div style="display:flex; justify-content:flex-end;"><span style="font-size:10px; font-weight:600; padding:1px 6px; border-radius:5px; background: {{ roleBadgeBg }}; color: {{ roleBadgeFg }};">{{ role }}</span></div></div>
+        <div style="width:30px; height:30px; flex:none; border-radius:50%; background:var(--primary); color:#fff; display:flex; align-items:center; justify-content:center; font-size:12px; font-weight:600;">{{ userInitials }}</div>
+      </div>
+    </header>
+
+    <div style="padding:22px 26px 80px; max-width:1180px; width:100%;">
+
+      <!-- header -->
+      <div style="display:flex; align-items:flex-start; justify-content:space-between; gap:16px; flex-wrap:wrap; margin-bottom:18px;">
+        <div>
+          <h1 style="margin:0 0 3px; font-size:21px; font-weight:700; letter-spacing:-.01em;">{{ greeting }}</h1>
+          <p style="margin:0; font-size:13px; color:var(--text-secondary);">{{ tenantLabel }} の概況 · {{ today }} 時点</p>
+        </div>
+        <div style="display:flex; align-items:center; gap:6px;">
+          <span style="font-size:11px; color:var(--text-muted);">状態プレビュー</span>
+          <div style="display:inline-flex; padding:2px; background:var(--surface-2); border-radius:8px; gap:2px;">
+            <button onClick="{{ setNormal }}" style="height:26px; padding:0 9px; border:none; border-radius:6px; font-family:inherit; font-size:12px; cursor:pointer; background:{{ vNormal.bg }}; color:{{ vNormal.fg }}; font-weight:{{ vNormal.fw }};">通常</button>
+            <button onClick="{{ setEmpty }}" style="height:26px; padding:0 9px; border:none; border-radius:6px; font-family:inherit; font-size:12px; cursor:pointer; background:{{ vEmpty.bg }}; color:{{ vEmpty.fg }}; font-weight:{{ vEmpty.fw }};">空</button>
+            <button onClick="{{ setLoading }}" style="height:26px; padding:0 9px; border:none; border-radius:6px; font-family:inherit; font-size:12px; cursor:pointer; background:{{ vLoad.bg }}; color:{{ vLoad.fg }}; font-weight:{{ vLoad.fw }};">読込中</button>
+            <button onClick="{{ setError }}" style="height:26px; padding:0 9px; border:none; border-radius:6px; font-family:inherit; font-size:12px; cursor:pointer; background:{{ vError.bg }}; color:{{ vError.fg }}; font-weight:{{ vError.fw }};">エラー</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- LOADING -->
+      <sc-if value="{{ isLoading }}" hint-placeholder-val="{{ false }}">
+        <div>
+          <div style="display:grid; grid-template-columns:repeat(4,1fr); gap:14px; margin-bottom:16px;">
+            <div style="border:1px solid var(--border); border-radius:12px; padding:16px; background:var(--elevated); height:92px;"><div style="height:10px; width:50%; border-radius:4px; background:linear-gradient(90deg,var(--surface-2) 25%,var(--border) 37%,var(--surface-2) 63%); background-size:200% 100%; animation:shimmer 1.4s ease-in-out infinite; margin-bottom:16px;"></div><div style="height:22px; width:40%; border-radius:5px; background:linear-gradient(90deg,var(--surface-2) 25%,var(--border) 37%,var(--surface-2) 63%); background-size:200% 100%; animation:shimmer 1.4s ease-in-out infinite;"></div></div>
+            <div style="border:1px solid var(--border); border-radius:12px; padding:16px; background:var(--elevated); height:92px;"><div style="height:10px; width:50%; border-radius:4px; background:linear-gradient(90deg,var(--surface-2) 25%,var(--border) 37%,var(--surface-2) 63%); background-size:200% 100%; animation:shimmer 1.4s ease-in-out infinite; margin-bottom:16px;"></div><div style="height:22px; width:40%; border-radius:5px; background:linear-gradient(90deg,var(--surface-2) 25%,var(--border) 37%,var(--surface-2) 63%); background-size:200% 100%; animation:shimmer 1.4s ease-in-out infinite;"></div></div>
+            <div style="border:1px solid var(--border); border-radius:12px; padding:16px; background:var(--elevated); height:92px;"><div style="height:10px; width:50%; border-radius:4px; background:linear-gradient(90deg,var(--surface-2) 25%,var(--border) 37%,var(--surface-2) 63%); background-size:200% 100%; animation:shimmer 1.4s ease-in-out infinite; margin-bottom:16px;"></div><div style="height:22px; width:40%; border-radius:5px; background:linear-gradient(90deg,var(--surface-2) 25%,var(--border) 37%,var(--surface-2) 63%); background-size:200% 100%; animation:shimmer 1.4s ease-in-out infinite;"></div></div>
+            <div style="border:1px solid var(--border); border-radius:12px; padding:16px; background:var(--elevated); height:92px;"><div style="height:10px; width:50%; border-radius:4px; background:linear-gradient(90deg,var(--surface-2) 25%,var(--border) 37%,var(--surface-2) 63%); background-size:200% 100%; animation:shimmer 1.4s ease-in-out infinite; margin-bottom:16px;"></div><div style="height:22px; width:40%; border-radius:5px; background:linear-gradient(90deg,var(--surface-2) 25%,var(--border) 37%,var(--surface-2) 63%); background-size:200% 100%; animation:shimmer 1.4s ease-in-out infinite;"></div></div>
+          </div>
+          <div style="display:grid; grid-template-columns:1fr 1fr; gap:16px;">
+            <div style="border:1px solid var(--border); border-radius:12px; background:var(--elevated); height:220px;"></div>
+            <div style="border:1px solid var(--border); border-radius:12px; background:var(--elevated); height:220px;"></div>
+          </div>
+        </div>
+      </sc-if>
+
+      <!-- ERROR -->
+      <sc-if value="{{ isError }}" hint-placeholder-val="{{ false }}">
+        <div style="border:1px solid var(--border); border-radius:12px; background:var(--elevated); padding:60px 24px; display:flex; flex-direction:column; align-items:center; text-align:center;">
+          <div style="width:52px; height:52px; border-radius:13px; background:var(--danger-bg); display:flex; align-items:center; justify-content:center; margin-bottom:14px;"><svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="var(--danger-fg)" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2 2 20h20L12 2Z"/><line x1="12" y1="9" x2="12" y2="14"/><line x1="12" y1="17.5" x2="12" y2="17.51"/></svg></div>
+          <div style="font-size:16px; font-weight:600; margin-bottom:6px;">概況データの取得に失敗しました</div>
+          <div style="font-size:13px; color:var(--text-secondary); max-width:420px; margin-bottom:18px;">一部の集計が読み込めませんでした。時間をおいて再試行してください。</div>
+          <button onClick="{{ setNormal }}" style="display:inline-flex; align-items:center; gap:7px; height:36px; padding:0 16px; border:1px solid var(--border-strong); border-radius:8px; background:var(--bg); color:var(--text); font-size:13px; font-weight:500; font-family:inherit; cursor:pointer;" style-hover="border-color:var(--primary); color:var(--primary);"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-3-6.7"/><path d="M21 4v5h-5"/></svg>再試行</button>
+        </div>
+      </sc-if>
+
+      <!-- EMPTY -->
+      <sc-if value="{{ isEmpty }}" hint-placeholder-val="{{ false }}">
+        <div style="border:1px dashed var(--border-strong); border-radius:12px; background:var(--elevated); padding:64px 24px; display:flex; flex-direction:column; align-items:center; text-align:center;">
+          <div style="width:56px; height:56px; border-radius:14px; background:var(--primary-bg); display:flex; align-items:center; justify-content:center; margin-bottom:16px;"><svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="var(--primary)" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><rect x="7" y="2.5" width="10" height="19" rx="2.5"/><line x1="10.5" y1="18.4" x2="13.5" y2="18.4"/></svg></div>
+          <div style="font-size:17px; font-weight:700; margin-bottom:6px;">ようこそ、MobiGuard へ</div>
+          <div style="font-size:13px; color:var(--text-secondary); max-width:400px; margin-bottom:20px;">まだ管理対象の端末がありません。最初の端末をエンロールすると、ここにコンプライアンスや稼働状況のサマリが表示されます。</div>
+          <button onClick="{{ drillEnroll }}" style="display:inline-flex; align-items:center; gap:7px; height:38px; padding:0 18px; border:none; border-radius:8px; background:var(--primary); color:var(--primary-fg); font-size:13.5px; font-weight:600; font-family:inherit; cursor:pointer;" style-hover="background:var(--primary-hover);"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="4" width="6" height="6" rx="1"/><rect x="14" y="4" width="6" height="6" rx="1"/><rect x="4" y="14" width="6" height="6" rx="1"/><path d="M14 14h3v3M21 14v.01M17 21h.01M21 18v3"/></svg>最初の端末をエンロール</button>
+        </div>
+      </sc-if>
+
+      <!-- NORMAL -->
+      <sc-if value="{{ isNormal }}" hint-placeholder-val="{{ true }}">
+        <div>
+          <!-- METRICS -->
+          <div style="display:grid; grid-template-columns:repeat(4, 1fr); gap:14px; margin-bottom:16px;">
+            <div onClick="{{ drillDevices }}" style="border:1px solid var(--border); border-radius:12px; padding:15px 16px; background:var(--elevated); box-shadow:var(--shadow); cursor:pointer;" style-hover="border-color:var(--border-strong);">
+              <div style="font-size:12px; color:var(--text-secondary); margin-bottom:7px;">総端末数</div>
+              <div style="font-size:25px; font-weight:700; letter-spacing:-.01em; font-variant-numeric:tabular-nums;">2,481</div>
+              <div style="margin-top:5px; font-size:11.5px; color:var(--success-fg); font-weight:500;">+38 <span style="color:var(--text-muted); font-weight:400;">（7日）</span></div>
+            </div>
+            <div onClick="{{ drillDevices }}" style="border:1px solid var(--border); border-radius:12px; padding:15px 16px; background:var(--elevated); box-shadow:var(--shadow); cursor:pointer;" style-hover="border-color:var(--border-strong);">
+              <div style="font-size:12px; color:var(--text-secondary); margin-bottom:7px;">準拠率</div>
+              <div style="font-size:25px; font-weight:700; letter-spacing:-.01em; font-variant-numeric:tabular-nums;">94.2<span style="font-size:14px; color:var(--text-muted);">%</span></div>
+              <div style="margin-top:9px; height:5px; border-radius:3px; background:var(--surface-2); overflow:hidden;"><div style="width:94%; height:100%; background:var(--success);"></div></div>
+            </div>
+            <div onClick="{{ drillNoncompliant }}" style="border:1px solid var(--border); border-radius:12px; padding:15px 16px; background:var(--elevated); box-shadow:var(--shadow); cursor:pointer;" style-hover="border-color:var(--danger-border);">
+              <div style="font-size:12px; color:var(--text-secondary); margin-bottom:7px; display:flex; align-items:center; gap:6px;"><span style="width:7px;height:7px;border-radius:50%;background:var(--danger);"></span>非準拠</div>
+              <div style="font-size:25px; font-weight:700; letter-spacing:-.01em; font-variant-numeric:tabular-nums; color:var(--danger-fg);">78</div>
+              <div style="margin-top:5px; font-size:11.5px; color:var(--danger-fg); font-weight:500;">+11 <span style="color:var(--text-muted); font-weight:400;">要対応</span></div>
+            </div>
+            <div onClick="{{ drillDelayed }}" style="border:1px solid var(--border); border-radius:12px; padding:15px 16px; background:var(--elevated); box-shadow:var(--shadow); cursor:pointer;" style-hover="border-color:var(--warning-border);">
+              <div style="font-size:12px; color:var(--text-secondary); margin-bottom:7px; display:flex; align-items:center; gap:6px;"><span style="width:7px;height:7px;border-radius:50%;background:var(--warning);"></span>同期遅延</div>
+              <div style="font-size:25px; font-weight:700; letter-spacing:-.01em; font-variant-numeric:tabular-nums; color:var(--warning-fg);">23</div>
+              <div style="margin-top:5px; font-size:11.5px; color:var(--text-muted);">24時間以上未チェックイン</div>
+            </div>
+          </div>
+
+          <!-- ROW: compliance breakdown + enrollment trend -->
+          <div style="display:grid; grid-template-columns:1.4fr 1fr; gap:16px; margin-bottom:16px;">
+            <!-- compliance -->
+            <div style="border:1px solid var(--border); border-radius:12px; background:var(--elevated); padding:16px 18px; box-shadow:var(--shadow);">
+              <div style="font-size:13px; font-weight:700; margin-bottom:14px;">コンプライアンス内訳</div>
+              <div style="display:flex; height:12px; border-radius:6px; overflow:hidden; margin-bottom:16px;">
+                <div style="width:93.9%; background:var(--success);"></div>
+                <div style="width:3.1%; background:var(--danger);"></div>
+                <div style="width:2.1%; background:var(--neutral);"></div>
+                <div style="width:0.9%; background:var(--pale-fg);"></div>
+              </div>
+              <div style="display:grid; grid-template-columns:1fr 1fr; gap:9px 18px;">
+                <div onClick="{{ drillCompliant }}" style="display:flex; align-items:center; justify-content:space-between; gap:8px; cursor:pointer; padding:3px 0;"><span style="display:flex; align-items:center; gap:7px; font-size:12.5px;"><span style="width:8px; height:8px; border-radius:3px; background:var(--success);"></span>準拠</span><span style="font-size:12.5px; font-weight:600; font-variant-numeric:tabular-nums;">2,330</span></div>
+                <div onClick="{{ drillNoncompliant }}" style="display:flex; align-items:center; justify-content:space-between; gap:8px; cursor:pointer; padding:3px 0;"><span style="display:flex; align-items:center; gap:7px; font-size:12.5px;"><span style="width:8px; height:8px; border-radius:3px; background:var(--danger);"></span>非準拠</span><span style="font-size:12.5px; font-weight:600; font-variant-numeric:tabular-nums;">78</span></div>
+                <div style="display:flex; align-items:center; justify-content:space-between; gap:8px; padding:3px 0;"><span style="display:flex; align-items:center; gap:7px; font-size:12.5px;"><span style="width:8px; height:8px; border-radius:3px; background:var(--neutral);"></span>未確認</span><span style="font-size:12.5px; font-weight:600; font-variant-numeric:tabular-nums;">51</span></div>
+                <div style="display:flex; align-items:center; justify-content:space-between; gap:8px; padding:3px 0;"><span style="display:flex; align-items:center; gap:7px; font-size:12.5px;"><span style="width:8px; height:8px; border-radius:3px; background:var(--pale-fg);"></span>サポート対象外</span><span style="font-size:12.5px; font-weight:600; font-variant-numeric:tabular-nums;">22</span></div>
+              </div>
+              <div style="border-top:1px solid var(--border); margin-top:14px; padding-top:12px; display:flex; gap:18px;">
+                <div><div style="font-size:11px; color:var(--text-muted); margin-bottom:2px;">Fully Managed</div><div style="font-size:14px; font-weight:600; font-variant-numeric:tabular-nums;">2,210 <span style="font-size:11px; color:var(--text-muted); font-weight:400;">台</span></div></div>
+                <div><div style="font-size:11px; color:var(--text-muted); margin-bottom:2px;">Dedicated (Kiosk)</div><div style="font-size:14px; font-weight:600; font-variant-numeric:tabular-nums;">271 <span style="font-size:11px; color:var(--text-muted); font-weight:400;">台</span></div></div>
+              </div>
+            </div>
+            <!-- enrollment trend -->
+            <div style="border:1px solid var(--border); border-radius:12px; background:var(--elevated); padding:16px 18px; box-shadow:var(--shadow);">
+              <div style="display:flex; align-items:baseline; justify-content:space-between; margin-bottom:16px;"><div style="font-size:13px; font-weight:700;">エンロール推移</div><div style="font-size:11.5px; color:var(--text-muted);">過去 7 日 · 計 47 台</div></div>
+              <div style="display:flex; align-items:flex-end; justify-content:space-between; gap:8px; height:110px;">
+                <sc-for list="{{ enrollBars }}" as="b" hint-placeholder-count="7">
+                  <div style="flex:1; display:flex; flex-direction:column; align-items:center; gap:6px; height:100%; justify-content:flex-end;">
+                    <div style="font-size:10px; color:var(--text-muted); font-variant-numeric:tabular-nums;">{{ b.value }}</div>
+                    <div style="width:100%; max-width:26px; height:{{ b.h }}; background:{{ b.color }}; border-radius:5px 5px 2px 2px;"></div>
+                    <div style="font-size:10px; color:var(--text-muted);">{{ b.label }}</div>
+                  </div>
+                </sc-for>
+              </div>
+            </div>
+          </div>
+
+          <!-- ROW: needs-attention + recent activity -->
+          <div style="display:grid; grid-template-columns:1.4fr 1fr; gap:16px;">
+            <!-- needs attention -->
+            <div style="border:1px solid var(--border); border-radius:12px; background:var(--elevated); overflow:hidden; box-shadow:var(--shadow);">
+              <div style="display:flex; align-items:center; justify-content:space-between; padding:14px 16px 12px;">
+                <div style="font-size:13px; font-weight:700;">要対応の端末</div>
+                <span onClick="{{ drillNoncompliant }}" style="font-size:12px; color:var(--primary); cursor:pointer;" style-hover="text-decoration:underline;">すべて表示 →</span>
+              </div>
+              <sc-for list="{{ attention }}" as="d" hint-placeholder-count="4">
+                <div onClick="{{ d.onClick }}" style="display:flex; align-items:center; gap:12px; padding:11px 16px; border-top:1px solid var(--border); cursor:pointer;" style-hover="background:var(--surface);">
+                  <div style="width:30px; height:30px; flex:none; border-radius:8px; background:var(--surface-2); display:flex; align-items:center; justify-content:center;"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="var(--text-muted)" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="7" y="2.5" width="10" height="19" rx="2.5"/></svg></div>
+                  <div style="min-width:0; flex:1;"><div style="font-size:13px; font-weight:500; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">{{ d.name }}</div><div style="font-size:11px; color:var(--text-muted); white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">{{ d.user }}</div></div>
+                  <div style="display:flex; gap:5px; flex-wrap:wrap; justify-content:flex-end;">{{ d.badges }}</div>
+                </div>
+              </sc-for>
+            </div>
+            <!-- recent activity -->
+            <div style="border:1px solid var(--border); border-radius:12px; background:var(--elevated); overflow:hidden; box-shadow:var(--shadow);">
+              <div style="display:flex; align-items:center; justify-content:space-between; padding:14px 16px 12px;">
+                <div style="font-size:13px; font-weight:700;">最近のアクティビティ</div>
+                <span onClick="{{ drillAudit }}" style="font-size:12px; color:var(--primary); cursor:pointer;" style-hover="text-decoration:underline;">監査ログ →</span>
+              </div>
+              <sc-for list="{{ activity }}" as="a" hint-placeholder-count="5">
+                <div style="display:flex; align-items:flex-start; gap:10px; padding:10px 16px; border-top:1px solid var(--border);">
+                  <span style="width:7px; height:7px; border-radius:50%; background:{{ a.dot }}; margin-top:5px; flex:none;"></span>
+                  <div style="min-width:0; flex:1;"><div style="font-size:12.5px;"><b style="font-weight:600;">{{ a.action }}</b> <span style="color:var(--text-secondary);">{{ a.target }}</span></div><div style="font-size:11px; color:var(--text-muted);">{{ a.by }} · {{ a.time }}</div></div>
+                </div>
+              </sc-for>
+            </div>
+          </div>
+        </div>
+      </sc-if>
+
+    </div>
+  </main>
+
+  <!-- TOASTER -->
+  <div style="position:fixed; right:20px; bottom:20px; z-index:90; display:flex; flex-direction:column; gap:10px; width:330px; max-width:calc(100vw - 40px);">
+    <sc-for list="{{ toasts }}" as="t" hint-placeholder-count="0">
+      <div style="display:flex; align-items:flex-start; gap:11px; padding:13px 14px; background:var(--elevated); border:1px solid var(--border); border-left:3px solid {{ t.accent }}; border-radius:10px; box-shadow:var(--shadow-pop); animation:toastin .2s ease;">
+        {{ t.icon }}
+        <div style="flex:1; min-width:0;"><div style="font-size:13px; font-weight:600;">{{ t.title }}</div><div style="font-size:12px; color:var(--text-secondary); margin-top:1px;">{{ t.desc }}</div></div>
+      </div>
+    </sc-for>
+  </div>
+
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props="{&quot;$preview&quot;:{&quot;width&quot;:1280,&quot;height&quot;:900},&quot;primary&quot;:{&quot;editor&quot;:&quot;color&quot;,&quot;default&quot;:&quot;#4f46e5&quot;,&quot;tsType&quot;:&quot;string&quot;},&quot;defaultTheme&quot;:{&quot;editor&quot;:&quot;enum&quot;,&quot;default&quot;:&quot;light&quot;,&quot;options&quot;:[&quot;light&quot;,&quot;dark&quot;],&quot;tsType&quot;:&quot;'light'|'dark'&quot;},&quot;defaultRole&quot;:{&quot;editor&quot;:&quot;enum&quot;,&quot;default&quot;:&quot;TenantAdmin&quot;,&quot;options&quot;:[&quot;SuperAdmin&quot;,&quot;TenantAdmin&quot;,&quot;Operator&quot;,&quot;Viewer&quot;],&quot;tsType&quot;:&quot;string&quot;}}">
+class Component extends DCLogic {
+  state = {
+    mode: this.props.defaultTheme || 'light',
+    role: this.props.defaultRole || 'TenantAdmin',
+    collapsed: false,
+    view: 'normal',
+    toasts: [],
+  };
+
+  el(t,p,...k){ return React.createElement(t,p,...k); }
+  perms(){ const r=this.state.role; return { admins:r==='TenantAdmin'||r==='SuperAdmin' }; }
+
+  toggleTheme=()=>this.setState(s=>({mode:s.mode==='light'?'dark':'light'}));
+  toggleCollapse=()=>this.setState(s=>({collapsed:!s.collapsed}));
+  onRoleChange=(e)=>this.setState({role:e.target.value});
+  seg(active){ return active ? {bg:'var(--elevated)',fg:'var(--primary)',fw:'600'} : {bg:'transparent',fg:'var(--text-secondary)',fw:'500'}; }
+
+  themeIconEl(){ if(this.state.mode==='light') return this.el('svg',{width:17,height:17,viewBox:'0 0 24 24',fill:'none',stroke:'currentColor',strokeWidth:1.9,strokeLinecap:'round',strokeLinejoin:'round'}, this.el('path',{key:'p',d:'M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8Z'})); return this.el('svg',{width:17,height:17,viewBox:'0 0 24 24',fill:'none',stroke:'currentColor',strokeWidth:1.9,strokeLinecap:'round',strokeLinejoin:'round'}, this.el('circle',{key:'c',cx:12,cy:12,r:4}), this.el('path',{key:'p',d:'M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4'})); }
+  toastIcon(kind){ if(kind==='pending') return this.el('div',{key:'i',style:{width:16,height:16,flex:'none',marginTop:1,borderRadius:'50%',border:'2px solid var(--border-strong)',borderTopColor:'var(--primary)',animation:'spin .7s linear infinite'}}); const color=kind==='success'?'var(--success-fg)':'var(--danger-fg)'; const path=kind==='success'?'M20 6 9 17l-5-5':'M18 6 6 18M6 6l12 12'; return this.el('svg',{key:'i',width:16,height:16,viewBox:'0 0 24 24',fill:'none',stroke:color,strokeWidth:2.4,strokeLinecap:'round',strokeLinejoin:'round',style:{flex:'none',marginTop:1}}, this.el('path',{key:'p',d:path})); }
+  badge(label, kind){ const t={ danger:['var(--danger-bg)','var(--danger-fg)','var(--danger-border)'], warning:['var(--warning-bg)','var(--warning-fg)','var(--warning-border)'], neutral:['var(--neutral-bg)','var(--neutral-fg)','var(--neutral-border)'] }[kind]; return this.el('span',{key:label,style:{display:'inline-flex',alignItems:'center',fontSize:'10.5px',fontWeight:600,padding:'2px 7px',borderRadius:6,background:t[0],color:t[1],border:'1px solid '+t[2],whiteSpace:'nowrap'}}, label); }
+
+  pushToast(t){ const id=Date.now()+Math.random(); this.setState(s=>({toasts:[...s.toasts,{id,...t}]})); return id; }
+  removeToast(id){ this.setState(s=>({toasts:s.toasts.filter(t=>t.id!==id)})); }
+  drill(label){ const id=this.pushToast({kind:'pending',title:label,desc:'該当一覧へ遷移します'}); setTimeout(()=>this.removeToast(id),1800); }
+
+  renderVals(){
+    document.documentElement.setAttribute('data-theme', this.state.mode);
+    if (this.props.primary) document.documentElement.style.setProperty('--primary', this.props.primary);
+    const r=this.state.role, p=this.perms(), v=this.state.view;
+    const emails={ SuperAdmin:'platform-ops@mobiguard.io', TenantAdmin:'admin@acme.co.jp', Operator:'operator@acme.co.jp', Viewer:'viewer@acme.co.jp' };
+    const names={ SuperAdmin:'プラットフォーム運営', TenantAdmin:'田中さん', Operator:'鈴木さん', Viewer:'閲覧ユーザー' };
+    const roleKind={ SuperAdmin:['var(--purple-bg)','var(--purple-fg)'], TenantAdmin:['var(--info-bg)','var(--info-fg)'], Operator:['var(--success-bg)','var(--success-fg)'], Viewer:['var(--neutral-bg)','var(--neutral-fg)'] }[r];
+
+    const enrollRaw=[['月',5],['火',8],['水',3],['木',12],['金',6],['土',9],['日',4]];
+    const maxE=12;
+    const enrollBars=enrollRaw.map(b=>({ label:b[0], value:b[1], h:Math.round(b[1]/maxE*78)+'px', color: b[1]===maxE?'var(--primary)':'var(--primary-bg)' }));
+
+    const attRaw=[
+      ['Pixel 7a','鈴木 一郎',[['非準拠','danger']]],
+      ['Pixel 8 Pro','伊藤 大輔',[['非準拠','danger'],['同期遅延','warning']]],
+      ['Xperia 10 V','高橋 実',[['未確認','neutral'],['同期遅延','warning']]],
+      ['Kiosk-B03','—',[['非準拠','danger']]],
+    ];
+    const attention=attRaw.map(d=>({ name:d[0], user:d[1], badges:d[2].map(b=>this.badge(b[0],b[1])), onClick:()=>this.drill('デバイス詳細 — '+d[0]) }));
+
+    const actRaw=[
+      ['var(--danger)','WIPE','Pixel 8 Pro','admin@acme.co.jp','12分前'],
+      ['var(--success)','ポリシー配信','営業部ポリシー v6','system','1時間前'],
+      ['var(--success)','エンロール','Galaxy A54','system','3時間前'],
+      ['var(--warning)','再起動（失敗）','Pixel 7a','operator@acme.co.jp','5時間前'],
+      ['var(--info)','ロール変更','operator@acme.co.jp','admin@acme.co.jp','昨日'],
+    ];
+    const activity=actRaw.map(a=>({ dot:a[0], action:a[1], target:a[2], by:a[3], time:a[4] }));
+
+    return {
+      mode:this.state.mode, role:r, userEmail:emails[r], userInitials:r.slice(0,2).toUpperCase(),
+      roleBadgeBg:roleKind[0], roleBadgeFg:roleKind[1], canSeeAdmins:p.admins,
+      sidebarWidth:this.state.collapsed?'64px':'240px', showLabels:!this.state.collapsed,
+      themeIcon:this.themeIconEl(), toggleTheme:this.toggleTheme, toggleCollapse:this.toggleCollapse, onRoleChange:this.onRoleChange,
+
+      greeting:'こんにちは、'+names[r], tenantLabel:'Acme 株式会社', today:'2026-06-22 15:30',
+
+      isNormal:v==='normal', isEmpty:v==='empty', isLoading:v==='loading', isError:v==='error',
+      setNormal:()=>this.setState({view:'normal'}), setEmpty:()=>this.setState({view:'empty'}), setLoading:()=>this.setState({view:'loading'}), setError:()=>this.setState({view:'error'}),
+      vNormal:this.seg(v==='normal'), vEmpty:this.seg(v==='empty'), vLoad:this.seg(v==='loading'), vError:this.seg(v==='error'),
+
+      enrollBars, attention, activity,
+      drillDevices:()=>this.drill('デバイス一覧'), drillNoncompliant:()=>this.drill('非準拠の端末'), drillDelayed:()=>this.drill('同期遅延の端末'), drillCompliant:()=>this.drill('準拠の端末'), drillEnroll:()=>this.drill('エンロール'), drillAudit:()=>this.drill('監査ログ'),
+
+      toasts:this.state.toasts.map(t=>({ ...t, accent:t.kind==='success'?'var(--success)':t.kind==='error'?'var(--danger)':'var(--primary)', icon:this.toastIcon(t.kind) })),
+    };
+  }
+}
+</script>
+</body>
+</html>

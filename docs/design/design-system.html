@@ -1,0 +1,811 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Noto+Sans+JP:wght@400;500;700&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+  :root{
+    --bg:#ffffff; --surface:#f7f8fa; --surface-2:#eef0f4; --elevated:#ffffff;
+    --border:#e4e7ec; --border-strong:#d3d8e0;
+    --text:#1b1f27; --text-secondary:#5a616e; --text-muted:#8a909c;
+    --primary:#4f46e5; --primary-hover:#4338ca; --primary-fg:#ffffff; --primary-bg:#eef0fe; --primary-border:#c9cdfa;
+    --success:#16a34a; --success-bg:#e8f6ed; --success-fg:#15803d; --success-border:#bfe6cc;
+    --danger:#dc2626; --danger-bg:#fdeaea; --danger-fg:#b91c1c; --danger-border:#f5c6c6;
+    --warning:#d97706; --warning-bg:#fdf2e0; --warning-fg:#b45309; --warning-border:#f2dbab;
+    --neutral:#6b7280; --neutral-bg:#eef0f3; --neutral-fg:#4b5563; --neutral-border:#dde1e7;
+    --info:#2563eb; --info-bg:#e8f0fe; --info-fg:#1d4ed8; --info-border:#c3d6fb;
+    --purple:#7c3aed; --purple-bg:#f1ebfd; --purple-fg:#6d28d9; --purple-border:#ddcdfa;
+    --pale-bg:#f3f4f6; --pale-fg:#9ca3af; --pale-border:#e6e8ec;
+    --shadow:0 1px 2px rgba(16,20,30,.04), 0 1px 3px rgba(16,20,30,.06);
+    --shadow-pop:0 4px 16px rgba(16,20,30,.12), 0 1px 3px rgba(16,20,30,.08);
+    --row-py:7px;
+  }
+  :root[data-theme="dark"]{
+    --bg:#0d1017; --surface:#151922; --surface-2:#1b212c; --elevated:#171c25;
+    --border:#262d3a; --border-strong:#323a49;
+    --text:#e7eaf0; --text-secondary:#9aa2b1; --text-muted:#6b7480;
+    --primary:#6366f1; --primary-hover:#7c80f7; --primary-fg:#ffffff; --primary-bg:rgba(99,102,241,.16); --primary-border:rgba(99,102,241,.42);
+    --success:#22c55e; --success-bg:rgba(34,197,94,.14); --success-fg:#4ade80; --success-border:rgba(34,197,94,.32);
+    --danger:#ef4444; --danger-bg:rgba(239,68,68,.14); --danger-fg:#f87171; --danger-border:rgba(239,68,68,.34);
+    --warning:#f59e0b; --warning-bg:rgba(245,158,11,.14); --warning-fg:#fbbf24; --warning-border:rgba(245,158,11,.32);
+    --neutral:#94a3b8; --neutral-bg:rgba(148,163,184,.14); --neutral-fg:#cbd5e1; --neutral-border:rgba(148,163,184,.26);
+    --info:#3b82f6; --info-bg:rgba(59,130,246,.16); --info-fg:#60a5fa; --info-border:rgba(59,130,246,.34);
+    --purple:#8b5cf6; --purple-bg:rgba(139,92,246,.16); --purple-fg:#a78bfa; --purple-border:rgba(139,92,246,.34);
+    --pale-bg:rgba(148,163,184,.07); --pale-fg:#7b8494; --pale-border:rgba(148,163,184,.16);
+    --shadow:0 1px 2px rgba(0,0,0,.4); --shadow-pop:0 8px 28px rgba(0,0,0,.55);
+  }
+  *{box-sizing:border-box;}
+  body{margin:0; background:var(--bg); color:var(--text); font-family:"Noto Sans JP", system-ui, sans-serif; font-size:14px; line-height:1.45; -webkit-font-smoothing:antialiased; font-feature-settings:"palt"; transition:background .18s ease, color .18s ease;}
+  ::selection{background:var(--primary-bg);}
+  @keyframes shimmer{0%{background-position:-180% 0;}100%{background-position:180% 0;}}
+  @keyframes spin{to{transform:rotate(360deg);}}
+  @keyframes toastin{from{opacity:0; transform:translateY(8px) scale(.98);}to{opacity:1; transform:none;}}
+  @keyframes overlayin{from{opacity:0;}to{opacity:1;}}
+  @keyframes dialogin{from{opacity:0; transform:translateY(10px) scale(.985);}to{opacity:1; transform:none;}}
+</style>
+</helmet>
+
+<div style="display:flex; min-height:100vh; background:var(--bg);">
+
+  <!-- ============ SIDEBAR ============ -->
+  <aside style="width: {{ sidebarWidth }}; flex:none; background:var(--surface); border-right:1px solid var(--border); display:flex; flex-direction:column; position:sticky; top:0; height:100vh; transition:width .16s ease;">
+    <div style="height:52px; display:flex; align-items:center; gap:10px; padding:0 16px; border-bottom:1px solid var(--border);">
+      <div style="width:26px; height:26px; flex:none; border-radius:7px; background:var(--primary); display:flex; align-items:center; justify-content:center; color:#fff; font-weight:700; font-size:13px;">M</div>
+      <sc-if value="{{ showLabels }}" hint-placeholder-val="{{ true }}">
+        <div style="font-weight:700; font-size:14px; letter-spacing:.01em; white-space:nowrap;">MobiGuard</div>
+      </sc-if>
+    </div>
+
+    <nav style="flex:1; padding:10px 10px; display:flex; flex-direction:column; gap:2px; overflow-y:auto;">
+      <div style="display:flex; align-items:center; gap:11px; padding:8px 10px; border-radius:8px; background:var(--primary-bg); color:var(--primary); font-weight:500; white-space:nowrap; cursor:pointer;">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" style="flex:none;"><rect x="3" y="3" width="7" height="7" rx="1.3"/><rect x="14" y="3" width="7" height="7" rx="1.3"/><rect x="14" y="14" width="7" height="7" rx="1.3"/><rect x="3" y="14" width="7" height="7" rx="1.3"/></svg>
+        <sc-if value="{{ showLabels }}" hint-placeholder-val="{{ true }}"><span>ダッシュボード</span></sc-if>
+      </div>
+      <div style="display:flex; align-items:center; gap:11px; padding:8px 10px; border-radius:8px; color:var(--text-secondary); white-space:nowrap; cursor:pointer;" style-hover="background:var(--surface-2); color:var(--text);">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" style="flex:none;"><rect x="7" y="2.5" width="10" height="19" rx="2.5"/><line x1="10.5" y1="18.4" x2="13.5" y2="18.4"/></svg>
+        <sc-if value="{{ showLabels }}" hint-placeholder-val="{{ true }}"><span>デバイス</span></sc-if>
+      </div>
+      <div style="display:flex; align-items:center; gap:11px; padding:8px 10px; border-radius:8px; color:var(--text-secondary); white-space:nowrap; cursor:pointer;" style-hover="background:var(--surface-2); color:var(--text);">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" style="flex:none;"><path d="M12 3 4.5 6v5c0 4.4 3.2 7.4 7.5 9 4.3-1.6 7.5-4.6 7.5-9V6L12 3Z"/></svg>
+        <sc-if value="{{ showLabels }}" hint-placeholder-val="{{ true }}"><span>ポリシー</span></sc-if>
+      </div>
+      <div style="display:flex; align-items:center; gap:11px; padding:8px 10px; border-radius:8px; color:var(--text-secondary); white-space:nowrap; cursor:pointer;" style-hover="background:var(--surface-2); color:var(--text);">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" style="flex:none;"><rect x="3" y="3" width="7" height="7" rx="1.3"/><rect x="14" y="3" width="7" height="7" rx="1.3"/><rect x="3" y="14" width="7" height="7" rx="1.3"/><path d="M14 14h3v3M21 14v.01M17 21h.01M21 18v3h-3"/></svg>
+        <sc-if value="{{ showLabels }}" hint-placeholder-val="{{ true }}"><span>エンロール</span></sc-if>
+      </div>
+      <div style="display:flex; align-items:center; gap:11px; padding:8px 10px; border-radius:8px; color:var(--text-secondary); white-space:nowrap; cursor:pointer;" style-hover="background:var(--surface-2); color:var(--text);">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" style="flex:none;"><path d="M21 8 12 3 3 8v8l9 5 9-5V8Z"/><path d="m3 8 9 5 9-5M12 13v8"/></svg>
+        <sc-if value="{{ showLabels }}" hint-placeholder-val="{{ true }}"><span>アプリ</span></sc-if>
+      </div>
+      <div style="display:flex; align-items:center; gap:11px; padding:8px 10px; border-radius:8px; color:var(--text-secondary); white-space:nowrap; cursor:pointer;" style-hover="background:var(--surface-2); color:var(--text);">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" style="flex:none;"><path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8l-5-5Z"/><path d="M14 3v5h5"/><line x1="9" y1="13" x2="15" y2="13"/><line x1="9" y1="17" x2="15" y2="17"/></svg>
+        <sc-if value="{{ showLabels }}" hint-placeholder-val="{{ true }}"><span>監査ログ</span></sc-if>
+      </div>
+      <sc-if value="{{ canSeeAdmins }}" hint-placeholder-val="{{ true }}">
+        <div style="display:flex; align-items:center; gap:11px; padding:8px 10px; border-radius:8px; color:var(--text-secondary); white-space:nowrap; cursor:pointer;" style-hover="background:var(--surface-2); color:var(--text);">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" style="flex:none;"><circle cx="9" cy="8" r="3.1"/><path d="M3.6 20a5.4 5.4 0 0 1 10.8 0"/><path d="M16.2 5.3a3.1 3.1 0 0 1 0 5.4M20.4 20a5.4 5.4 0 0 0-3.9-5.2"/></svg>
+          <sc-if value="{{ showLabels }}" hint-placeholder-val="{{ true }}"><span>管理者</span></sc-if>
+        </div>
+      </sc-if>
+    </nav>
+
+    <div style="border-top:1px solid var(--border); padding:10px;">
+      <div onClick="{{ toggleCollapse }}" style="display:flex; align-items:center; gap:11px; padding:8px 10px; border-radius:8px; color:var(--text-muted); cursor:pointer; white-space:nowrap;" style-hover="background:var(--surface-2); color:var(--text);">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" style="flex:none;"><rect x="3" y="4" width="18" height="16" rx="2"/><line x1="9" y1="4" x2="9" y2="20"/></svg>
+        <sc-if value="{{ showLabels }}" hint-placeholder-val="{{ true }}"><span>サイドバーを折りたたむ</span></sc-if>
+      </div>
+    </div>
+  </aside>
+
+  <!-- ============ MAIN ============ -->
+  <main style="flex:1; min-width:0; display:flex; flex-direction:column;">
+
+    <!-- TOPBAR -->
+    <header style="height:52px; flex:none; position:sticky; top:0; z-index:30; background:color-mix(in srgb, var(--bg) 88%, transparent); backdrop-filter:blur(8px); border-bottom:1px solid var(--border); display:flex; align-items:center; gap:14px; padding:0 18px;">
+      <div style="font-weight:700; font-size:14.5px; white-space:nowrap;">デザインシステム & コンポーネント</div>
+      <div style="flex:1;"></div>
+
+      <button onClick="{{ toggleTheme }}" title="テーマ切替" style="width:32px; height:32px; flex:none; display:flex; align-items:center; justify-content:center; border:1px solid var(--border-strong); border-radius:8px; background:var(--surface); color:var(--text-secondary); cursor:pointer;" style-hover="border-color:var(--primary); color:var(--primary);">
+        {{ themeIcon }}
+      </button>
+
+      <div style="display:flex; align-items:center; gap:6px; padding-left:4px;">
+        <span style="font-size:11px; color:var(--text-muted);">ロール</span>
+        <select value="{{ role }}" onChange="{{ onRoleChange }}" style="height:32px; padding:0 8px; border:1px solid var(--border-strong); border-radius:8px; background:var(--surface); color:var(--text); font-size:13px; font-family:inherit; cursor:pointer;">
+          <option value="SuperAdmin">SuperAdmin</option>
+          <option value="TenantAdmin">TenantAdmin</option>
+          <option value="Operator">Operator</option>
+          <option value="Viewer">Viewer</option>
+        </select>
+      </div>
+
+      <div style="width:1px; height:24px; background:var(--border);"></div>
+
+      <div style="display:flex; align-items:center; gap:9px; cursor:pointer; padding:3px 4px 3px 6px; border-radius:8px;" style-hover="background:var(--surface-2);">
+        <div style="text-align:right; line-height:1.25;">
+          <div style="font-size:12.5px; font-weight:500;">{{ userEmail }}</div>
+          <div style="display:flex; justify-content:flex-end;">
+            <span style="font-size:10px; font-weight:600; letter-spacing:.02em; padding:1px 6px; border-radius:5px; background: {{ roleBadgeBg }}; color: {{ roleBadgeFg }};">{{ role }}</span>
+          </div>
+        </div>
+        <div style="width:30px; height:30px; flex:none; border-radius:50%; background:var(--primary); color:#fff; display:flex; align-items:center; justify-content:center; font-size:12px; font-weight:600;">{{ userInitials }}</div>
+      </div>
+    </header>
+
+    <!-- SUB-NAV TABS -->
+    <div style="position:sticky; top:52px; z-index:20; background:var(--bg); border-bottom:1px solid var(--border); padding:0 18px; display:flex; gap:2px; overflow-x:auto;">
+      <a href="#tokens" style="padding:11px 12px; font-size:13px; color:var(--text-secondary); text-decoration:none; white-space:nowrap; border-bottom:2px solid transparent;" style-hover="color:var(--text); border-bottom-color:var(--border-strong);">トークン</a>
+      <a href="#shell" style="padding:11px 12px; font-size:13px; color:var(--text-secondary); text-decoration:none; white-space:nowrap; border-bottom:2px solid transparent;" style-hover="color:var(--text); border-bottom-color:var(--border-strong);">アプリシェル</a>
+      <a href="#badges" style="padding:11px 12px; font-size:13px; color:var(--text-secondary); text-decoration:none; white-space:nowrap; border-bottom:2px solid transparent;" style-hover="color:var(--text); border-bottom-color:var(--border-strong);">バッジ</a>
+      <a href="#metrics" style="padding:11px 12px; font-size:13px; color:var(--text-secondary); text-decoration:none; white-space:nowrap; border-bottom:2px solid transparent;" style-hover="color:var(--text); border-bottom-color:var(--border-strong);">メトリクス</a>
+      <a href="#table" style="padding:11px 12px; font-size:13px; color:var(--text-secondary); text-decoration:none; white-space:nowrap; border-bottom:2px solid transparent;" style-hover="color:var(--text); border-bottom-color:var(--border-strong);">DataTable</a>
+      <a href="#states" style="padding:11px 12px; font-size:13px; color:var(--text-secondary); text-decoration:none; white-space:nowrap; border-bottom:2px solid transparent;" style-hover="color:var(--text); border-bottom-color:var(--border-strong);">状態</a>
+      <a href="#rolegate" style="padding:11px 12px; font-size:13px; color:var(--text-secondary); text-decoration:none; white-space:nowrap; border-bottom:2px solid transparent;" style-hover="color:var(--text); border-bottom-color:var(--border-strong);">RoleGate</a>
+      <a href="#dialog" style="padding:11px 12px; font-size:13px; color:var(--text-secondary); text-decoration:none; white-space:nowrap; border-bottom:2px solid transparent;" style-hover="color:var(--text); border-bottom-color:var(--border-strong);">ダイアログ</a>
+      <a href="#toast" style="padding:11px 12px; font-size:13px; color:var(--text-secondary); text-decoration:none; white-space:nowrap; border-bottom:2px solid transparent;" style-hover="color:var(--text); border-bottom-color:var(--border-strong);">トースト</a>
+    </div>
+
+    <div style="padding:28px 32px 80px; max-width:1180px; width:100%;">
+
+      <!-- intro -->
+      <div style="margin-bottom:36px;">
+        <div style="font-size:11px; font-weight:600; letter-spacing:.08em; color:var(--primary); text-transform:uppercase; margin-bottom:8px;">Android Enterprise · EMM / MDM</div>
+        <h1 style="margin:0 0 8px; font-size:24px; font-weight:700; letter-spacing:-.01em;">管理コンソール デザインシステム</h1>
+        <p style="margin:0; max-width:620px; color:var(--text-secondary); font-size:13.5px;">マルチテナント EMM SaaS のための共通基盤。トークン・アプリシェル・共通コンポーネントを定義し、以降の各画面はすべてこのシステムを再利用します。React + TypeScript / Tailwind / shadcn/ui に対応づく語彙で構成しています。</p>
+      </div>
+
+      <!-- ===== TOKENS ===== -->
+      <section id="tokens" style="scroll-margin-top:104px; margin-bottom:44px;">
+        <div style="display:flex; align-items:baseline; gap:10px; margin-bottom:4px;">
+          <h2 style="margin:0; font-size:17px; font-weight:700;">デザイントークン</h2>
+          <span style="font-size:12px; color:var(--text-muted); font-family:'IBM Plex Mono', monospace;">tailwind.config / :root</span>
+        </div>
+        <p style="margin:0 0 18px; font-size:13px; color:var(--text-secondary);">ライト / ダーク両モードで CSS 変数として定義。右上のトグルで全画面が切り替わります。</p>
+
+        <div style="font-size:12px; font-weight:600; color:var(--text-secondary); margin:0 0 10px;">プライマリ & サーフェス</div>
+        <div style="display:grid; grid-template-columns:repeat(auto-fill, minmax(132px,1fr)); gap:10px; margin-bottom:22px;">
+          <div style="border:1px solid var(--border); border-radius:10px; overflow:hidden; background:var(--elevated);"><div style="height:54px; background:var(--primary);"></div><div style="padding:7px 9px;"><div style="font-size:12px; font-weight:600;">primary</div><div style="font-size:11px; color:var(--text-muted); font-family:'IBM Plex Mono',monospace;">--primary</div></div></div>
+          <div style="border:1px solid var(--border); border-radius:10px; overflow:hidden; background:var(--elevated);"><div style="height:54px; background:var(--primary-hover);"></div><div style="padding:7px 9px;"><div style="font-size:12px; font-weight:600;">primary-hover</div><div style="font-size:11px; color:var(--text-muted); font-family:'IBM Plex Mono',monospace;">--primary-hover</div></div></div>
+          <div style="border:1px solid var(--border); border-radius:10px; overflow:hidden; background:var(--elevated);"><div style="height:54px; background:var(--bg); border-bottom:1px solid var(--border);"></div><div style="padding:7px 9px;"><div style="font-size:12px; font-weight:600;">background</div><div style="font-size:11px; color:var(--text-muted); font-family:'IBM Plex Mono',monospace;">--bg</div></div></div>
+          <div style="border:1px solid var(--border); border-radius:10px; overflow:hidden; background:var(--elevated);"><div style="height:54px; background:var(--surface); border-bottom:1px solid var(--border);"></div><div style="padding:7px 9px;"><div style="font-size:12px; font-weight:600;">surface</div><div style="font-size:11px; color:var(--text-muted); font-family:'IBM Plex Mono',monospace;">--surface</div></div></div>
+          <div style="border:1px solid var(--border); border-radius:10px; overflow:hidden; background:var(--elevated);"><div style="height:54px; background:var(--surface-2); border-bottom:1px solid var(--border);"></div><div style="padding:7px 9px;"><div style="font-size:12px; font-weight:600;">surface-2</div><div style="font-size:11px; color:var(--text-muted); font-family:'IBM Plex Mono',monospace;">--surface-2</div></div></div>
+          <div style="border:1px solid var(--border); border-radius:10px; overflow:hidden; background:var(--elevated);"><div style="height:54px; background:var(--border-strong);"></div><div style="padding:7px 9px;"><div style="font-size:12px; font-weight:600;">border</div><div style="font-size:11px; color:var(--text-muted); font-family:'IBM Plex Mono',monospace;">--border</div></div></div>
+        </div>
+
+        <div style="font-size:12px; font-weight:600; color:var(--text-secondary); margin:0 0 10px;">意味色（セマンティック）</div>
+        <div style="display:grid; grid-template-columns:repeat(auto-fill, minmax(132px,1fr)); gap:10px; margin-bottom:22px;">
+          <div style="border:1px solid var(--border); border-radius:10px; overflow:hidden; background:var(--elevated);"><div style="height:48px; background:var(--success);"></div><div style="padding:7px 9px;"><div style="font-size:12px; font-weight:600;">success / 準拠</div><div style="font-size:11px; color:var(--text-muted);">緑</div></div></div>
+          <div style="border:1px solid var(--border); border-radius:10px; overflow:hidden; background:var(--elevated);"><div style="height:48px; background:var(--danger);"></div><div style="padding:7px 9px;"><div style="font-size:12px; font-weight:600;">danger / 非準拠</div><div style="font-size:11px; color:var(--text-muted);">赤</div></div></div>
+          <div style="border:1px solid var(--border); border-radius:10px; overflow:hidden; background:var(--elevated);"><div style="height:48px; background:var(--warning);"></div><div style="padding:7px 9px;"><div style="font-size:12px; font-weight:600;">warning / 同期遅延</div><div style="font-size:11px; color:var(--text-muted);">琥珀</div></div></div>
+          <div style="border:1px solid var(--border); border-radius:10px; overflow:hidden; background:var(--elevated);"><div style="height:48px; background:var(--neutral);"></div><div style="padding:7px 9px;"><div style="font-size:12px; font-weight:600;">neutral / 未確認</div><div style="font-size:11px; color:var(--text-muted);">灰</div></div></div>
+          <div style="border:1px solid var(--border); border-radius:10px; overflow:hidden; background:var(--elevated);"><div style="height:48px; background:var(--info);"></div><div style="padding:7px 9px;"><div style="font-size:12px; font-weight:600;">info / 管理モード</div><div style="font-size:11px; color:var(--text-muted);">青</div></div></div>
+          <div style="border:1px solid var(--border); border-radius:10px; overflow:hidden; background:var(--elevated);"><div style="height:48px; background:var(--purple);"></div><div style="padding:7px 9px;"><div style="font-size:12px; font-weight:600;">purple / Kiosk</div><div style="font-size:11px; color:var(--text-muted);">紫</div></div></div>
+        </div>
+
+        <div style="display:grid; grid-template-columns:repeat(auto-fit, minmax(280px,1fr)); gap:16px;">
+          <div style="border:1px solid var(--border); border-radius:12px; padding:16px 18px; background:var(--elevated);">
+            <div style="font-size:12px; font-weight:600; color:var(--text-secondary); margin-bottom:12px;">タイポグラフィ階層</div>
+            <div style="display:flex; flex-direction:column; gap:9px;">
+              <div style="display:flex; align-items:baseline; justify-content:space-between; gap:12px;"><span style="font-size:24px; font-weight:700; letter-spacing:-.01em;">見出し H1</span><span style="font-size:11px; color:var(--text-muted); font-family:'IBM Plex Mono',monospace;">24/700</span></div>
+              <div style="display:flex; align-items:baseline; justify-content:space-between; gap:12px;"><span style="font-size:17px; font-weight:700;">見出し H2</span><span style="font-size:11px; color:var(--text-muted); font-family:'IBM Plex Mono',monospace;">17/700</span></div>
+              <div style="display:flex; align-items:baseline; justify-content:space-between; gap:12px;"><span style="font-size:14px; font-weight:500;">本文 / ラベル</span><span style="font-size:11px; color:var(--text-muted); font-family:'IBM Plex Mono',monospace;">14/500</span></div>
+              <div style="display:flex; align-items:baseline; justify-content:space-between; gap:12px;"><span style="font-size:13px; color:var(--text-secondary);">テーブル本文（基調）</span><span style="font-size:11px; color:var(--text-muted); font-family:'IBM Plex Mono',monospace;">13/400</span></div>
+              <div style="display:flex; align-items:baseline; justify-content:space-between; gap:12px;"><span style="font-size:11px; color:var(--text-muted);">キャプション</span><span style="font-size:11px; color:var(--text-muted); font-family:'IBM Plex Mono',monospace;">11/400</span></div>
+              <div style="display:flex; align-items:baseline; justify-content:space-between; gap:12px;"><span style="font-size:13px; font-family:'IBM Plex Mono',monospace;">35682901 · serial</span><span style="font-size:11px; color:var(--text-muted); font-family:'IBM Plex Mono',monospace;">mono</span></div>
+            </div>
+          </div>
+          <div style="border:1px solid var(--border); border-radius:12px; padding:16px 18px; background:var(--elevated);">
+            <div style="font-size:12px; font-weight:600; color:var(--text-secondary); margin-bottom:12px;">スペーシング · 角丸 · 境界線</div>
+            <div style="display:flex; align-items:flex-end; gap:8px; margin-bottom:16px;">
+              <div style="text-align:center;"><div style="width:4px; height:4px; background:var(--primary); margin:0 auto 5px;"></div><span style="font-size:10px; color:var(--text-muted);">4</span></div>
+              <div style="text-align:center;"><div style="width:8px; height:8px; background:var(--primary); margin:0 auto 5px;"></div><span style="font-size:10px; color:var(--text-muted);">8</span></div>
+              <div style="text-align:center;"><div style="width:12px; height:12px; background:var(--primary); margin:0 auto 5px;"></div><span style="font-size:10px; color:var(--text-muted);">12</span></div>
+              <div style="text-align:center;"><div style="width:16px; height:16px; background:var(--primary); margin:0 auto 5px;"></div><span style="font-size:10px; color:var(--text-muted);">16</span></div>
+              <div style="text-align:center;"><div style="width:24px; height:24px; background:var(--primary); margin:0 auto 5px;"></div><span style="font-size:10px; color:var(--text-muted);">24</span></div>
+              <div style="text-align:center;"><div style="width:32px; height:32px; background:var(--primary); margin:0 auto 5px;"></div><span style="font-size:10px; color:var(--text-muted);">32</span></div>
+            </div>
+            <div style="display:flex; gap:10px; margin-bottom:14px;">
+              <div style="flex:1; height:38px; background:var(--surface-2); border:1px solid var(--border); border-radius:6px; display:flex; align-items:center; justify-content:center; font-size:11px; color:var(--text-muted);">6px</div>
+              <div style="flex:1; height:38px; background:var(--surface-2); border:1px solid var(--border); border-radius:8px; display:flex; align-items:center; justify-content:center; font-size:11px; color:var(--text-muted);">8px</div>
+              <div style="flex:1; height:38px; background:var(--surface-2); border:1px solid var(--border); border-radius:12px; display:flex; align-items:center; justify-content:center; font-size:11px; color:var(--text-muted);">12px</div>
+            </div>
+            <div style="display:flex; flex-direction:column; gap:8px;">
+              <div style="height:0; border-top:0.5px solid var(--border-strong);"></div>
+              <span style="font-size:11px; color:var(--text-muted);">0.5px hairline — テーブル罫線</span>
+              <div style="height:0; border-top:1px solid var(--border-strong);"></div>
+              <span style="font-size:11px; color:var(--text-muted);">1px — カード / コンテナ境界</span>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- ===== APP SHELL ===== -->
+      <section id="shell" style="scroll-margin-top:104px; margin-bottom:44px;">
+        <h2 style="margin:0 0 4px; font-size:17px; font-weight:700;">アプリシェル</h2>
+        <p style="margin:0 0 16px; font-size:13px; color:var(--text-secondary);">このページ全体がシェルのライブデモです。左サイドバー（折りたたみ可）+ トップバー（テナント切替 / テーマ / ロール / ユーザーメニュー）。</p>
+        <div style="display:grid; grid-template-columns:repeat(auto-fit, minmax(240px,1fr)); gap:12px;">
+          <div style="border:1px solid var(--border); border-radius:12px; padding:14px 16px; background:var(--elevated);">
+            <div style="font-size:13px; font-weight:600; margin-bottom:5px;">サイドバー</div>
+            <div style="font-size:12.5px; color:var(--text-secondary); line-height:1.6;">ダッシュボード / デバイス / ポリシー / エンロール / アプリ / 監査ログ / 管理者（tenant-console）。<b style="color:var(--text);">管理者</b>は TenantAdmin 以上で表示（アクセス不可は非表示）。「テナント」は admin-console 側のため本シェルには含めません。</div>
+          </div>
+          <div style="border:1px solid var(--border); border-radius:12px; padding:14px 16px; background:var(--elevated);">
+            <div style="font-size:13px; font-weight:600; margin-bottom:5px;">トップバー</div>
+            <div style="font-size:12.5px; color:var(--text-secondary); line-height:1.6;">ページタイトル・現在ユーザー（email + ロールバッジ）・ユーザーメニュー。<b style="color:var(--text);">自テナント固定</b>（テナント切替は持たない）。ロールを切替えると操作・ナビ表示が変化します。</div>
+          </div>
+          <div style="border:1px solid var(--border); border-radius:12px; padding:14px 16px; background:var(--elevated);">
+            <div style="font-size:13px; font-weight:600; margin-bottom:5px;">レスポンシブ</div>
+            <div style="font-size:12.5px; color:var(--text-secondary); line-height:1.6;">サイドバー左下のボタンで <b style="color:var(--text);">240px ⇄ 64px</b> に折りたたみ。狭幅ビューポートでは自動でアイコンのみ表示に。</div>
+          </div>
+        </div>
+      </section>
+
+      <!-- ===== BADGES ===== -->
+      <section id="badges" style="scroll-margin-top:104px; margin-bottom:44px;">
+        <h2 style="margin:0 0 4px; font-size:17px; font-weight:700;">ステータスバッジ</h2>
+        <p style="margin:0 0 16px; font-size:13px; color:var(--text-secondary);">ラベルと色は固定。全画面で同一の意味を保ちます。</p>
+        <div style="border:1px solid var(--border); border-radius:12px; background:var(--elevated); overflow:hidden;">
+          <div style="display:grid; grid-template-columns:160px 1fr; border-bottom:1px solid var(--border);">
+            <div style="padding:13px 16px; font-size:12px; font-weight:600; color:var(--text-secondary); border-right:1px solid var(--border);">コンプライアンス</div>
+            <div style="padding:13px 16px; display:flex; flex-wrap:wrap; gap:8px;">
+              <span style="display:inline-flex; align-items:center; gap:6px; font-size:12px; font-weight:600; padding:3px 9px; border-radius:6px; background:var(--success-bg); color:var(--success-fg); border:1px solid var(--success-border);"><span style="width:6px; height:6px; border-radius:50%; background:var(--success);"></span>準拠</span>
+              <span style="display:inline-flex; align-items:center; gap:6px; font-size:12px; font-weight:600; padding:3px 9px; border-radius:6px; background:var(--danger-bg); color:var(--danger-fg); border:1px solid var(--danger-border);"><span style="width:6px; height:6px; border-radius:50%; background:var(--danger);"></span>非準拠</span>
+              <span style="display:inline-flex; align-items:center; gap:6px; font-size:12px; font-weight:600; padding:3px 9px; border-radius:6px; background:var(--neutral-bg); color:var(--neutral-fg); border:1px solid var(--neutral-border);"><span style="width:6px; height:6px; border-radius:50%; background:var(--neutral);"></span>未確認</span>
+              <span style="display:inline-flex; align-items:center; gap:6px; font-size:12px; font-weight:600; padding:3px 9px; border-radius:6px; background:var(--pale-bg); color:var(--pale-fg); border:1px solid var(--pale-border);">サポート対象外</span>
+            </div>
+          </div>
+          <div style="display:grid; grid-template-columns:160px 1fr; border-bottom:1px solid var(--border);">
+            <div style="padding:13px 16px; font-size:12px; font-weight:600; color:var(--text-secondary); border-right:1px solid var(--border);">同期状態</div>
+            <div style="padding:13px 16px; display:flex; flex-wrap:wrap; gap:8px; align-items:center;">
+              <span style="display:inline-flex; align-items:center; gap:6px; font-size:12px; font-weight:600; padding:3px 9px; border-radius:6px; background:var(--warning-bg); color:var(--warning-fg); border:1px solid var(--warning-border);"><span style="width:6px; height:6px; border-radius:50%; background:var(--warning);"></span>同期遅延</span>
+              <span style="font-size:11.5px; color:var(--text-muted);">※ コンプライアンスと併記しうる別指標</span>
+            </div>
+          </div>
+          <div style="display:grid; grid-template-columns:160px 1fr; border-bottom:1px solid var(--border);">
+            <div style="padding:13px 16px; font-size:12px; font-weight:600; color:var(--text-secondary); border-right:1px solid var(--border);">管理モード</div>
+            <div style="padding:13px 16px; display:flex; flex-wrap:wrap; gap:8px;">
+              <span style="display:inline-flex; align-items:center; gap:6px; font-size:12px; font-weight:600; padding:3px 9px; border-radius:6px; background:var(--info-bg); color:var(--info-fg); border:1px solid var(--info-border);"><span style="width:6px; height:6px; border-radius:50%; background:var(--info);"></span>Fully Managed</span>
+              <span style="display:inline-flex; align-items:center; gap:6px; font-size:12px; font-weight:600; padding:3px 9px; border-radius:6px; background:var(--purple-bg); color:var(--purple-fg); border:1px solid var(--purple-border);"><span style="width:6px; height:6px; border-radius:50%; background:var(--purple);"></span>Dedicated (Kiosk)</span>
+            </div>
+          </div>
+          <div style="display:grid; grid-template-columns:160px 1fr; border-bottom:1px solid var(--border);">
+            <div style="padding:13px 16px; font-size:12px; font-weight:600; color:var(--text-secondary); border-right:1px solid var(--border);">コマンド状態</div>
+            <div style="padding:13px 16px; display:flex; flex-wrap:wrap; gap:8px;">
+              <span style="display:inline-flex; align-items:center; gap:6px; font-size:12px; font-weight:600; padding:3px 9px; border-radius:6px; background:var(--pale-bg); color:var(--pale-fg); border:1px solid var(--pale-border);">実行待ち</span>
+              <span style="display:inline-flex; align-items:center; gap:6px; font-size:12px; font-weight:600; padding:3px 9px; border-radius:6px; background:var(--success-bg); color:var(--success-fg); border:1px solid var(--success-border);"><span style="width:6px; height:6px; border-radius:50%; background:var(--success);"></span>成功</span>
+              <span style="display:inline-flex; align-items:center; gap:6px; font-size:12px; font-weight:600; padding:3px 9px; border-radius:6px; background:var(--danger-bg); color:var(--danger-fg); border:1px solid var(--danger-border);"><span style="width:6px; height:6px; border-radius:50%; background:var(--danger);"></span>失敗</span>
+              <span style="display:inline-flex; align-items:center; gap:6px; font-size:12px; font-weight:600; padding:3px 9px; border-radius:6px; background:var(--warning-bg); color:var(--warning-fg); border:1px solid var(--warning-border);"><span style="width:6px; height:6px; border-radius:50%; background:var(--warning);"></span>タイムアウト</span>
+            </div>
+          </div>
+          <div style="display:grid; grid-template-columns:160px 1fr;">
+            <div style="padding:13px 16px; font-size:12px; font-weight:600; color:var(--text-secondary); border-right:1px solid var(--border);">テナント状態</div>
+            <div style="padding:13px 16px; display:flex; flex-wrap:wrap; gap:8px;">
+              <span style="display:inline-flex; align-items:center; gap:6px; font-size:12px; font-weight:600; padding:3px 9px; border-radius:6px; background:var(--warning-bg); color:var(--warning-fg); border:1px solid var(--warning-border);"><span style="width:6px; height:6px; border-radius:50%; background:var(--warning);"></span>バインド未完了</span>
+              <span style="display:inline-flex; align-items:center; gap:6px; font-size:12px; font-weight:600; padding:3px 9px; border-radius:6px; background:var(--success-bg); color:var(--success-fg); border:1px solid var(--success-border);"><span style="width:6px; height:6px; border-radius:50%; background:var(--success);"></span>有効</span>
+              <span style="display:inline-flex; align-items:center; gap:6px; font-size:12px; font-weight:600; padding:3px 9px; border-radius:6px; background:var(--neutral-bg); color:var(--neutral-fg); border:1px solid var(--neutral-border);"><span style="width:6px; height:6px; border-radius:50%; background:var(--neutral);"></span>無効</span>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- ===== METRICS ===== -->
+      <section id="metrics" style="scroll-margin-top:104px; margin-bottom:44px;">
+        <h2 style="margin:0 0 4px; font-size:17px; font-weight:700;">メトリクスカード</h2>
+        <p style="margin:0 0 16px; font-size:13px; color:var(--text-secondary);">ダッシュボード上部の KPI。コンパクト・タブ数字。</p>
+        <div style="display:grid; grid-template-columns:repeat(auto-fit, minmax(190px,1fr)); gap:14px;">
+          <div style="border:1px solid var(--border); border-radius:12px; padding:16px; background:var(--elevated); box-shadow:var(--shadow);">
+            <div style="font-size:12px; color:var(--text-secondary); margin-bottom:8px;">総デバイス数</div>
+            <div style="font-size:26px; font-weight:700; letter-spacing:-.01em; font-variant-numeric:tabular-nums;">2,481</div>
+            <div style="margin-top:6px; font-size:11.5px; color:var(--success-fg); font-weight:500;">+38 <span style="color:var(--text-muted); font-weight:400;">（過去7日）</span></div>
+          </div>
+          <div style="border:1px solid var(--border); border-radius:12px; padding:16px; background:var(--elevated); box-shadow:var(--shadow);">
+            <div style="font-size:12px; color:var(--text-secondary); margin-bottom:8px;">準拠率</div>
+            <div style="font-size:26px; font-weight:700; letter-spacing:-.01em; font-variant-numeric:tabular-nums;">94.2<span style="font-size:15px; color:var(--text-muted);">%</span></div>
+            <div style="margin-top:8px; height:5px; border-radius:3px; background:var(--surface-2); overflow:hidden;"><div style="width:94%; height:100%; background:var(--success);"></div></div>
+          </div>
+          <div style="border:1px solid var(--border); border-radius:12px; padding:16px; background:var(--elevated); box-shadow:var(--shadow);">
+            <div style="font-size:12px; color:var(--text-secondary); margin-bottom:8px;">非準拠デバイス</div>
+            <div style="font-size:26px; font-weight:700; letter-spacing:-.01em; font-variant-numeric:tabular-nums; color:var(--danger-fg);">78</div>
+            <div style="margin-top:6px; font-size:11.5px; color:var(--danger-fg); font-weight:500;">+11 <span style="color:var(--text-muted); font-weight:400;">要対応</span></div>
+          </div>
+          <div style="border:1px solid var(--border); border-radius:12px; padding:16px; background:var(--elevated); box-shadow:var(--shadow);">
+            <div style="font-size:12px; color:var(--text-secondary); margin-bottom:8px;">同期遅延</div>
+            <div style="font-size:26px; font-weight:700; letter-spacing:-.01em; font-variant-numeric:tabular-nums; color:var(--warning-fg);">23</div>
+            <div style="margin-top:6px; font-size:11.5px; color:var(--text-muted);">24時間以上 未チェックイン</div>
+          </div>
+        </div>
+      </section>
+
+      <!-- ===== DATATABLE ===== -->
+      <section id="table" style="scroll-margin-top:104px; margin-bottom:44px;">
+        <h2 style="margin:0 0 4px; font-size:17px; font-weight:700;">DataTable</h2>
+        <p style="margin:0 0 16px; font-size:13px; color:var(--text-secondary);">密・ソート / フィルタ / 行アクション。ヘッダクリックでソート、⋯ で行メニュー</p>
+        <div style="border:1px solid var(--border); border-radius:12px; background:var(--elevated); overflow:hidden; box-shadow:var(--shadow);">
+          <!-- toolbar -->
+          <div style="display:flex; align-items:center; gap:10px; padding:11px 14px; border-bottom:1px solid var(--border); flex-wrap:wrap;">
+            <div style="display:flex; align-items:center; gap:7px; height:32px; flex:1; min-width:180px; max-width:300px; padding:0 10px; border:1px solid var(--border-strong); border-radius:8px; background:var(--bg);">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="var(--text-muted)" stroke-width="2" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><path d="m20 20-3-3"/></svg>
+              <input value="{{ search }}" onInput="{{ onSearch }}" placeholder="デバイス名・ユーザーで検索" style="border:none; outline:none; background:transparent; font-family:inherit; font-size:13px; color:var(--text); width:100%;" />
+            </div>
+            <button style="display:flex; align-items:center; gap:6px; height:32px; padding:0 11px; border:1px solid var(--border-strong); border-radius:8px; background:var(--bg); color:var(--text-secondary); font-size:12.5px; font-family:inherit; cursor:pointer;" style-hover="border-color:var(--primary); color:var(--primary);">
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 5h18l-7 8v6l-4-2v-4Z"/></svg>フィルタ
+            </button>
+            <div style="flex:1;"></div>
+            <span style="font-size:12px; color:var(--text-muted); white-space:nowrap;">{{ rowCount }} 件</span>
+          </div>
+          <!-- table -->
+          <div style="overflow-x:auto;">
+            <table style="width:100%; border-collapse:collapse; font-size:13px; min-width:760px;">
+              <thead>
+                <tr style="background:var(--surface);">
+                  <th onClick="{{ sortByName }}" style="text-align:left; font-weight:600; color:var(--text-secondary); font-size:12px; padding:9px 14px; border-bottom:1px solid var(--border); white-space:nowrap; cursor:pointer; user-select:none;">デバイス {{ nameArrow }}</th>
+                  <th onClick="{{ sortByUser }}" style="text-align:left; font-weight:600; color:var(--text-secondary); font-size:12px; padding:9px 14px; border-bottom:1px solid var(--border); white-space:nowrap; cursor:pointer; user-select:none;">ユーザー {{ userArrow }}</th>
+                  <th style="text-align:left; font-weight:600; color:var(--text-secondary); font-size:12px; padding:9px 14px; border-bottom:1px solid var(--border); white-space:nowrap;">モデル / OS</th>
+                  <th style="text-align:left; font-weight:600; color:var(--text-secondary); font-size:12px; padding:9px 14px; border-bottom:1px solid var(--border); white-space:nowrap;">管理モード</th>
+                  <th onClick="{{ sortByComp }}" style="text-align:left; font-weight:600; color:var(--text-secondary); font-size:12px; padding:9px 14px; border-bottom:1px solid var(--border); white-space:nowrap; cursor:pointer; user-select:none;">コンプライアンス {{ compArrow }}</th>
+                  <th style="text-align:left; font-weight:600; color:var(--text-secondary); font-size:12px; padding:9px 14px; border-bottom:1px solid var(--border); white-space:nowrap;">同期</th>
+                  <th onClick="{{ sortByCheckin }}" style="text-align:left; font-weight:600; color:var(--text-secondary); font-size:12px; padding:9px 14px; border-bottom:1px solid var(--border); white-space:nowrap; cursor:pointer; user-select:none;">最終チェックイン {{ checkinArrow }}</th>
+                  <th style="width:44px; border-bottom:1px solid var(--border);"></th>
+                </tr>
+              </thead>
+              <tbody>
+                <sc-for list="{{ devices }}" as="d" hint-placeholder-count="0">
+                  <tr style="border-bottom:1px solid var(--border);" style-hover="background:var(--surface);">
+                    <td style="padding:var(--row-py) 14px;"><div style="font-weight:500;">{{ d.name }}</div><div style="font-size:11px; color:var(--text-muted); font-family:'IBM Plex Mono',monospace;">{{ d.serial }}</div></td>
+                    <td style="padding:var(--row-py) 14px;"><div>{{ d.user }}</div><div style="font-size:11px; color:var(--text-muted);">{{ d.email }}</div></td>
+                    <td style="padding:var(--row-py) 14px;"><div>{{ d.model }}</div><div style="font-size:11px; color:var(--text-muted);">{{ d.os }}</div></td>
+                    <td style="padding:var(--row-py) 14px;"><span style="display:inline-flex; align-items:center; gap:5px; font-size:11.5px; font-weight:600; padding:2px 8px; border-radius:6px; background: {{ d.modeBg }}; color: {{ d.modeFg }}; border:1px solid {{ d.modeBorder }}; white-space:nowrap;">{{ d.mode }}</span></td>
+                    <td style="padding:var(--row-py) 14px;"><span style="display:inline-flex; align-items:center; gap:5px; font-size:11.5px; font-weight:600; padding:2px 8px; border-radius:6px; background: {{ d.compBg }}; color: {{ d.compFg }}; border:1px solid {{ d.compBorder }}; white-space:nowrap;">{{ d.compliance }}</span></td>
+                    <td style="padding:var(--row-py) 14px;">{{ d.syncEl }}</td>
+                    <td style="padding:var(--row-py) 14px; color:var(--text-secondary); white-space:nowrap; font-variant-numeric:tabular-nums;">{{ d.checkin }}</td>
+                    <td style="padding:var(--row-py) 6px; text-align:center; position:relative;">
+                      <button onClick="{{ d.onMenu }}" style="width:28px; height:28px; border:none; background:transparent; border-radius:7px; color:var(--text-muted); cursor:pointer; display:inline-flex; align-items:center; justify-content:center;" style-hover="background:var(--surface-2); color:var(--text);">
+                        <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><circle cx="12" cy="5" r="1.7"/><circle cx="12" cy="12" r="1.7"/><circle cx="12" cy="19" r="1.7"/></svg>
+                      </button>
+                      <sc-if value="{{ d.menuOpen }}" hint-placeholder-val="{{ false }}">
+                        <div style="position:absolute; right:8px; top:36px; z-index:40; width:152px; background:var(--elevated); border:1px solid var(--border); border-radius:10px; box-shadow:var(--shadow-pop); padding:5px; text-align:left;">
+                          <div style="padding:7px 9px; font-size:12.5px; border-radius:6px; cursor:pointer;" style-hover="background:var(--surface-2);">詳細を表示</div>
+                          <div onClick="{{ d.onLock }}" style="padding:7px 9px; font-size:12.5px; border-radius:6px; cursor: {{ d.lockCursor }}; color: {{ d.lockColor }};" style-hover="background:var(--surface-2);" title="{{ d.lockTip }}">リモートロック</div>
+                          <div onClick="{{ d.onReboot }}" style="padding:7px 9px; font-size:12.5px; border-radius:6px; cursor: {{ d.lockCursor }}; color: {{ d.lockColor }};" style-hover="background:var(--surface-2);" title="{{ d.lockTip }}">再起動</div>
+                          <div style="height:1px; background:var(--border); margin:4px 0;"></div>
+                          <div onClick="{{ d.onWipe }}" style="padding:7px 9px; font-size:12.5px; border-radius:6px; cursor: {{ d.wipeCursor }}; color: {{ d.wipeColor }};" style-hover="background:var(--danger-bg);" title="{{ d.wipeTip }}">完全消去 (WIPE)</div>
+                        </div>
+                      </sc-if>
+                    </td>
+                  </tr>
+                </sc-for>
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </section>
+
+      <!-- ===== STATES ===== -->
+      <section id="states" style="scroll-margin-top:104px; margin-bottom:44px;">
+        <h2 style="margin:0 0 4px; font-size:17px; font-weight:700;">状態 — 空 / ローディング / エラー / 403</h2>
+        <p style="margin:0 0 16px; font-size:13px; color:var(--text-secondary);">非同期データ表示の標準状態。</p>
+        <div style="display:grid; grid-template-columns:repeat(auto-fit, minmax(250px,1fr)); gap:14px;">
+          <!-- empty -->
+          <div style="border:1px solid var(--border); border-radius:12px; background:var(--elevated); padding:28px 20px; display:flex; flex-direction:column; align-items:center; text-align:center;">
+            <div style="width:44px; height:44px; border-radius:11px; background:var(--surface-2); display:flex; align-items:center; justify-content:center; margin-bottom:12px;">
+              <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="var(--text-muted)" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><rect x="7" y="2.5" width="10" height="19" rx="2.5"/><line x1="10.5" y1="18.4" x2="13.5" y2="18.4"/></svg>
+            </div>
+            <div style="font-size:13.5px; font-weight:600; margin-bottom:4px;">デバイスがありません</div>
+            <div style="font-size:12px; color:var(--text-secondary); margin-bottom:14px;">QR コードで最初のデバイスをエンロールしましょう。</div>
+            <button style="height:32px; padding:0 14px; border:none; border-radius:8px; background:var(--primary); color:var(--primary-fg); font-size:12.5px; font-weight:500; font-family:inherit; cursor:pointer;" style-hover="background:var(--primary-hover);">エンロール開始</button>
+          </div>
+          <!-- loading -->
+          <div style="border:1px solid var(--border); border-radius:12px; background:var(--elevated); padding:18px 18px;">
+            <div style="font-size:11px; color:var(--text-muted); margin-bottom:14px; font-weight:600;">ローディング（スケルトン）</div>
+            <div style="display:flex; flex-direction:column; gap:13px;">
+              <div style="display:flex; align-items:center; gap:10px;"><div style="width:30px; height:30px; border-radius:50%; background:linear-gradient(90deg,var(--surface-2) 25%,var(--border) 37%,var(--surface-2) 63%); background-size:200% 100%; animation:shimmer 1.4s ease-in-out infinite; flex:none;"></div><div style="flex:1;"><div style="height:9px; width:60%; border-radius:4px; background:linear-gradient(90deg,var(--surface-2) 25%,var(--border) 37%,var(--surface-2) 63%); background-size:200% 100%; animation:shimmer 1.4s ease-in-out infinite; margin-bottom:6px;"></div><div style="height:8px; width:40%; border-radius:4px; background:linear-gradient(90deg,var(--surface-2) 25%,var(--border) 37%,var(--surface-2) 63%); background-size:200% 100%; animation:shimmer 1.4s ease-in-out infinite;"></div></div></div>
+              <div style="height:9px; width:90%; border-radius:4px; background:linear-gradient(90deg,var(--surface-2) 25%,var(--border) 37%,var(--surface-2) 63%); background-size:200% 100%; animation:shimmer 1.4s ease-in-out infinite;"></div>
+              <div style="height:9px; width:75%; border-radius:4px; background:linear-gradient(90deg,var(--surface-2) 25%,var(--border) 37%,var(--surface-2) 63%); background-size:200% 100%; animation:shimmer 1.4s ease-in-out infinite;"></div>
+              <div style="height:9px; width:82%; border-radius:4px; background:linear-gradient(90deg,var(--surface-2) 25%,var(--border) 37%,var(--surface-2) 63%); background-size:200% 100%; animation:shimmer 1.4s ease-in-out infinite;"></div>
+            </div>
+          </div>
+          <!-- error -->
+          <div style="border:1px solid var(--border); border-radius:12px; background:var(--elevated); padding:28px 20px; display:flex; flex-direction:column; align-items:center; text-align:center;">
+            <div style="width:44px; height:44px; border-radius:11px; background:var(--danger-bg); display:flex; align-items:center; justify-content:center; margin-bottom:12px;">
+              <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="var(--danger-fg)" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2 2 20h20L12 2Z"/><line x1="12" y1="9" x2="12" y2="14"/><line x1="12" y1="17.5" x2="12" y2="17.51"/></svg>
+            </div>
+            <div style="font-size:13.5px; font-weight:600; margin-bottom:4px;">データの取得に失敗しました</div>
+            <div style="font-size:12px; color:var(--text-secondary); margin-bottom:14px;">ネットワーク接続を確認して再試行してください。</div>
+            <button style="height:32px; padding:0 14px; border:1px solid var(--border-strong); border-radius:8px; background:var(--bg); color:var(--text); font-size:12.5px; font-weight:500; font-family:inherit; cursor:pointer;" style-hover="border-color:var(--primary); color:var(--primary);">再試行</button>
+          </div>
+          <!-- 403 -->
+          <div style="border:1px solid var(--border); border-radius:12px; background:var(--elevated); padding:28px 20px; display:flex; flex-direction:column; align-items:center; text-align:center;">
+            <div style="width:44px; height:44px; border-radius:11px; background:var(--surface-2); display:flex; align-items:center; justify-content:center; margin-bottom:12px;">
+              <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="var(--text-secondary)" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="5" y="11" width="14" height="9" rx="2"/><path d="M8 11V8a4 4 0 0 1 8 0v3"/></svg>
+            </div>
+            <div style="font-size:11px; font-weight:700; letter-spacing:.06em; color:var(--text-muted); margin-bottom:3px;">403</div>
+            <div style="font-size:13.5px; font-weight:600; margin-bottom:4px;">アクセス権限がありません</div>
+            <div style="font-size:12px; color:var(--text-secondary);">この画面の閲覧には TenantAdmin 以上の<br>権限が必要です。管理者にお問い合わせください。</div>
+          </div>
+        </div>
+      </section>
+
+      <!-- ===== ROLEGATE ===== -->
+      <section id="rolegate" style="scroll-margin-top:104px; margin-bottom:44px;">
+        <h2 style="margin:0 0 4px; font-size:17px; font-weight:700;">RoleGate</h2>
+        <p style="margin:0 0 16px; font-size:13px; color:var(--text-secondary);">権限のない操作ボタンは「非活性 + ツールチップで理由」、アクセス不可のナビ / 画面は「非表示」。トップバーで現在ロール = <b style="color:var(--text);">{{ role }}</b>。</p>
+        <div style="border:1px solid var(--border); border-radius:12px; background:var(--elevated); padding:18px; box-shadow:var(--shadow);">
+          <div style="font-size:12px; color:var(--text-secondary); margin-bottom:12px;">デバイス操作ツールバー（現在ロールで自動制御）</div>
+          <div style="display:flex; flex-wrap:wrap; gap:10px; margin-bottom:16px;">
+            <button onClick="{{ btnLock }}" disabled="{{ lockDisabled }}" title="{{ lockTip }}" style="display:inline-flex; align-items:center; gap:7px; height:34px; padding:0 14px; border:1px solid var(--border-strong); border-radius:8px; background:var(--bg); color: {{ lockTextColor }}; font-size:13px; font-weight:500; font-family:inherit; cursor: {{ lockCursor }}; opacity: {{ lockOpacity }};" style-hover="border-color:var(--primary);">
+              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="5" y="11" width="14" height="9" rx="2"/><path d="M8 11V8a4 4 0 0 1 8 0v3"/></svg>リモートロック
+            </button>
+            <button onClick="{{ btnReboot }}" disabled="{{ lockDisabled }}" title="{{ lockTip }}" style="display:inline-flex; align-items:center; gap:7px; height:34px; padding:0 14px; border:1px solid var(--border-strong); border-radius:8px; background:var(--bg); color: {{ lockTextColor }}; font-size:13px; font-weight:500; font-family:inherit; cursor: {{ lockCursor }}; opacity: {{ lockOpacity }};" style-hover="border-color:var(--primary);">
+              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-3-6.7"/><path d="M21 4v5h-5"/></svg>再起動
+            </button>
+            <button onClick="{{ btnPolicy }}" disabled="{{ policyDisabled }}" title="{{ policyTip }}" style="display:inline-flex; align-items:center; gap:7px; height:34px; padding:0 14px; border:1px solid var(--border-strong); border-radius:8px; background:var(--bg); color: {{ policyTextColor }}; font-size:13px; font-weight:500; font-family:inherit; cursor: {{ policyCursor }}; opacity: {{ policyOpacity }};" style-hover="border-color:var(--primary);">
+              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3 4.5 6v5c0 4.4 3.2 7.4 7.5 9 4.3-1.6 7.5-4.6 7.5-9V6L12 3Z"/></svg>ポリシー編集
+            </button>
+            <button onClick="{{ btnWipe }}" disabled="{{ wipeDisabled }}" title="{{ wipeTip }}" style="display:inline-flex; align-items:center; gap:7px; height:34px; padding:0 14px; border:1px solid {{ wipeBorder }}; border-radius:8px; background: {{ wipeBg }}; color: {{ wipeTextColor }}; font-size:13px; font-weight:600; font-family:inherit; cursor: {{ wipeCursorBtn }}; opacity: {{ wipeOpacity }};" style-hover="filter:brightness(.97);">
+              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18M8 6V4h8v2M6 6l1 14h10l1-14"/></svg>完全消去 (WIPE)
+            </button>
+          </div>
+          <div style="display:flex; gap:8px; align-items:flex-start; padding:11px 13px; border-radius:8px; background:var(--surface); border:1px solid var(--border);">
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="var(--text-muted)" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="flex:none; margin-top:1px;"><circle cx="12" cy="12" r="9"/><path d="M12 16v-4M12 8h.01"/></svg>
+            <div style="font-size:12px; color:var(--text-secondary); line-height:1.55;">{{ roleNote }}</div>
+          </div>
+        </div>
+      </section>
+
+      <!-- ===== DIALOG ===== -->
+      <section id="dialog" style="scroll-margin-top:104px; margin-bottom:44px;">
+        <h2 style="margin:0 0 4px; font-size:17px; font-weight:700;">ConfirmDialog（二段階確認）</h2>
+        <p style="margin:0 0 16px; font-size:13px; color:var(--text-secondary);">不可逆操作（WIPE / テナント削除）専用。対象名を明示し、シリアル番号の入力で確認を要求。危険色。</p>
+        <button onClick="{{ openWipeDialog }}" style="display:inline-flex; align-items:center; gap:7px; height:36px; padding:0 16px; border:1px solid var(--danger-border); border-radius:8px; background:var(--danger-bg); color:var(--danger-fg); font-size:13px; font-weight:600; font-family:inherit; cursor:pointer;" style-hover="filter:brightness(.97);">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18M8 6V4h8v2M6 6l1 14h10l1-14"/></svg>WIPE 確認ダイアログを開く
+        </button>
+      </section>
+
+      <!-- ===== TOAST ===== -->
+      <section id="toast" style="scroll-margin-top:104px;">
+        <h2 style="margin:0 0 4px; font-size:17px; font-weight:700;">トースト（コマンド送信フィードバック）</h2>
+        <p style="margin:0 0 16px; font-size:13px; color:var(--text-secondary);">非同期コマンドの送信状態：実行待ち → 成功 / 失敗。右下に表示。</p>
+        <div style="display:flex; gap:10px; flex-wrap:wrap;">
+          <button onClick="{{ toastSuccess }}" style="height:34px; padding:0 14px; border:1px solid var(--border-strong); border-radius:8px; background:var(--bg); color:var(--text); font-size:13px; font-weight:500; font-family:inherit; cursor:pointer;" style-hover="border-color:var(--primary); color:var(--primary);">コマンド送信（成功デモ）</button>
+          <button onClick="{{ toastFail }}" style="height:34px; padding:0 14px; border:1px solid var(--border-strong); border-radius:8px; background:var(--bg); color:var(--text); font-size:13px; font-weight:500; font-family:inherit; cursor:pointer;" style-hover="border-color:var(--danger); color:var(--danger-fg);">コマンド送信（失敗デモ）</button>
+        </div>
+      </section>
+
+    </div>
+  </main>
+
+  <!-- ===== CONFIRM DIALOG OVERLAY ===== -->
+  <sc-if value="{{ dialogOpen }}" hint-placeholder-val="{{ false }}">
+    <div onClick="{{ closeDialog }}" style="position:fixed; inset:0; z-index:80; background:rgba(8,11,18,.5); display:flex; align-items:center; justify-content:center; padding:20px; animation:overlayin .14s ease;">
+      <div onClick="{{ stop }}" style="width:100%; max-width:440px; background:var(--elevated); border:1px solid var(--border); border-radius:14px; box-shadow:var(--shadow-pop); overflow:hidden; animation:dialogin .16s ease;">
+        <div style="padding:20px 22px 0;">
+          <div style="display:flex; align-items:center; gap:11px; margin-bottom:14px;">
+            <div style="width:38px; height:38px; flex:none; border-radius:10px; background:var(--danger-bg); display:flex; align-items:center; justify-content:center;">
+              <svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="var(--danger-fg)" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2 2 20h20L12 2Z"/><line x1="12" y1="9" x2="12" y2="14"/><line x1="12" y1="17.5" x2="12" y2="17.51"/></svg>
+            </div>
+            <div>
+              <div style="font-size:15px; font-weight:700;">デバイスを完全消去します</div>
+              <div style="font-size:12px; color:var(--danger-fg); font-weight:500;">この操作は取り消せません</div>
+            </div>
+          </div>
+          <p style="margin:0 0 14px; font-size:13px; color:var(--text-secondary); line-height:1.6;">対象デバイス上の全データとポリシーが削除され、初期化されます。続行するには対象デバイスのシリアル番号を入力してください。</p>
+          <div style="border:1px solid var(--border); border-radius:9px; background:var(--surface); padding:11px 13px; margin-bottom:14px;">
+            <div style="display:flex; justify-content:space-between; gap:10px; margin-bottom:4px;"><span style="font-size:12px; color:var(--text-muted);">デバイス</span><span style="font-size:12.5px; font-weight:600;">Pixel 8 — 田中 太郎</span></div>
+            <div style="display:flex; justify-content:space-between; gap:10px;"><span style="font-size:12px; color:var(--text-muted);">シリアル番号</span><span style="font-size:12.5px; font-weight:600; font-family:'IBM Plex Mono',monospace;">35682901</span></div>
+          </div>
+          <label style="display:block; font-size:12px; color:var(--text-secondary); margin-bottom:6px;">確認のためシリアル番号を入力</label>
+          <input value="{{ dialogInput }}" onInput="{{ onDialogInput }}" placeholder="35682901" style="width:100%; height:38px; padding:0 12px; border:1px solid {{ inputBorder }}; border-radius:8px; background:var(--bg); color:var(--text); font-size:13px; font-family:'IBM Plex Mono',monospace; outline:none; margin-bottom:4px;" />
+        </div>
+        <div style="display:flex; gap:10px; justify-content:flex-end; padding:16px 22px 20px;">
+          <button onClick="{{ closeDialog }}" style="height:36px; padding:0 16px; border:1px solid var(--border-strong); border-radius:8px; background:var(--bg); color:var(--text); font-size:13px; font-weight:500; font-family:inherit; cursor:pointer;" style-hover="background:var(--surface-2);">キャンセル</button>
+          <button onClick="{{ confirmWipe }}" disabled="{{ confirmDisabled }}" style="height:36px; padding:0 18px; border:none; border-radius:8px; background: {{ confirmBg }}; color:#fff; font-size:13px; font-weight:600; font-family:inherit; cursor: {{ confirmCursor }}; opacity: {{ confirmOpacity }};">完全消去を実行</button>
+        </div>
+      </div>
+    </div>
+  </sc-if>
+
+  <!-- ===== TOASTER ===== -->
+  <div style="position:fixed; right:20px; bottom:20px; z-index:90; display:flex; flex-direction:column; gap:10px; width:320px; max-width:calc(100vw - 40px);">
+    <sc-for list="{{ toasts }}" as="t" hint-placeholder-count="0">
+      <div style="display:flex; align-items:flex-start; gap:11px; padding:13px 14px; background:var(--elevated); border:1px solid var(--border); border-left:3px solid {{ t.accent }}; border-radius:10px; box-shadow:var(--shadow-pop); animation:toastin .2s ease;">
+        {{ t.icon }}
+        <div style="flex:1; min-width:0;">
+          <div style="font-size:13px; font-weight:600;">{{ t.title }}</div>
+          <div style="font-size:12px; color:var(--text-secondary); margin-top:1px;">{{ t.desc }}</div>
+        </div>
+      </div>
+    </sc-for>
+  </div>
+
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props="{&quot;$preview&quot;:{&quot;width&quot;:1280,&quot;height&quot;:900},&quot;primary&quot;:{&quot;editor&quot;:&quot;color&quot;,&quot;default&quot;:&quot;#4f46e5&quot;,&quot;tsType&quot;:&quot;string&quot;},&quot;defaultTheme&quot;:{&quot;editor&quot;:&quot;enum&quot;,&quot;default&quot;:&quot;light&quot;,&quot;options&quot;:[&quot;light&quot;,&quot;dark&quot;],&quot;tsType&quot;:&quot;'light'|'dark'&quot;},&quot;defaultRole&quot;:{&quot;editor&quot;:&quot;enum&quot;,&quot;default&quot;:&quot;SuperAdmin&quot;,&quot;options&quot;:[&quot;SuperAdmin&quot;,&quot;TenantAdmin&quot;,&quot;Operator&quot;,&quot;Viewer&quot;],&quot;tsType&quot;:&quot;string&quot;},&quot;density&quot;:{&quot;editor&quot;:&quot;enum&quot;,&quot;default&quot;:&quot;compact&quot;,&quot;options&quot;:[&quot;compact&quot;,&quot;comfortable&quot;],&quot;tsType&quot;:&quot;'compact'|'comfortable'&quot;}}">
+class Component extends DCLogic {
+  state = {
+    mode: this.props.defaultTheme || 'light',
+    role: this.props.defaultRole || 'SuperAdmin',
+    collapsed: false,
+    sort: { key: 'name', dir: 'asc' },
+    search: '',
+    menuRow: null,
+    dialogOpen: false,
+    dialogInput: '',
+    toasts: [],
+  };
+
+  componentDidMount() {
+    this.applyEnv();
+  }
+  componentDidUpdate(pp, ps) {
+    if (ps.mode !== this.state.mode) this.applyEnv();
+  }
+  applyEnv() {
+    document.documentElement.setAttribute('data-theme', this.state.mode);
+    if (this.props.primary) document.documentElement.style.setProperty('--primary', this.props.primary);
+    const py = (this.props.density === 'comfortable') ? '11px' : '7px';
+    document.documentElement.style.setProperty('--row-py', py);
+  }
+
+  // ---- helpers ----
+  perms() {
+    const r = this.state.role;
+    return {
+      lock: r === 'Operator' || r === 'TenantAdmin' || r === 'SuperAdmin',
+      wipe: r === 'TenantAdmin' || r === 'SuperAdmin',
+      policy: r === 'TenantAdmin' || r === 'SuperAdmin',
+      tenant: r === 'SuperAdmin',
+      admins: r === 'TenantAdmin' || r === 'SuperAdmin',
+    };
+  }
+  relTime(m) {
+    if (m < 60) return m + '分前';
+    if (m < 1440) return Math.floor(m / 60) + '時間前';
+    return Math.floor(m / 1440) + '日前';
+  }
+  el(tag, props, ...kids) { return React.createElement(tag, props, ...kids); }
+  badgeTokens(kind) {
+    const map = {
+      success: ['var(--success-bg)', 'var(--success-fg)', 'var(--success-border)', 'var(--success)'],
+      danger: ['var(--danger-bg)', 'var(--danger-fg)', 'var(--danger-border)', 'var(--danger)'],
+      warning: ['var(--warning-bg)', 'var(--warning-fg)', 'var(--warning-border)', 'var(--warning)'],
+      neutral: ['var(--neutral-bg)', 'var(--neutral-fg)', 'var(--neutral-border)', 'var(--neutral)'],
+      info: ['var(--info-bg)', 'var(--info-fg)', 'var(--info-border)', 'var(--info)'],
+      purple: ['var(--purple-bg)', 'var(--purple-fg)', 'var(--purple-border)', 'var(--purple)'],
+      pale: ['var(--pale-bg)', 'var(--pale-fg)', 'var(--pale-border)', 'var(--pale-fg)'],
+    };
+    return map[kind];
+  }
+
+  toggleTheme = () => this.setState(s => ({ mode: s.mode === 'light' ? 'dark' : 'light' }));
+  toggleCollapse = () => this.setState(s => ({ collapsed: !s.collapsed }));
+  onRoleChange = (e) => this.setState({ role: e.target.value, menuRow: null });
+  onSearch = (e) => this.setState({ search: e.target.value });
+
+  setSort(key) {
+    this.setState(s => {
+      if (s.sort.key === key) return { sort: { key, dir: s.sort.dir === 'asc' ? 'desc' : 'asc' } };
+      return { sort: { key, dir: 'asc' } };
+    });
+  }
+
+  // ---- toasts ----
+  pushToast(t) {
+    const id = Date.now() + Math.random();
+    this.setState(s => ({ toasts: [...s.toasts, { id, ...t }] }));
+    return id;
+  }
+  updateToast(id, patch) {
+    this.setState(s => ({ toasts: s.toasts.map(t => t.id === id ? { ...t, ...patch } : t) }));
+  }
+  removeToast(id) {
+    this.setState(s => ({ toasts: s.toasts.filter(t => t.id !== id) }));
+  }
+  runCommand(label, willSucceed) {
+    const id = this.pushToast({ kind: 'pending', title: label, desc: 'コマンドを送信中…' });
+    setTimeout(() => {
+      if (willSucceed) this.updateToast(id, { kind: 'success', title: label, desc: 'コマンドを送信しました' });
+      else this.updateToast(id, { kind: 'error', title: label, desc: '送信に失敗しました。再試行してください' });
+      setTimeout(() => this.removeToast(id), 3200);
+    }, 1500);
+  }
+
+  // ---- dialog ----
+  openWipeDialog = () => this.setState({ dialogOpen: true, dialogInput: '', menuRow: null });
+  closeDialog = () => this.setState({ dialogOpen: false });
+  onDialogInput = (e) => this.setState({ dialogInput: e.target.value });
+  confirmWipe = () => {
+    if (this.state.dialogInput.trim() !== '35682901') return;
+    this.setState({ dialogOpen: false });
+    this.runCommand('WIPE — Pixel 8', true);
+  };
+  stop = (e) => e.stopPropagation();
+
+  toastIcon(kind) {
+    if (kind === 'pending') {
+      return this.el('div', { key: 'i', style: { width: 16, height: 16, flex: 'none', marginTop: 1, borderRadius: '50%', border: '2px solid var(--border-strong)', borderTopColor: 'var(--primary)', animation: 'spin .7s linear infinite' } });
+    }
+    const color = kind === 'success' ? 'var(--success-fg)' : 'var(--danger-fg)';
+    const path = kind === 'success' ? 'M20 6 9 17l-5-5' : 'M18 6 6 18M6 6l12 12';
+    return this.el('svg', { key: 'i', width: 16, height: 16, viewBox: '0 0 24 24', fill: 'none', stroke: color, strokeWidth: 2.4, strokeLinecap: 'round', strokeLinejoin: 'round', style: { flex: 'none', marginTop: 1 } }, this.el('path', { key: 'p', d: path }));
+  }
+  themeIconEl() {
+    if (this.state.mode === 'light') {
+      return this.el('svg', { width: 17, height: 17, viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor', strokeWidth: 1.9, strokeLinecap: 'round', strokeLinejoin: 'round' },
+        this.el('path', { key: 'p', d: 'M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8Z' }));
+    }
+    return this.el('svg', { width: 17, height: 17, viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor', strokeWidth: 1.9, strokeLinecap: 'round', strokeLinejoin: 'round' },
+      this.el('circle', { key: 'c', cx: 12, cy: 12, r: 4 }),
+      this.el('path', { key: 'p', d: 'M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4' }));
+  }
+
+  syncEl(delayed) {
+    if (delayed) {
+      return this.el('span', { style: { display: 'inline-flex', alignItems: 'center', gap: 5, fontSize: '11.5px', fontWeight: 600, padding: '2px 8px', borderRadius: 6, background: 'var(--warning-bg)', color: 'var(--warning-fg)', border: '1px solid var(--warning-border)', whiteSpace: 'nowrap' } },
+        this.el('span', { key: 'd', style: { width: 6, height: 6, borderRadius: '50%', background: 'var(--warning)' } }), '同期遅延');
+    }
+    return this.el('span', { style: { color: 'var(--text-muted)', fontSize: '12px' } }, '正常');
+  }
+
+  renderVals() {
+    document.documentElement.setAttribute('data-theme', this.state.mode);
+    if (this.props.primary) document.documentElement.style.setProperty('--primary', this.props.primary);
+    const r = this.state.role;
+    const p = this.perms();
+    const dir = this.state.sort.dir;
+    const arrow = dir === 'asc' ? '↑' : '↓';
+
+    // user identity per role
+    const emails = {
+      SuperAdmin: 'platform-ops@mobiguard.io',
+      TenantAdmin: 'admin@acme.co.jp',
+      Operator: 'operator@acme.co.jp',
+      Viewer: 'viewer@acme.co.jp',
+    };
+    const roleKind = { SuperAdmin: 'purple', TenantAdmin: 'info', Operator: 'success', Viewer: 'neutral' }[r];
+    const rbt = this.badgeTokens(roleKind);
+
+    // devices
+    const raw = [
+      ['Pixel 8', '田中 太郎', 'tanaka@acme.co.jp', 'Pixel 8', 'Android 14', 'Fully Managed', '準拠', false, 4, '35682901'],
+      ['Galaxy S23', '佐藤 花子', 'sato@acme.co.jp', 'Galaxy S23', 'Android 14', 'Fully Managed', '準拠', true, 190, '35771145'],
+      ['Kiosk-A12', '—', '—', 'Galaxy Tab A9', 'Android 13', 'Dedicated (Kiosk)', '準拠', false, 12, '35990022'],
+      ['Pixel 7a', '鈴木 一郎', 'suzuki@acme.co.jp', 'Pixel 7a', 'Android 13', 'Fully Managed', '非準拠', false, 35, '35420087'],
+      ['Xperia 10', '高橋 実', 'takahashi@acme.co.jp', 'Xperia 10 V', 'Android 14', 'Fully Managed', '未確認', true, 1440, '35113398'],
+      ['Kiosk-B03', '—', '—', 'Lenovo Tab M10', 'Android 12', 'Dedicated (Kiosk)', '非準拠', false, 60, '35664120'],
+      ['Pixel 6', '山本 健', 'yamamoto@acme.co.jp', 'Pixel 6', 'Android 13', 'Fully Managed', '準拠', false, 8, '35228841'],
+      ['AQUOS sense8', '中村 京', 'nakamura@acme.co.jp', 'AQUOS sense8', 'Android 14', 'Fully Managed', 'サポート対象外', false, 2880, '35501276'],
+    ];
+    const compKind = { '準拠': 'success', '非準拠': 'danger', '未確認': 'neutral', 'サポート対象外': 'pale' };
+    const compRank = { '準拠': 0, '非準拠': 1, '未確認': 2, 'サポート対象外': 3 };
+    let list = raw.map(a => ({
+      name: a[0], user: a[1], email: a[2], model: a[3], os: a[4], mode: a[5],
+      compliance: a[6], delayed: a[7], mins: a[8], serial: a[9],
+    }));
+    const q = this.state.search.trim().toLowerCase();
+    if (q) list = list.filter(d => (d.name + d.user + d.email).toLowerCase().includes(q));
+    const k = this.state.sort.key, mul = dir === 'asc' ? 1 : -1;
+    list.sort((a, b) => {
+      let av, bv;
+      if (k === 'comp') { av = compRank[a.compliance]; bv = compRank[b.compliance]; }
+      else if (k === 'checkin') { av = a.mins; bv = b.mins; }
+      else { av = String(a[k]); bv = String(b[k]); return av.localeCompare(bv, 'ja') * mul; }
+      return (av - bv) * mul;
+    });
+
+    const lockTip = p.lock ? '' : 'このロール（' + r + '）では実行できません';
+    const wipeTip = p.wipe ? '' : 'WIPE は TenantAdmin 以上のみ実行できます';
+    const policyTip = p.policy ? '' : 'ポリシー編集は TenantAdmin 以上のみ可能です';
+
+    const devices = list.map((d, i) => {
+      const ct = this.badgeTokens(compKind[d.compliance]);
+      const isKiosk = d.mode === 'Dedicated (Kiosk)';
+      const mt = this.badgeTokens(isKiosk ? 'purple' : 'info');
+      return {
+        ...d,
+        checkin: this.relTime(d.mins),
+        syncEl: this.syncEl(d.delayed),
+        compBg: ct[0], compFg: ct[1], compBorder: ct[2],
+        modeBg: mt[0], modeFg: mt[1], modeBorder: mt[2],
+        menuOpen: this.state.menuRow === i,
+        onMenu: (e) => { e.stopPropagation(); this.setState(s => ({ menuRow: s.menuRow === i ? null : i })); },
+        onLock: () => { if (p.lock) { this.setState({ menuRow: null }); this.runCommand('リモートロック — ' + d.name, true); } },
+        onReboot: () => { if (p.lock) { this.setState({ menuRow: null }); this.runCommand('再起動 — ' + d.name, true); } },
+        onWipe: () => { if (p.wipe) this.openWipeDialog(); },
+        lockCursor: p.lock ? 'pointer' : 'not-allowed',
+        lockColor: p.lock ? 'var(--text)' : 'var(--text-muted)',
+        lockTip,
+        wipeCursor: p.wipe ? 'pointer' : 'not-allowed',
+        wipeColor: p.wipe ? 'var(--danger-fg)' : 'var(--text-muted)',
+        wipeTip,
+      };
+    });
+
+    // role note
+    const hidden = [];
+    if (!p.admins) hidden.push('管理者');
+    const hiddenStr = hidden.length ? hidden.join('・') + ' ナビは非表示' : 'すべてのナビにアクセス可能';
+    const roleNote = '現在ロール ' + r + '：' + hiddenStr + '。実行不可ボタンは非活性のままツールチップで理由を表示します（DOM からは消さずアフォーダンスを残す）。';
+
+    const dlgOk = this.state.dialogInput.trim() === '35682901';
+
+    return {
+      mode: this.state.mode,
+      role: r,
+      userEmail: emails[r],
+      userInitials: r.slice(0, 2).toUpperCase(),
+      roleBadgeBg: rbt[0], roleBadgeFg: rbt[1],
+      isSuperAdmin: p.tenant,
+      canSeeAdmins: p.admins,
+      tenantLabel: 'Acme 株式会社',
+      sidebarWidth: this.state.collapsed ? '64px' : '240px',
+      showLabels: !this.state.collapsed,
+      themeIcon: this.themeIconEl(),
+      toggleTheme: this.toggleTheme,
+      toggleCollapse: this.toggleCollapse,
+      onRoleChange: this.onRoleChange,
+
+      // table
+      search: this.state.search,
+      onSearch: this.onSearch,
+      rowCount: devices.length,
+      devices,
+      nameArrow: k === 'name' ? arrow : '',
+      userArrow: k === 'user' ? arrow : '',
+      compArrow: k === 'comp' ? arrow : '',
+      checkinArrow: k === 'checkin' ? arrow : '',
+      sortByName: () => this.setSort('name'),
+      sortByUser: () => this.setSort('user'),
+      sortByComp: () => this.setSort('comp'),
+      sortByCheckin: () => this.setSort('checkin'),
+
+      // rolegate toolbar
+      lockDisabled: !p.lock, lockTip, lockCursor: p.lock ? 'pointer' : 'not-allowed',
+      lockTextColor: p.lock ? 'var(--text)' : 'var(--text-muted)', lockOpacity: p.lock ? '1' : '.55',
+      policyDisabled: !p.policy, policyTip, policyCursor: p.policy ? 'pointer' : 'not-allowed',
+      policyTextColor: p.policy ? 'var(--text)' : 'var(--text-muted)', policyOpacity: p.policy ? '1' : '.55',
+      wipeDisabled: !p.wipe, wipeTip, wipeCursorBtn: p.wipe ? 'pointer' : 'not-allowed',
+      wipeBg: p.wipe ? 'var(--danger-bg)' : 'var(--surface-2)',
+      wipeBorder: p.wipe ? 'var(--danger-border)' : 'var(--border-strong)',
+      wipeTextColor: p.wipe ? 'var(--danger-fg)' : 'var(--text-muted)',
+      wipeOpacity: p.wipe ? '1' : '.6',
+      btnLock: () => { if (p.lock) this.runCommand('リモートロック — Pixel 8', true); },
+      btnReboot: () => { if (p.lock) this.runCommand('再起動 — Pixel 8', true); },
+      btnPolicy: () => {},
+      btnWipe: () => { if (p.wipe) this.openWipeDialog(); },
+      roleNote,
+
+      // dialog
+      dialogOpen: this.state.dialogOpen,
+      dialogInput: this.state.dialogInput,
+      onDialogInput: this.onDialogInput,
+      openWipeDialog: this.openWipeDialog,
+      closeDialog: this.closeDialog,
+      confirmWipe: this.confirmWipe,
+      stop: this.stop,
+      inputBorder: this.state.dialogInput && !dlgOk ? 'var(--danger)' : 'var(--border-strong)',
+      confirmDisabled: !dlgOk,
+      confirmBg: dlgOk ? 'var(--danger)' : 'var(--neutral)',
+      confirmCursor: dlgOk ? 'pointer' : 'not-allowed',
+      confirmOpacity: dlgOk ? '1' : '.6',
+
+      // toast
+      toastSuccess: () => this.runCommand('リモートロック — Pixel 8', true),
+      toastFail: () => this.runCommand('再起動 — Galaxy S23', false),
+      toasts: this.state.toasts.map(t => ({
+        ...t,
+        accent: t.kind === 'success' ? 'var(--success)' : t.kind === 'error' ? 'var(--danger)' : 'var(--primary)',
+        icon: this.toastIcon(t.kind),
+      })),
+    };
+  }
+}
+</script>
+</body>
+</html>
