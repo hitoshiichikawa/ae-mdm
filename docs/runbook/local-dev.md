@@ -200,10 +200,10 @@ make migrate-down
 - Issue #2 で `backend/db/migrations/0001-0012_*.{up,down}.sql` を追加済み。`migrate-up` を
   実行すると 12 ペアが順に適用され、全テーブル作成 → 0011 で RLS 有効化 →
   0012 で audit_logs append-only 強制（FORCE RLS + REVOKE UPDATE/DELETE）まで進む
-- `db-init-roles` を **先に** 実行していない状態で `migrate-up` を走らせると、0012 の
-  `REVOKE ... FROM app_user` が `app_user` 未作成のため NOTICE で skip される。後から
-  `db-init-roles` を実行した場合は `migrate-down → migrate-up` で REVOKE を再適用するか、
-  手動で `REVOKE UPDATE, DELETE ON audit_logs FROM app_user` を実行する
+- `db-init-roles` と `migrate-up` の実行順がどちらでも、最終 DB 状態で audit_logs の
+  UPDATE/DELETE は app_user から剥奪される（`backend/db/roles/0001_*.sql` 末尾でも明示的に
+  REVOKE するため。PR #31 round-3 review 由来）。`migrate-up → db-init-roles` の順で
+  実行しても、`db-init-roles` 内の REVOKE が確実に有効化される
 
 ### 5. 初期 SuperAdmin の seed
 

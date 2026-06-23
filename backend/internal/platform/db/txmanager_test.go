@@ -84,9 +84,10 @@ func TestBeginTxFunc_NormalReturn_Commits(t *testing.T) {
 	// Act
 	err := beginTxFuncWith(ctx, pool, func(actual pgx.Tx) error {
 		fnCalls++
-		// SetLocalTenant が事前に走っているはずなので Exec が 1 回記録されているべき。
-		if len(tx.execCalls) != 1 {
-			t.Errorf("fn 実行時点で SetLocalTenant が走っていない; Exec 件数 = %d", len(tx.execCalls))
+		// SetLocalTenant が事前に走っているはずなので Exec が 2 回記録されているべき
+		// （app.tenant_id + app.is_superadmin の両 GUC を毎 tx で初期化する仕様 / PR #31 round-3 review）。
+		if len(tx.execCalls) != 2 {
+			t.Errorf("fn 実行時点で SetLocalTenant が走っていない; Exec 件数 = %d (want 2)", len(tx.execCalls))
 		}
 		return nil
 	})

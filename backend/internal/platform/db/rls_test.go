@@ -78,11 +78,11 @@ func mustTenantID(t *testing.T, s string) uuid.UUID {
 	return id
 }
 
-// TestSetLocalTenant_NormalTenant_EmitsSetConfigForTenantID は requirements.md Req 4.3 と
-// design.md「set_config('app.tenant_id', $1, true)」契約に対応する。通常テナント文脈
-// （IsSuperAdmin=false）では `app.tenant_id` だけがバインドパラメータ経由で発行され、
-// `app.is_superadmin` は発行されないことを確認する。
-func TestSetLocalTenant_NormalTenant_EmitsSetConfigForTenantID(t *testing.T) {
+// TestSetLocalTenant_NormalTenant_EmitsBothGUCs は requirements.md Req 4.3 と
+// PR #31 round-3 review 由来の仕様（両 GUC を毎 tx で初期化）に対応する。通常テナント文脈
+// （IsSuperAdmin=false）では `app.tenant_id = <tenant uuid>` と `app.is_superadmin = 'false'`
+// の両方がバインドパラメータ経由で発行され、pgxpool 接続再利用時の GUC 残骸を排除する。
+func TestSetLocalTenant_NormalTenant_EmitsBothGUCs(t *testing.T) {
 	// Arrange
 	tx := &fakeTx{}
 	tenantID := mustTenantID(t, "11111111-1111-1111-1111-111111111111")
@@ -100,25 +100,26 @@ func TestSetLocalTenant_NormalTenant_EmitsSetConfigForTenantID(t *testing.T) {
 	if err != nil {
 		t.Fatalf("SetLocalTenant: %v", err)
 	}
-	if len(tx.execCalls) != 1 {
-		t.Fatalf("Exec 呼び出し数 = %d; want 1（app.tenant_id のみ）", len(tx.execCalls))
+	if len(tx.execCalls) != 2 {
+		t.Fatalf("Exec 呼び出し数 = %d; want 2（app.tenant_id + app.is_superadmin）", len(tx.execCalls))
 	}
-	got := tx.execCalls[0]
-	wantSQL := "SELECT set_config('app.tenant_id', $1, true)"
-	if got.sql != wantSQL {
-		t.Errorf("Exec SQL = %q; want %q", got.sql, wantSQL)
+	if tx.execCalls[0].sql != "SELECT set_config('app.tenant_id', $1, true)" {
+		t.Errorf("1st SQL = %q; want app.tenant_id", tx.execCalls[0].sql)
 	}
-	if len(got.args) != 1 {
-		t.Fatalf("Exec args 件数 = %d; want 1", len(got.args))
+	if len(tx.execCalls[0].args) != 1 || tx.execCalls[0].args[0] != tenantID.String() {
+		t.Errorf("1st args = %v; want [%q]", tx.execCalls[0].args, tenantID.String())
 	}
-	if got.args[0] != tenantID.String() {
-		t.Errorf("Exec args[0] = %v; want %q", got.args[0], tenantID.String())
+	if tx.execCalls[1].sql != "SELECT set_config('app.is_superadmin', $1, true)" {
+		t.Errorf("2nd SQL = %q; want app.is_superadmin", tx.execCalls[1].sql)
+	}
+	if len(tx.execCalls[1].args) != 1 || tx.execCalls[1].args[0] != "false" {
+		t.Errorf("2nd args = %v; want [\"false\"]", tx.execCalls[1].args)
 	}
 }
 
 // TestSetLocalTenant_SuperAdminWithTenantID_EmitsBothSetConfigs は requirements.md Req 4.4
 // に対応する。SuperAdmin で TenantID が指定された場合（テナント文脈下での
-// SuperAdmin 操作）には `app.tenant_id` と `app.is_superadmin = 'true'` の両方が発行される。
+// SuperAdmin 操作）には `app.tenant_id = <uuid>` と `app.is_superadmin = 'true'` の両方が発行される。
 func TestSetLocalTenant_SuperAdminWithTenantID_EmitsBothSetConfigs(t *testing.T) {
 	// Arrange
 	tx := &fakeTx{}
@@ -143,17 +144,23 @@ func TestSetLocalTenant_SuperAdminWithTenantID_EmitsBothSetConfigs(t *testing.T)
 	if tx.execCalls[0].sql != "SELECT set_config('app.tenant_id', $1, true)" {
 		t.Errorf("1st SQL = %q; want app.tenant_id", tx.execCalls[0].sql)
 	}
-	if tx.execCalls[1].sql != "SELECT set_config('app.is_superadmin', 'true', true)" {
+	if len(tx.execCalls[0].args) != 1 || tx.execCalls[0].args[0] != tenantID.String() {
+		t.Errorf("1st args = %v; want [%q]", tx.execCalls[0].args, tenantID.String())
+	}
+	if tx.execCalls[1].sql != "SELECT set_config('app.is_superadmin', $1, true)" {
 		t.Errorf("2nd SQL = %q; want app.is_superadmin", tx.execCalls[1].sql)
+	}
+	if len(tx.execCalls[1].args) != 1 || tx.execCalls[1].args[0] != "true" {
+		t.Errorf("2nd args = %v; want [\"true\"]", tx.execCalls[1].args)
 	}
 }
 
-// TestSetLocalTenant_SuperAdminCrossTenant_OnlyIsSuperAdminEmitted は requirements.md Req 4.4
-// と design.md「TenantID==uuid.Nil の SuperAdmin は app.tenant_id をセットしない」
-// 注記に対応する。SuperAdmin + TenantID==uuid.Nil の cross-tenant 操作では
-// `app.tenant_id` は発行されず `app.is_superadmin = 'true'` のみが発行され、
-// current_setting('app.tenant_id', true) が NULL → default deny に倒れる経路を構成する。
-func TestSetLocalTenant_SuperAdminCrossTenant_OnlyIsSuperAdminEmitted(t *testing.T) {
+// TestSetLocalTenant_SuperAdminCrossTenant_EmitsZeroUUIDAndTrue は PR #31 round-3 review 由来
+// の仕様に対応する。SuperAdmin + TenantID==uuid.Nil の cross-tenant 操作でも
+// `app.tenant_id = '00000000-...'`（zero uuid）と `app.is_superadmin = 'true'` を発行し、
+// `::uuid` cast 例外と GUC 未初期化の双方を排除する。RLS ポリシーは is_superadmin 経由で
+// 全行可視になり、tenant_id 比較は zero uuid と既存行が一致しないため副作用なし。
+func TestSetLocalTenant_SuperAdminCrossTenant_EmitsZeroUUIDAndTrue(t *testing.T) {
 	// Arrange
 	tx := &fakeTx{}
 	tc := TenantContext{
@@ -170,14 +177,20 @@ func TestSetLocalTenant_SuperAdminCrossTenant_OnlyIsSuperAdminEmitted(t *testing
 	if err != nil {
 		t.Fatalf("SetLocalTenant: %v", err)
 	}
-	if len(tx.execCalls) != 1 {
-		t.Fatalf("Exec 呼び出し数 = %d; want 1（app.is_superadmin のみ）", len(tx.execCalls))
+	if len(tx.execCalls) != 2 {
+		t.Fatalf("Exec 呼び出し数 = %d; want 2（app.tenant_id + app.is_superadmin）", len(tx.execCalls))
 	}
-	if tx.execCalls[0].sql != "SELECT set_config('app.is_superadmin', 'true', true)" {
-		t.Errorf("SQL = %q; want app.is_superadmin", tx.execCalls[0].sql)
+	if tx.execCalls[0].sql != "SELECT set_config('app.tenant_id', $1, true)" {
+		t.Errorf("1st SQL = %q; want app.tenant_id", tx.execCalls[0].sql)
 	}
-	if len(tx.execCalls[0].args) != 0 {
-		t.Errorf("args 件数 = %d; want 0（bind 不要）", len(tx.execCalls[0].args))
+	if len(tx.execCalls[0].args) != 1 || tx.execCalls[0].args[0] != uuid.Nil.String() {
+		t.Errorf("1st args = %v; want [%q]", tx.execCalls[0].args, uuid.Nil.String())
+	}
+	if tx.execCalls[1].sql != "SELECT set_config('app.is_superadmin', $1, true)" {
+		t.Errorf("2nd SQL = %q; want app.is_superadmin", tx.execCalls[1].sql)
+	}
+	if len(tx.execCalls[1].args) != 1 || tx.execCalls[1].args[0] != "true" {
+		t.Errorf("2nd args = %v; want [\"true\"]", tx.execCalls[1].args)
 	}
 }
 

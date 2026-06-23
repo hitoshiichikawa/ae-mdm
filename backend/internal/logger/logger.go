@@ -194,6 +194,10 @@ func ActorID(id uuid.UUID) Field { return zap.String("actor_id", id.String()) }
 
 // Err は err を構造化フィールド化する。*errors.Error の場合は code / message / cause を分解し、
 // それ以外は zap.Error と同様に "error" キーで包む。
+//
+// cause メッセージは redactCauseString で OIDC token / cookie / Authorization ヘッダ等の
+// 機密パターンを redact してから出力する（PR #31 round-2 / round-3 review 由来 / Req 2.5）。
+// 非 *errors.Error 経路（zap.Error fallback）でも同じ redact を適用するため zap.String で組み立てる。
 func Err(err error) Field {
 	if err == nil {
 		return zap.Skip()
@@ -202,7 +206,7 @@ func Err(err error) Field {
 	if stdErrors.As(err, &de) && de != nil {
 		causeMsg := ""
 		if de.Cause != nil {
-			causeMsg = de.Cause.Error()
+			causeMsg = redactCauseString(de.Cause.Error())
 		}
 		return zap.Inline(zapcore.ObjectMarshalerFunc(func(enc zapcore.ObjectEncoder) error {
 			enc.AddString("error_code", string(de.Code))
@@ -213,7 +217,7 @@ func Err(err error) Field {
 			return nil
 		}))
 	}
-	return zap.Error(err)
+	return zap.String("error", redactCauseString(err.Error()))
 }
 
 // ----- context propagation -----

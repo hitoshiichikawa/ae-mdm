@@ -84,5 +84,17 @@ ALTER DEFAULT PRIVILEGES FOR ROLE migration_user IN SCHEMA public
     GRANT USAGE, SELECT ON SEQUENCES TO app_user;
 
 -- 注意:
---   * audit_logs の UPDATE/DELETE は 0012_audit_log_immutability.up.sql で REVOKE される
---     （本ファイルでは GRANT し、0012 で REVOKE することで二重防御を成立させる）
+--   * audit_logs の UPDATE/DELETE は 0012_audit_log_immutability.up.sql でも REVOKE されるが、
+--     `db-init-roles` が `migrate-up` の **後** に実行された場合、上の `GRANT ... ON ALL TABLES`
+--     と `ALTER DEFAULT PRIVILEGES` が audit_logs の UPDATE/DELETE を再付与してしまう。
+--     append-only の最終 DB 状態を保証するため、本ファイル末尾でも明示的に REVOKE する
+--     （0012 と二重防御 / PR #31 round-3 review 由来）。
+--   * audit_logs テーブル自体が未作成（migrate-up 前）の場合、REVOKE は undefined_table で
+--     失敗するため、DO ブロックで catch して NOTICE に降格する（冪等性確保）。
+
+DO $$ BEGIN
+    EXECUTE 'REVOKE UPDATE, DELETE ON audit_logs FROM app_user';
+EXCEPTION
+    WHEN undefined_table THEN
+        RAISE NOTICE 'audit_logs table does not exist; skipping REVOKE (will be enforced by migration 0012 when applied)';
+END $$;
