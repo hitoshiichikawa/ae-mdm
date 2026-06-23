@@ -255,6 +255,87 @@
     `r.Mount("/api", ...)` の 2 サブルータ並列 Mount で物理化済み。テーブル更新は
     task 6.1 の integration test 完了後の取りまとめで一括反映する。
 
+### Task 5
+
+- **採用方針**: `cmd/api/main.go` を `config.Load → logger.NewLogger →
+  logger.SetDefault → db.NewPool → httpserver.NewServer → ListenAndServe(goroutine) →
+  signal.NotifyContext(SIGINT/SIGTERM) → srv.Shutdown(5s)` の bootstrap に置換し、
+  `cmd/worker/main.go` も同パターンで `config + logger` 初期化 + healthz HTTP の
+  常駐に整理する。`internal/depspin/depspin.go` から本 Issue で実利用に移行した
+  6 件の blank import を削除し、Pub/Sub と AMAPI の 2 件のみ残置する。
+- **重要な判断**
+  - **`cmd/api` の bootstrap 順序と失敗時の logger 経路**: bootstrap の (1)
+    `config.Load()` 失敗時は **logger 未構築段階のため `fmt.Fprintln(os.Stderr, ...)`
+    で stderr 直書き** とし、(2) `logger.NewLogger(cfg)` 失敗時も同様に stderr 直書き
+    （logger 自身が壊れている経路では構造化ログに頼れない）。一方 (3) `db.NewPool`
+    と (4) `httpserver.NewServer` 失敗時は **`log.Error(..., logger.Err(err))`** で
+    構造化 ERROR を出す。`logger.Err` は task 1 の実装で `*errors.Error` を渡された
+    場合に `error_code` / `error_message` / `error_cause` を分解する仕様のため、
+    `db.NewPool` が返す `*errors.Error{Code: CodeUnavailable}` も自動的に
+    `error_code: service_unavailable` で構造化される（NFR 3.1 の判別可能性を満たす）。
+  - **graceful shutdown の signal 経路**: `signal.NotifyContext(parent, SIGINT, SIGTERM)` で
+    生成した `sigCtx` を `select { case <-sigCtx.Done(): ... ; case err := <-srvErr: ... }`
+    で多重化。signal 受信時は `context.WithTimeout(context.Background(), 5*time.Second)`
+    （**parent から派生させない**: parent が既に cancel されている可能性があるため、
+    shutdown 用の context は別系統で新規生成）で `srv.Shutdown(shutdownCtx)` を呼ぶ。
+    server error 経路で nil（goroutine が `http.ErrServerClosed` で正常終了）を受けた
+    場合は exit code 0 で返す。
+  - **`pool.Close()` の defer 配置**: `db.NewPool` 成功直後に `defer pool.Close()` を
+    置く。これにより `httpserver.NewServer` 失敗 / signal 経由 / server error のいずれの
+    退出経路でも pool が確実に閉じられる。shutdown 順序は `srv.Shutdown` → 関数 return
+    → `defer pool.Close()` の順で、HTTP 接続中の DB クエリが先に終了する保証を確立。
+  - **`-healthcheck` サブコマンドの GET 先**: distroless 対応のため
+    `-healthcheck` 引数で起動された場合は `http://127.0.0.1:8080/healthz` を 1 回叩いて
+    0/1 で exit する経路を維持。`httpserver` 側が `/healthz` を `r.Get` で root に登録
+    （middleware chain の外側 / design.md L706）するため、応答 200 を返す経路と整合。
+  - **`cmd/worker` の最小化方針**: 本 Issue では Pub/Sub subscriber 本体を実装しないため、
+    `cmd/worker` は `config + logger + healthz(8090) + signal graceful shutdown` の
+    最小常駐に留める。後続 Issue（umbrella tasks 6.x）で subscriber.Run(ctx, log, ...) を
+    `select` に追加する想定。`/healthz` は scaffold 流用の最小 ServeMux（陽に
+    `internal/platform/httpserver` を経由しない）で、worker は admin/api サブルータを
+    持たないため `httpserver.NewServer` を呼ぶ必要がない。
+  - **depspin から `golang-migrate` の blank import を削除しても Makefile `migrate-up`
+    は動作する**: tasks.md 5.2 詳細項目通り `golang-migrate` を depspin から削除した。
+    Makefile `migrate-up` は `go run github.com/golang-migrate/migrate/v4/cmd/migrate ...`
+    で実行される設計（task 3.4 で確立）で、`go.mod` の **direct require として残置**
+    された状態であれば `go run` 経由でモジュール解決が成立する。本 Issue では depspin
+    blank import 削除後も `go.mod` を編集せず（`go mod tidy` を実行せず）、direct require
+    の `golang-migrate` を保持したまま運用継続する方針を採った。これは design.md L78-80
+    の「実利用に置換」の解釈で、Makefile 経由の `go run` 利用を「実利用」とみなしている。
+  - **`coreos/go-oidc` も同様の理由で go.mod direct require として残置**: 本 Issue では
+    実利用しないため depspin blank import からは削除（task 5.2 詳細項目通り）。
+    `go.mod` direct require は後続 Issue（umbrella tasks 3.1: OIDC Verifier）で実利用
+    される時点まで保持する方針。`go mod tidy` 実行で削除される問題は本 Issue では
+    顕在化させない（tidy を実行しない）。
+- **残存課題（次 task への申し送り）**
+  - **task 6.1 / 6.2（integration test）への申し送り**: 本 task で `cmd/api` の bootstrap
+    が完成したため、integration test は `httpserver.NewServer(cfg, log, pool)` で
+    構築した `*http.Server` を `httptest.NewServer` 相当（`Server.Serve(listener)` を
+    test 用 listener で起動するか、`*http.Server.Handler` を直接 `httptest.NewServer`
+    に渡す）で起動して `/healthz` / `/api/*` / `/api/admin/*` の応答を verify する
+    経路を取れる。本 task は `cmd/api` の bootstrap 経路自体には unit test を追加しな
+    かった（main 関数の signal handling と goroutine 起動は unit test 困難な領域で、
+    integration test 側で実 process を起動する方が高 ROI）。
+  - **後続 Issue（subscriber 配線）への申し送り**: `cmd/worker` の `runHealthzServer`
+    内の `select { case <-sigCtx.Done(): ; case err := <-srvErr: }` に subscriber 完了
+    経路（例: `case err := <-subErr:`）を追加し、subscriber goroutine を起動する場所
+    を `go func() { srv.ListenAndServe() }()` の隣に並べる想定。`/healthz` 応答は
+    subscriber 配線後も同じ ServeMux のままで動作するが、subscriber の readiness を
+    `/readyz` 相当で見たい場合は本 Issue の `httpserver` を `cmd/worker` でも import
+    する選択肢がある（後続検討）。
+  - **`go mod tidy` の運用方針**: 本 Issue 完了後の運用で `go mod tidy` を実行すると
+    `coreos/go-oidc` と `golang-migrate` が direct require から削除される。後続 Issue
+    で実利用が開始されるまでは tidy を実行しないか、tidy 実行後に手動で `require` を
+    復元する運用が必要。本注意点は次 Issue（umbrella tasks 3.1 等）の bootstrap で
+    明示的に import を追加した時点で自然解消する。
+  - **AC Traceability テーブル更新（NFR 3.1 / 3.2 / 4.1 / 4.2 部分）**: 本 task で
+    NFR 3.1（config / pool / logger 初期化失敗で exit code 1 + 構造化 ERROR）/
+    NFR 3.2（リクエスト処理前に外部依存初期化完了 = pool.Ping → httpserver.NewServer →
+    ListenAndServe）/ NFR 4.1（config / logger 共通 import を api / worker 両方から
+    呼ぶ）/ NFR 4.2（env 経由 / ローカル状態なし）の配線が完了。対応テストは
+    task 6.1 の integration test に委譲する（main 関数の signal / goroutine は
+    unit test より integration test が高 ROI）。AC Traceability テーブル末尾に追記済。
+
 ## AC Traceability（Req 1 / 2 / 3 / 4 / NFR 1.1 部分）
 
 | Requirement | テスト |
@@ -285,6 +366,15 @@
 
 Req 5 / 6 / 7 / NFR 1.2 / NFR 2.x / NFR 4.x は後続 task（3.x / 4.x / 5.x / 6.x）の責務であり、本 task では未対応。
 
+### Task 5 追加分（NFR 3.1 / 3.2 / 4.1 / 4.2 の cmd 配線）
+
+| Requirement | テスト |
+|---|---|
+| NFR 3.1 起動時 fail-fast（cmd 側配線） | `cmd/api/main.go` `runBootstrap` が config.Load / logger.NewLogger / db.NewPool / httpserver.NewServer の各失敗で **exit code 1** + 構造化 ERROR（logger 構築済段階）または stderr 直書き（logger 構築前段階）。`cmd/worker/main.go` も同パターン。対応 integration test は task 6.1 で実 process 起動 / 環境変数欠落での起動失敗を verify する経路に委譲 |
+| NFR 3.2 リクエスト処理前に外部依存初期化完了 | `cmd/api` bootstrap で `db.NewPool` の Ping 成功後に `httpserver.NewServer` → `srv.ListenAndServe` の順序で起動するため、ListenAndServe 開始時点で DB pool は確立済。対応 integration test は task 6.1 で `httptest.NewServer` 相当起動後の `/readyz` 200 応答を verify する経路に委譲 |
+| NFR 4.1 各モジュール api / worker 共通 import 可 | `cmd/api/main.go` と `cmd/worker/main.go` が同じ `internal/config` / `internal/logger` を import する compile-time 整合で物理化。`go build ./...` PASS で間接的に verify される（`internal/depspin/depspin.go` から本 Issue 利用済み blank import を削除しても build が通る経路で確認） |
+| NFR 4.2 ローカル状態を持たず env 経由 | `cmd/api` / `cmd/worker` のいずれも `config.Load()` 経由でのみ設定値を取得し、ファイルシステム上の永続データを持たない（healthz の :8080 / :8090 listen のみ）。対応 integration test は task 6.1 で env だけ差し替えた起動の verify に委譲 |
+
 ## Verify
 
 ```sh
@@ -311,9 +401,28 @@ cd backend && go build ./... && go vet ./... && go test ./...
     `internal/logger` / `internal/platform/db`: PASS、`cmd/api` / `cmd/worker` /
     `internal/depspin`: no test files）。SQL 自体の verify は task 6.1 / 6.2 の
     integration test に委譲する（実 PostgreSQL が必要なため本 task では unit test なし）。
+- task 5 完了時点（cmd/api / cmd/worker / depspin のリプレース）:
+  - `go build ./...`: PASS
+  - `go vet ./...`: PASS
+  - `go test ./...`: `internal/config` / `internal/errors` / `internal/logger` /
+    `internal/platform/db` / `internal/platform/httpserver`: PASS、`cmd/api` /
+    `cmd/worker` / `internal/depspin`: no test files（main 関数の signal / goroutine
+    は unit test より integration test が高 ROI のため task 6.1 で実 process 起動経路
+    の verify に委譲）。
 
 ## 確認事項
 
-なし（本 task 範囲では design.md / requirements.md / tasks.md と矛盾無し）。
+- **`go mod tidy` 運用方針（task 5 由来）**: 本 Issue では depspin から
+  `golang-migrate` / `coreos/go-oidc` の blank import を削除した一方、`go.mod` の
+  `require` ブロックには両者を direct require として **意図的に残置** している
+  （Makefile `migrate-up` が `go run github.com/golang-migrate/migrate/v4/cmd/migrate ...`
+  で利用、`coreos/go-oidc` は後続 Issue umbrella tasks 3.1 で OIDC Verifier に
+  使われる予定）。**本 Issue 完了後の運用で `go mod tidy` を実行すると両者が direct
+  require から削除される** ため、後続 Issue で実利用が開始されるまでは tidy を実行
+  しないか、tidy 実行後に手動で `require` を復元する運用が必要。本注意点は後続 Issue
+  の bootstrap で明示的に import を追加した時点で自然解消する。design.md L78-80 の
+  「`golang-migrate` を実利用に置換」の解釈として、Makefile 経由 `go run` 利用を
+  「実利用」とみなす方針を採用したが、人間レビュワーが別解釈を採るべきと判断した
+  場合はその指示に従う。
 
 STATUS: complete
