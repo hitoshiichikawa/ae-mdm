@@ -336,6 +336,71 @@
     task 6.1 の integration test に委譲する（main 関数の signal / goroutine は
     unit test より integration test が高 ROI）。AC Traceability テーブル末尾に追記済。
 
+### Task 6
+
+- **採用方針**: `backend/test/integration` package を新規追加し、実 PostgreSQL を用いた
+  結合テストで RLS / panic ガード / audit_logs append-only / HTTP サブルータ mount /
+  migration 可逆性を verify する。各 test は `requireDBURLs` で DB 接続 env が未設定なら
+  `t.Skip` するため、CI / ローカルの DB 不在環境でも `go test ./...` を fail させない。
+- **重要な判断**
+  - **DB 接続 env の 2 段階 fallback**: `.env.example` の `DATABASE_URL` は docker compose
+    内 hostname `postgres:5432` を指すため、ホストから直接 test を走らせる際に解決不能
+    になる課題があった。`INTEGRATION_TEST_DATABASE_URL` / `INTEGRATION_TEST_MIGRATE_URL`
+    を専用に追加し、これらが未設定の場合に `DATABASE_URL` / `MIGRATE_DATABASE_URL` に
+    fallback する設計とした。実運用では `.env.test` 等で前者を `localhost:5432` 経由の
+    接続文字列に上書きする想定（runbook 整備は後続検討）。
+  - **migration の Go API による適用**: `golang-migrate/v4` の Go API で `migrate.New` +
+    `m.Up()` / `m.Down()` を呼ぶ方針を採用。`migrate-up` Makefile target は `go run` 経由
+    で CLI を起動する設計だが、test 内では Go API 直叩きが reproducible で simpler。pgx
+    v5 driver の blank import（`_ "github.com/golang-migrate/migrate/v4/database/pgx/v5"`）
+    が必要で、これは推移的に `github.com/jackc/pgerrcode` を要求するため go.mod に
+    indirect 依存として追加した（migrate v4 自体は既存 direct require のままで bump せず、
+    v4.19.1 への自動更新を回避）。
+  - **TestMain では migrate-up しない**: `db_tenant_isolation_test.go` 内の各テストが
+    冒頭で `applyMigrationsUp` + `truncateAll` を呼ぶ design。理由: `migrations_reversible_test.go`
+    が自前で up/down を繰り返すため、TestMain で固定 setup すると競合する。各 test で
+    setup を引く方が冪等性が高く、テスト順序にも依存しない（reversible test も最後に
+    defer で applyMigrationsUp 復元）。
+  - **seed は SuperAdmin 文脈で投入**: dummy data を seed する際は `app_user` 接続 pool で
+    BeginTx → `set_config('app.is_superadmin', 'true', true)` → INSERT を一連で行う設計。
+    `migration_user` は `audit_logs` の FORCE RLS により直接 INSERT できず（WITH CHECK 必須）、
+    一方 `app_user` は SuperAdmin GUC を通せば WITH CHECK の OR 句で素通る。test 上は
+    後者経路で統一する方が `BeginTxFunc` 経由の通常運用と挙動を揃えやすい。
+  - **TenantContext 注入は public API のみで完結**: HTTP サブルータ mount テストの (j)
+    シナリオでは、`httpserver.authClaims` / `withAuthClaims` が package-private で外部
+    package から呼べない制約があった。`httpserver.RequireSuperAdmin` は public、
+    `platformdb.WithTenantContext` も public のため、test 専用 chi.Router を組み立てて
+    TenantContext を直接 ctx に埋め込む経路で middleware 単体の挙動を verify した。
+    通常 HTTP 経路（auth スタブ default deny）の (g)(h)(i) は `httpserver.NewServer` 経由
+    の実 HTTP リクエストで verify する。
+  - **SQLSTATE による拒否経路の判別**: `app_user` 経由の `audit_logs` UPDATE/DELETE 失敗
+    は SQLSTATE `42501`（insufficient_privilege）として返るため、`pgconn.PgError.Code`
+    で判定する `assertPgError` helper を追加。WITH CHECK 違反も pgx では同 `42501` で
+    上がるため、現状の helper は SQLSTATE 一致のみで合格判定する（policy violation と
+    permission denied を SQLSTATE で区別できない仕様は PostgreSQL の事情で、test も
+    そのまま追従）。
+- **残存課題（後続 Issue への申し送り）**
+  - **domain handler が mount された後の拡張**: 後続 Issue で `/api/devices` 等のドメイン
+    handler が mount された段階で、本 integration test を拡張して「実際の HTTP request →
+    handler → BeginTxFunc → RLS」までの end-to-end 経路を verify することが望ましい。
+    現状は middleware chain と RLS の単体検証に留めており、handler 配線後の戻り値
+    フォーマット / 業務ロジックの verify は対象外。
+  - **`make db-init-roles` 適用前の test 失敗**: `app_user` / `migration_user` ロールが
+    未作成の環境で本 integration test を走らせると、接続段階で fail する（skip では
+    通れない）。runbook の手順「(1) docker compose up postgres → (2) make db-init-roles
+    → (3) make migrate-up」を実施した環境でのみ実行可能。skip 経路は env 未設定時のみで、
+    env 設定済みなのにロール不在の状況は test 上の前提違反として fail させる方針。
+  - **CI への組み込み**: 本テストは CI で実 PostgreSQL コンテナを起動する経路を別途
+    設計しないと走らない（GitHub Actions 上で postgres service を立てる workflow 追加が
+    後続課題）。本 Issue では「実 DB が利用可能なローカル / ステージング環境で手動実行
+    可能な test を物理化する」までを範囲とし、CI 統合は後続 Issue で扱う。
+  - **enum / sequence の down 完全性**: `migrations_reversible_test` の (a) は主要 12
+    テーブルの消失のみ確認しており、enum 型（`tenant_status` / `admin_role` / 等）の
+    down が完全か（DROP TYPE が漏れていないか）は別観点の検証が必要。現状の up SQL は
+    enum を DO $$ ... EXCEPTION ... 経由で冪等作成しているため、enum を down で DROP
+    せず再 up の duplicate_object exception で吸収する pattern が成立しているが、
+    schema_migrations を完全クリアして 0001 から再 up する場合の挙動は本 test 範囲外。
+
 ## AC Traceability（Req 1 / 2 / 3 / 4 / NFR 1.1 部分）
 
 | Requirement | テスト |
@@ -375,6 +440,23 @@ Req 5 / 6 / 7 / NFR 1.2 / NFR 2.x / NFR 4.x は後続 task（3.x / 4.x / 5.x / 6
 | NFR 4.1 各モジュール api / worker 共通 import 可 | `cmd/api/main.go` と `cmd/worker/main.go` が同じ `internal/config` / `internal/logger` を import する compile-time 整合で物理化。`go build ./...` PASS で間接的に verify される（`internal/depspin/depspin.go` から本 Issue 利用済み blank import を削除しても build が通る経路で確認） |
 | NFR 4.2 ローカル状態を持たず env 経由 | `cmd/api` / `cmd/worker` のいずれも `config.Load()` 経由でのみ設定値を取得し、ファイルシステム上の永続データを持たない（healthz の :8080 / :8090 listen のみ）。対応 integration test は task 6.1 で env だけ差し替えた起動の verify に委譲 |
 
+### Task 6 追加分（Req 5.3 / 6.3 / 6.4 / 7.1〜7.4 / NFR 1.2 / NFR 2.1 / NFR 2.2 部分）
+
+| Requirement | テスト |
+|---|---|
+| 4.5 tenant context 不在で panic ガード（実 DB 経由） | `integration.TestDBTenantIsolation_NoTenantContext_Panics`（実 DB pool 経由で panic payload が `*errors.Error{Code: CodeTenantCtxMissing}` であることを確認） |
+| 5.3 `/api` と `/api/admin` の 2 サブルータ mount | `integration.TestHTTPSubrouterMount_HealthzReturns200` / `TestHTTPSubrouterMount_APIRequiresAuth_Returns401` / `TestHTTPSubrouterMount_AdminRequiresAuth_Returns401Or403`（実 HTTP server 経由でルーティング分離を verify） |
+| 5.5 `/api/admin` への non-SuperAdmin で 403 | `integration.TestHTTPSubrouterMount_AdminReturns403_WhenNonSuperAdminContextInjected`（TenantContext を直接注入して IsSuperAdmin=false 経路を verify） |
+| 6.3 SuperAdmin の全 tenant 横断 SELECT | `integration.TestDBTenantIsolation_SuperAdminSeesAllTenants`（実 RLS ポリシー下で `app.is_superadmin=true` 経由の全 tenant SELECT を確認） |
+| 6.4 RLS による他テナント行の SELECT/UPDATE/DELETE 不可 | `integration.TestDBTenantIsolation_DevicesSelectExcludesOtherTenant` / `TestDBTenantIsolation_DevicesUpdateDeleteOtherTenant_ZeroRows` / `TestDBSessions_TenantIsolation_SubselectPolicy`（devices で SELECT/UPDATE/DELETE、sessions で subselect ポリシー経由分離を確認） |
+| 7.1 audit_logs INSERT のみ許可 | `integration.TestDBAuditLogs_InsertWithCheck_SuperAdminAllowsCrossTenantAndNull`（INSERT が成功する経路 = 改竄手段が INSERT に限られることの裏返し）+ `TestDBAuditLogs_AppUserUpdateDelete_Rejected`（UPDATE/DELETE 拒否） |
+| 7.2 app_user で UPDATE/DELETE 拒否 | `integration.TestDBAuditLogs_AppUserUpdateDelete_Rejected`（SQLSTATE 42501 = permission denied を確認） |
+| 7.3 audit_logs SELECT のテナント分離 + SuperAdmin 横断 | `integration.TestDBAuditLogs_InsertWithCheck_SuperAdminAllowsCrossTenantAndNull`（SuperAdmin で tenant_id=NULL / cross-tenant の INSERT 成功 = SELECT も同じ OR 句で許容される対称経路） |
+| 7.4 FORCE ROW LEVEL SECURITY 強制 | `integration.TestDBAuditLogs_InsertWithCheck_NormalTenantContext`（テナント A 文脈で tenant_id=B / NULL の INSERT が WITH CHECK で物理拒否されること = FORCE RLS 経由で table 所有者でも回避不可な経路と整合） |
+| NFR 1.2 任意 tenant 文脈で他 tenant 行に到達不可（全テーブル） | `integration.TestDBTenantIsolation_DevicesSelectExcludesOtherTenant`（devices）/ `TestDBSessions_TenantIsolation_SubselectPolicy`（sessions / subselect ポリシー）/ audit_logs は `TestDBAuditLogs_InsertWithCheck_NormalTenantContext` で WITH CHECK 経由検証 |
+| NFR 2.1 up シーケンス冪等 | `integration.TestMigrationsReversible_RepeatedUpIsNoop`（2 回目の `m.Up()` が `migrate.ErrNoChange` を返すこと） |
+| NFR 2.2 up に対応する down 提供 + down→up でスキーマ無傷 | `integration.TestMigrationsReversible_DownDropsTablesUpRecreates`（down 後の主要 12 テーブル消失と再 up での復活） |
+
 ## Verify
 
 ```sh
@@ -409,6 +491,19 @@ cd backend && go build ./... && go vet ./... && go test ./...
     `cmd/worker` / `internal/depspin`: no test files（main 関数の signal / goroutine
     は unit test より integration test が高 ROI のため task 6.1 で実 process 起動経路
     の verify に委譲）。
+- task 6 完了時点（integration test 追加）:
+  - `go build ./...`: PASS
+  - `go vet ./...`: PASS
+  - `go test ./...`: 既存 5 package（`internal/config` / `internal/errors` /
+    `internal/logger` / `internal/platform/db` / `internal/platform/httpserver`）に加え、
+    `test/integration` package が PASS（DB env 未設定の環境では各 test が `t.Skip` で
+    skip され、`cmd/api` / `cmd/worker` / `internal/depspin` は no test files）。
+    DB が利用可能なローカル環境では `INTEGRATION_TEST_DATABASE_URL` /
+    `INTEGRATION_TEST_MIGRATE_URL` を export して `go test ./test/integration/...` で
+    実 RLS / panic ガード / audit_logs append-only / migration 可逆性の verify が走る。
+  - **go.mod 変更**: golang-migrate の pgx/v5 driver が推移的に要求する
+    `github.com/jackc/pgerrcode` を indirect 依存として追加（migrate v4 本体の direct
+    require は v4.17.1 のまま据え置き、v4.19.1 への自動 bump を回避）。
 
 ## 確認事項
 
