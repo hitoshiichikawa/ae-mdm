@@ -173,7 +173,7 @@
     のみ）
   - _Requirements: 2.9, 3.7, 3.9, 4.1, 4.2, 4.3, 4.8, 5.1, 6.3_
   - _Boundary: Migrations_
-- [ ] 1.3 httpserver の authClaims 関連シンボル公開化 (P)
+- [x] 1.3 httpserver の authClaims 関連シンボル公開化 (P)
   - `backend/internal/platform/httpserver/middleware.go` の private シンボルを以下に rename:
     `authClaims` → `AuthClaims`（フィールド構成は不変）、`withAuthClaims` →
     `WithAuthClaims`、`authClaimsFromContext` → `AuthClaimsFromContext`、
