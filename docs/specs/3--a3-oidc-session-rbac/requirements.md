@@ -115,7 +115,7 @@ admin-user / audit-log）に対する代表動詞であり、本マトリクス�
 
 #### Acceptance Criteria
 
-1. The EMM Console shall `/api/admin/*` 配下のすべてのリクエスト経路に対して SuperAdmin 必須ガードをミドルウェアチェーンに挟む
+1. The EMM Console shall `/api/admin/*` 配下のすべてのリクエスト経路に対して SuperAdmin 必須ガードをミドルウェアチェーンに挟む（ただし `/api/admin/auth/login` / `/api/admin/auth/callback` / `/api/admin/auth/logout` / `/api/admin/auth/session` の auth エンドポイント群は、ログイン未完了状態で到達する経路のため SuperAdmin ガード対象外とする。これら auth 経路自身は AC 1.3 に従い admin-console 用の OIDC ログイン経路として機能する）
 2. When 認証済みリクエストが `/api/admin/*` 配下のエンドポイントに到達したとき, the EMM Console shall 当該セッションの `aud` メタデータが `admin-console` であることを確認する
 3. When 認証済みリクエストが `/api/admin/*` 配下のエンドポイントに到達したとき, the EMM Console shall 当該管理者のロールが SuperAdmin であることを確認する
 4. If 認証済みリクエストの `aud` メタデータが `tenant-console` であるまま `/api/admin/*` 配下のエンドポイントに到達したとき, the EMM Console shall 当該リクエストを 403 で拒否する

@@ -30,11 +30,17 @@ chain 追加することで、A2 が用意した authClaims-injection スロッ�
 弾く。
 
 > 分量バジェット: 本 spec は **複雑カテゴリ（複数モジュール横断 + 状態機械変更）**。設計目安
-> ≤ 600 行に対し本 design.md は約 810 行で **やや超過**する。超過理由は (a) requirements.md
+> ≤ 600 行に対し本 design.md は約 1100 行で **超過**する。超過理由は (a) requirements.md
 > の AC が 7 Requirement × 約 60 AC + 9 NFR と細かく、Traceability の網羅と Components の
 > Service Interface 提示で行数が嵩むこと、(b) A2 で既に確立された `httpserver` middleware
-> chain との接続点 / `authClaims` 構造体拡張 / `Routers` 拡張という 3 つの実装介入点の根拠を
-> 明示する必要があること、の 2 点。1000 行のハード上限内には十分収まる。
+> chain との接続点 / `authClaims` 構造体拡張 / `Routers` 拡張という実装介入点の根拠提示、
+> (c) 外部レビュー指摘（PR #32 round 1 / 14 件）に対応して Tenant ID resolution rule /
+> Authorize 判定順序の明示 / `/api/admin/auth/*` 例外 path 配線 / SessionManager.Issue の
+> outer-tx join / idle_at deadline semantics / Audience 型の置き場（authz package 集約）/
+> open redirect allowlist 等を本文に取り込んだこと、の 3 点。1000 行のハード上限を僅かに
+> 超えるが、分割すると認証認可の一貫性（OIDC verify ↔ SessionManager ↔ Authorize ↔ chi
+> middleware chain）が複数 spec に断片化し読みづらくなるため、本 spec で 1 つの完結した
+> 設計として保持する。
 
 ### Goals
 - backend 側で **OIDC ログイン経路の 2 クライアント分離**を物理化（tenant-console /
@@ -62,8 +68,10 @@ chain 追加することで、A2 が用意した authClaims-injection スロッ�
 - API トークン / サービスアカウント認証（M2M）
 - CSRF トークン発行と検証（SameSite=Lax で基本防御に留め、追加 CSRF token 機構は本 spec
   対象外）
-- PKCE の **SPA 側実装**（フロント側責務。backend は callback で受け取った authorization code
-  を `code_verifier` 付きで token endpoint に POST する受け側ロジックのみ提供）
+- **SPA-driven PKCE**（SPA 側が独自に code_verifier を生成し backend に送信する形）。本 spec は
+  **backend-driven PKCE**（backend が `/login` で code_verifier / code_challenge を生成し、
+  state cookie 内に code_verifier を保持して `/callback` で ExchangeCode に渡す形）を採用する。
+  詳細は Security Considerations の「PKCE 責務境界の明確化」節を参照
 
 ## Architecture
 
@@ -86,7 +94,9 @@ A2 で merge 済みの以下を **再利用**し、本 spec では再発明し�
   `tenant_isolation_sessions` ポリシーを通過する（A2 design.md「sessions の認証 lookup 経路」
   と整合）
 - `internal/platform/httpserver`:
-  - `Routers{API, Admin}` の mount 点
+  - `Routers{API, Admin}` の mount 点（本 spec で **`APIAuth chi.Router` と `AdminAuth chi.Router` を
+    追加**し、`/api/auth/*` および `/api/admin/auth/*` を SessionAuthMiddleware /
+    TenantContextMiddleware / RequireSuperAdmin の対象外で mount する経路を提供する）
   - `TenantContextMiddleware`（authClaims を ctx から読む default-deny アダプタ。`authClaims` /
     `authClaimsCtxKey{}` / `withAuthClaims` / `authClaimsFromContext` は package 内 private で、
     本 spec で **同 package 内に新規追加する `SessionAuthMiddleware`** が `withAuthClaims` を
@@ -153,17 +163,39 @@ flowchart LR
     expectedAud)` で aud 明示指定するシグネチャにする。aud allowlist は呼び出し元の handler
     が「どの callback 経路に来た token か」を把握しているため、handler 側で表駆動の安全な
     指定が可能（実装側で誤って 2 aud を or 受理する事故を起こさない）
+  - **Audience 型を authz package に置く**: oidc.Claims / auth.Principal / httpserver の
+    authClaims・RequireSuperAdmin から参照されるため、最下層の `internal/platform/authz` に
+    宣言する。`oidc` に置くと `oidc.role_mapping.go` が `authz` を import する関係と合わせて
+    `oidc ↔ authz` の import cycle になるため
   - **SessionManager の opaque token + sha256 hash 保存**: cookie 値は base64url 32B 乱数
     （生値）、DB には sha256 ハッシュ（`sessions.token_hash` PK）。cookie 漏洩 → DB dump
     で過去 cookie を復元できない。JWT を cookie に詰めない理由は (a) revoke 即時性
     （NFR 3.3 = 1 秒以内）を JWT の有効期限のみで担保できない、(b) JWT サイズが cookie
     上限を圧迫しがち、(c) ID トークン本体を cookie に出さない方針（Req 3.1）と整合
-  - **SessionAuthMiddleware を `httpserver` package 内に追加**する根拠: A2 の `authClaims` /
-    `withAuthClaims` が package private のため、別 package から claims を注入できない。
-    `auth` package に `SessionManager` interface を切り出し、`httpserver.SessionAuthMiddleware`
-    が `SessionManager` を引数で受けて lookup → `withAuthClaims` で注入する形を取る
-    （`httpserver` → `auth` の直接 import を避けるため `SessionManager` interface は
-    `httpserver` 側で再宣言し、structural typing で実体を受ける）
+  - **SessionManager.Issue が pgx.Tx を引数で受ける**: `AuthService.HandleCallback` の外側 tx と
+    同一 tx 内で `UpsertAdminUser` → `ReplaceRoles` → `Issue` を atomic 実行するため。
+    SessionManager 内部で別 tx を開く形だと、未 commit の `admin_users` 行を新規 tx から FK
+    参照できず FK 失敗または非原子的になる
+  - **SessionAuthMiddleware が adapter 関数で SessionManager を受ける**: A2 の `authClaims` /
+    `withAuthClaims` が `httpserver` package private のため、別 package から claims を注入できない。
+    一方 `auth.SessionManager.Validate` は `auth.Principal`（authz.Role / authz.Audience を含む）を
+    返すため、`httpserver` 側で structural-typing 用 interface を再宣言するアプローチでは
+    型整合が取れない（`httpserver` → `auth` 直接 import か `httpserver` → `authz` 経由が必要）。
+    本 spec では **`httpserver` が `Validate` を直接 receive する代わりに、`bootstrap が adapter
+    関数を組み立てて渡す**形を取る: `SessionAuthMiddleware(validate SessionValidatorFunc, log)`、
+    `type SessionValidatorFunc func(ctx, rawToken string) (httpserver.AuthClaims, error)`。
+    bootstrap で `func(ctx, raw string) (httpserver.AuthClaims, error) { p, err :=
+    sessMgr.Validate(ctx, raw); ... return httpserver.AuthClaims{TenantID, AdminUserID, Roles
+    ([]string), IsSuperAdmin, Audience (string)}, nil }` を組み立てる。これで `httpserver` は
+    `auth` / `authz` を import せず、Principal の primitive 形だけを受ける
+  - **`/api/auth/*` と `/api/admin/auth/*` の SessionAuthMiddleware + TenantContextMiddleware
+    対象外配線**: ログイン開始 / コールバック / ログアウト は cookie 未保持で到達するため、
+    SessionAuthMiddleware が 401 を返したり TenantContextMiddleware が default-deny に倒れたり
+    すると物理的にログインできない。`Routers` struct に **`APIAuth chi.Router` と `AdminAuth
+    chi.Router` を追加**し、これらは SessionAuthMiddleware / TenantContextMiddleware / 既存
+    `RequireSuperAdmin` のいずれも適用せずに mount する（auth route 自身の handler 内で必要な
+    認証判定を行う）。`/api/auth/*` および `/api/admin/auth/*` の path-prefix matching は
+    `apiRouter.Mount("/auth", ...)` / `apiRouter.Mount("/admin/auth", ...)` で実現する
   - **`RequireSuperAdmin` の拡張（aud=admin-console チェック追加）**: 既存 `IsSuperAdmin`
     のみのチェックでは aud=tenant-console から発行された SuperAdmin role を持つ token
     （論理的に存在しうる）が `/api/admin/*` を通過しうる。Req 5.4 の AND ガード（aud +
@@ -189,8 +221,8 @@ flowchart LR
 backend/
 ├── internal/
 │   ├── config/
-│   │   ├── config.go                 # 修正: SessionIdleMinutes / SessionAbsoluteHours フィールド追加
-│   │   └── env.go                    # 修正: SESSION_IDLE_MINUTES (default 30) / SESSION_ABSOLUTE_HOURS (default 8) の int パース追加
+│   │   ├── config.go                 # 修正: SessionIdleMinutes / SessionAbsoluteHours / OIDCTenantPostLoginAllowedPrefixes / OIDCAdminPostLoginAllowedPrefixes フィールド追加
+│   │   └── env.go                    # 修正: SESSION_IDLE_MINUTES (default 30) / SESSION_ABSOLUTE_HOURS (default 8) の int パース、OIDC_TENANT_POST_LOGIN_ALLOWED_PREFIXES / OIDC_ADMIN_POST_LOGIN_ALLOWED_PREFIXES のカンマ区切り []string パース追加
 │   ├── errors/
 │   │   └── codes.go                  # 修正: CodeOIDCInvalid / CodeUnknownRole の 2 定数追加（HTTP 401 にマップ）
 │   ├── platform/
@@ -207,9 +239,10 @@ backend/
 │   │   │   ├── middleware.go         # Require(action, resource) chi middleware factory（Authorizer 依存注入）
 │   │   │   └── *_test.go             # 4 role × 7 action × 9 resource の表駆動テスト
 │   │   └── httpserver/
-│   │       ├── session_auth.go       # 新規: SessionAuthMiddleware（cookie → SessionManager.Validate → withAuthClaims）
+│   │       ├── session_auth.go       # 新規: SessionAuthMiddleware（cookie → SessionValidatorFunc → withAuthClaims） + 公開型 AuthClaims + SessionValidatorFunc
 │   │       ├── session_auth_test.go  # 新規
 │   │       ├── middleware.go         # 修正: authClaims に Audience field 追加（既存 authClaims 構造体拡張）
+│   │       ├── server.go             # 修正: Routers struct に APIAuth / AdminAuth chi.Router 追加、NewServer signature に validator SessionValidatorFunc 追加（nil 許容）
 │   │       ├── admin_middleware.go   # 修正: aud=admin-console チェックを追加（Audience claim 参照）
 │   │       └── admin_middleware_test.go # 修正: aud=tenant-console + SuperAdmin の 403 ケース追加
 │   └── auth/                         # 新規 domain package
@@ -238,7 +271,11 @@ backend/
 ### Modified Files
 - `backend/internal/config/config.go` / `env.go` — `SessionIdleMinutes int`（default 30）と
   `SessionAbsoluteHours int`（default 8）を追加。env var 名は `SESSION_IDLE_MINUTES` /
-  `SESSION_ABSOLUTE_HOURS`。**`.env.example`** にも同 2 行を追加（コメントに idle/absolute
+  `SESSION_ABSOLUTE_HOURS`。さらに `OIDCTenantPostLoginAllowedPrefixes []string` /
+  `OIDCAdminPostLoginAllowedPrefixes []string` を追加（env: `OIDC_TENANT_POST_LOGIN_ALLOWED_PREFIXES`
+  / `OIDC_ADMIN_POST_LOGIN_ALLOWED_PREFIXES`、カンマ区切り、空 / 未指定の場合は対応する
+  `OIDCTenantRedirectURL` / `OIDCAdminRedirectURL` の `Scheme://Host/` 部を default としてセット）。
+  **`.env.example`** にも同 4 行を追加（コメントに idle/absolute と open redirect 防止 allowlist
   の意味を記載）。
 - `backend/internal/errors/codes.go` — `CodeOIDCInvalid Code = "oidc_invalid"`（HTTP 401）と
   `CodeUnknownRole Code = "unknown_role"`（HTTP 401。Req 4.12 のセッション発行拒否）を追加。
@@ -257,15 +294,24 @@ backend/
 - `backend/cmd/api/main.go` — bootstrap に以下を追加:
   - `authRepo := auth.NewRepository(pool)`
   - `verifierSet := oidc.NewVerifierSet(ctx, cfg)`
-  - `sessMgr := auth.NewSessionManager(authRepo, cfg.SessionIdleMinutes, cfg.SessionAbsoluteHours)`
-  - `authSvc := auth.NewService(verifierSet, authRepo, sessMgr, audit.NoopRecorder{})`
-  - `routers.API.Mount("/auth", auth.Routes(authSvc, sessMgr))` および
-    `routers.Admin.Mount("/auth", auth.AdminRoutes(authSvc, sessMgr))`
+  - `sessMgr := auth.NewSessionManager(authRepo, pool, cfg.SessionIdleMinutes, cfg.SessionAbsoluteHours)`
+  - `authSvc := auth.NewService(verifierSet, authRepo, sessMgr, auth.NoopRecorder{}, pool)`
+  - `validator := func(ctx context.Context, raw string) (httpserver.AuthClaims, error) { p, err :=
+    sessMgr.Validate(ctx, raw); ... }` を組み立てる（auth.Principal → httpserver.AuthClaims の
+    primitive 化アダプタ。`httpserver` が `auth` / `authz` を import しないための層）
+  - `srv, routers, _ := httpserver.NewServer(cfg, log, pool, validator)` で初期化。
+    `validator=nil` 許容で nil なら従来の default-deny 経路を維持し、A2 integration test の
+    挙動を変えない
+  - `routers.APIAuth.Mount("/auth", auth.Routes(authSvc, sessMgr, authz.AudienceTenant,
+    cfg.OIDCTenantPostLoginAllowedPrefixes))` で tenant 用 auth route を mount
+    （SessionAuthMiddleware / TenantContextMiddleware 対象外経路 / `/api/auth/*` に解決）
+  - `routers.AdminAuth.Mount("/auth", auth.Routes(authSvc, sessMgr, authz.AudienceAdmin,
+    cfg.OIDCAdminPostLoginAllowedPrefixes))` で admin 用 auth route を mount
+    （SuperAdmin ガード対象外経路 / `/api/admin/auth/*` に解決）
   - `routers.API` / `routers.Admin` 双方の chain の **先頭** に
-    `httpserver.SessionAuthMiddleware(sessMgr)` を追加（A2 の `TenantContextMiddleware` より
-    前に動く必要があるため、`httpserver.NewServer` の signature を `NewServer(cfg, log, pool,
-    sessMgr)` に変更。`sessMgr=nil` 許容で nil なら従来の default-deny 経路を維持し、A2
-    integration test の挙動を変えない）
+    `httpserver.SessionAuthMiddleware(validator)` を追加（A2 の `TenantContextMiddleware` より
+    前に動く配線。auth route 群は `routers.APIAuth` / `routers.AdminAuth` 経由で mount される
+    ため、本 middleware の chain から外れる）
 
 ## Requirements Traceability
 
@@ -297,7 +343,7 @@ backend/
 | 3.8 | 失効/未知 token を 401 | SessionAuthMiddleware | CodeUnauthenticated | flow: 401 |
 | 3.9 | logout で session レコード失効 + cookie 削除指示 | SessionManager, AuthHandler | Revoke + Set-Cookie Max-Age=-1 | NFR 3.3 |
 | 4.1 | 4 ロール定義 | authz.Role enum | `platform/authz/roles.go` | Role const |
-| 4.2 | groups/roles claim → Role 写像 | RoleMapping | `platform/oidc/role_mapping.go` MapRoles | Open Questions 1 |
+| 4.2 | groups/roles claim → Role 写像 | RoleMapping | `platform/oidc/role_mapping.go` MapClaimsToRoles | Claims.Roles を優先し fallback で Claims.Groups |
 | 4.3 | 表駆動許可マトリクス | PermissionsMatrix | `platform/authz/permissions.go` の Matrix 定数 | table |
 | 4.4 | Authorize がマトリクス経由で許可/拒否 | Authorizer | `platform/authz/permissions.go` Authorize | Authorizer.Authorize |
 | 4.5 | Viewer は read のみ許可 | PermissionsMatrix | Matrix[Viewer][Read][*] | matrix row |
@@ -368,38 +414,62 @@ backend/
 ##### Service Interface
 
 ```go
-type Audience string
-const (
-    AudienceTenant Audience = "tenant-console"
-    AudienceAdmin  Audience = "admin-console"
-)
+// Audience 型は authz package に置く（oidc / auth / httpserver から参照されるため、
+// oidc に置くと oidc ↔ authz の import cycle になる。authz は依存先を持たない最下層 package
+// なので Audience の置き場として安全）。
+//
+// authz/roles.go 内で:
+//   type Audience string
+//   const (
+//       AudienceTenant Audience = "tenant-console"
+//       AudienceAdmin  Audience = "admin-console"
+//   )
 
 type Claims struct {
-    Subject  string    // OIDC sub
-    Email    string
-    Groups   []string  // ロールマッピング元（Open Questions 1）
-    Issuer   string
-    Audience Audience  // 検証時に確認した aud（1 値）
+    Subject   string         // OIDC sub
+    Email     string
+    Groups    []string       // Keycloak groups claim（無ければ nil）
+    Roles     []string       // 標準 roles claim or provider 固有 roles claim（無ければ nil）
+    TenantID  string         // tenant_id custom claim（MVP は IdP 側で必須付与。aud=admin-console
+                             // で SuperAdmin role を保持する管理者は空文字でも可。詳細は本セクション末尾の
+                             // 「Tenant ID resolution rule」参照）
+    Issuer    string
+    Audience  authz.Audience // 検証時に確認した aud（1 値）
     ExpiresAt time.Time
 }
 
 type Verifier interface {
     // Verify は raw ID token を検証し、expectedAud と一致した場合のみ Claims を返す。
     // 失敗時は *errors.Error{Code: CodeOIDCInvalid} を返す。
-    Verify(ctx context.Context, rawIDToken string, expectedAud Audience) (Claims, error)
-    // ExchangeCode は authorization code を ID token に交換する。state / nonce 検証は handler 側責務。
-    ExchangeCode(ctx context.Context, code string, redirectURL string) (rawIDToken string, err error)
+    Verify(ctx context.Context, rawIDToken string, expectedAud authz.Audience) (Claims, error)
+    // ExchangeCode は authorization code を ID token に交換する。state / nonce / PKCE
+    // code_verifier は handler 側が state cookie 経由で保持し、本メソッドの追加引数として渡す。
+    ExchangeCode(ctx context.Context, code string, redirectURL string, codeVerifier string) (rawIDToken string, err error)
     // AuthorizeURL は OIDC 認可エンドポイント URL を組み立てる（state / PKCE は handler が付与）。
     AuthorizeURL(state, codeChallenge string) string
 }
 
 type VerifierSet struct { /* tenant / admin の 2 Verifier を保持 */ }
 func NewVerifierSet(ctx context.Context, cfg config.Config) (*VerifierSet, error)
-func (s *VerifierSet) For(aud Audience) Verifier
+func (s *VerifierSet) For(aud authz.Audience) Verifier
 ```
 - Preconditions: ctx 経由で OIDC discovery が成功（NewVerifierSet 時に fail-fast）
 - Postconditions: Verify 成功時 Claims.Audience == expectedAud（contract）
 - Invariants: aud allowlist 外の値で Verify を呼ぶと `CodeOIDCInvalid` を返す
+
+**Tenant ID resolution rule（Req 4.2 / 4.10 / 5.8 / 6.1 を満たすための明示規則）**:
+
+- MVP では IdP 側で **tenant_id custom claim**（UUID 文字列）を発行する前提とする。tenant-console
+  aud のすべての管理者には必ず tenant_id claim を付与する（Keycloak の user attribute mapper で
+  保証）。admin-console aud で SuperAdmin role を保持する管理者は tenant_id claim を **空 / 欠落
+  可** とし、内部の Principal.TenantID は `uuid.Nil` に解決される
+- `AuthService.HandleCallback` の Tenant ID 解決は以下の優先順位で行う:
+  1. Claims.TenantID（custom claim、UUID parse 成功）→ そのまま採用
+  2. (aud == admin-console) AND (mapped roles に SuperAdmin を含む) → `uuid.Nil`（cross-tenant
+     経路の管理者）
+  3. 上記いずれでもない → `CodeOIDCInvalid`（Cause: `missing_tenant_id`）で 401（session 未発行）
+- 本規則は **MVP 確定仕様**。本番 IdP が確定した時点で claim 名や階層 group（`/tenant/<UUID>/<role>`）
+  への切り替え可能性を Open Questions に残す
 
 #### Authorizer + PermissionsMatrix + chi Middleware
 
@@ -435,6 +505,14 @@ const (
     RoleTenantAdmin  Role = "TenantAdmin"
     RoleOperator     Role = "Operator"
     RoleViewer       Role = "Viewer"
+)
+
+// Audience を authz package 内で宣言する（oidc / auth / httpserver から参照されるため、
+// 最下層の authz に置いて import cycle を避ける）。
+type Audience string
+const (
+    AudienceTenant Audience = "tenant-console"
+    AudienceAdmin  Audience = "admin-console"
 )
 
 type Action string
@@ -481,29 +559,60 @@ func Require(authz Authorizer, action Action, resource ResourceType) func(http.H
 // NFR 4.2 によりテストから検証可能な exported var として公開する。
 var Matrix map[Role]map[Action]map[ResourceType]bool
 ```
+
+**Authorize の判定ロジック（Req 4.5〜4.11 / 5.8 / 6.1 を満たすための明示規則）**:
+
+`Authorize(p, action, resource, targetTenantID)` は以下の順序で fail-closed に判定する:
+
+1. **Matrix 引き**: `Matrix[role][action][resource]` のうち、p.Roles に含まれる role のいずれかで
+   bool=true を引けるか。1 つも引けなければ 403（Cause: `not_in_matrix`）
+2. **tenant-scoped resource の境界判定**: 対象 resource が tenant-scoped（`tenant` / `audit_log_cross_tenant`
+   以外。各 ResourceType ごとに `IsTenantScoped(resource) bool` ヘルパで判定）の場合、
+   非 SuperAdmin role（TenantAdmin / Operator / Viewer）に対しては:
+   - `targetTenantID == uuid.Nil` → **403**（fail-closed。空入力許可は許さない / Req 4.10 / 6.1）
+   - `targetTenantID != p.TenantID` → **403**（cross-tenant 拒否）
+3. **SuperAdmin cross-tenant 経路の audience guard**: p.IsSuperAdmin == true かつ `targetTenantID
+   != uuid.Nil && targetTenantID != p.TenantID`（実質 cross-tenant 操作 / p.TenantID は通常
+   `uuid.Nil` だが防御として明記）に分岐する場合、**`p.Audience == AudienceAdmin` であることを
+   追加条件として要求**する（Req 5.8 の SuperAdmin cross-tenant 許可は admin-console aud に
+   限定。tenant-console aud の SuperAdmin token を仮に保持しても cross-tenant 越境を許さない /
+   Req 5.8）
+4. すべて pass → nil（許可）
+
+Preconditions / Postconditions / Invariants:
+
 - Preconditions: principal が `auth.PrincipalFromContext` で取得済み
 - Postconditions: 拒否時は `*errors.Error{Code: CodeForbidden}` を返し、対象 resource_id 等を
   body / log に含めない（Req 5.7 / 6.2）
 - Invariants:
   - Matrix は test 起動時に `init()` で構築され、4 role × 7 action × 9 resource の全セルが
     `true` / `false` のいずれか明示値を持つ（partial fill 禁止 / fail-closed）
+  - `targetTenantID == uuid.Nil` を非 SuperAdmin が tenant-scoped resource で受けるケースは
+    必ず 403（empty / 空入力を許可側に倒さない）
+  - SuperAdmin が cross-tenant 経路に進めるのは `p.Audience == AudienceAdmin` のときに限る
 
 ##### Permissions Matrix（抜粋。完全版は `permissions.go` の Matrix 定数で表現）
 
 | Action / Resource | SuperAdmin | TenantAdmin | Operator | Viewer |
 |---|:---:|:---:|:---:|:---:|
-| read device | yes | yes (own) | yes (own) | yes (own) |
-| create/update/delete policy | no | yes (own) | no | no |
-| read policy | yes | yes | yes | yes |
-| issue command:lock / command:reboot | no | yes (own) | yes (own) | no |
-| issue command:wipe | no | yes (own) | no | no |
+| read device | yes (any) | yes (own) | yes (own) | yes (own) |
+| create/update/delete policy | yes (any) | yes (own) | no | no |
+| read policy | yes (any) | yes (own) | yes (own) | yes (own) |
+| issue command:lock / command:reboot | yes (any) | yes (own) | yes (own) | no |
+| issue command:wipe | yes (any) | yes (own) | no | no |
 | create/delete tenant | yes | no | no | no |
 | manage admin_user (same tenant) | yes (any) | yes (own) | no | no |
-| read audit_log (own tenant) | yes | yes | no | no |
+| read audit_log (own tenant) | yes (any) | yes (own) | no | no |
 | read audit_log_cross_tenant | yes | no | no | no |
 
-> "(own)" は `targetTenantID == principal.TenantID` の動的判定が追加で必要なセル。Matrix の
-> bool 値は role-level の許可を表し、tenant-scope 判定は `Authorize()` が動的に行う。
+> "(own)" は `targetTenantID == principal.TenantID` の動的判定が追加で必要なセル。"(any)" は
+> SuperAdmin が cross-tenant 許可を持つセル（targetTenantID は principal.TenantID と一致する
+> 必要なし。ただし Req 5.8 / 後述 Authorizer 仕様により、cross-tenant 経路は principal.Audience
+> == admin-console の追加条件 AND）。Matrix の bool 値は role-level の許可を表し、
+> tenant-scope / audience 判定は `Authorize()` が動的に行う。SuperAdmin 行が requirements.md
+> AC 4.11 の「テナント作成・削除、全テナント横断の参照、admin-console 配下の運用系操作を許可」
+> と一致するよう、policy / command / audit_log 等の運用系操作はすべて許可（cross-tenant 経路は
+> audience 条件で保護）。
 
 ### Auth Domain Layer
 
@@ -516,12 +625,19 @@ var Matrix map[Role]map[Action]map[ResourceType]bool
 
 **Responsibilities & Constraints**
 - 主責務:
-  - `Issue(ctx, adminUserID, aud)`: 32B 乱数 → base64url で cookie 値、sha256 で `token_hash`。
-    `sessions` 行を INSERT（idle_at=now+IdleMinutes, expires_at=now+AbsoluteHours, aud=aud）。
-    `*http.Cookie` を返す
-  - `Validate(ctx, rawToken)`: sha256(rawToken) → `sessions` lookup。`now > expires_at` or
-    `now > idle_at + IdleMinutes` で削除 + `CodeUnauthenticated`。成功時は idle_at を now に
-    UPDATE して Principal を返す（aud / admin_user_id / role 解決のために
+  - `Issue(ctx, tx, adminUserID, aud)`: 32B 乱数 → base64url で cookie 値、sha256 で `token_hash`。
+    呼び出し側から渡された `pgx.Tx` 上で `sessions` 行を INSERT（**`idle_at = now + IdleMinutes`
+    を idle 失効の deadline timestamp として保存**、`expires_at = now + AbsoluteHours` を
+    absolute 失効 deadline として保存、`aud = aud`）。`*http.Cookie` を返す。tx を **引数で
+    受ける**ことで、`AuthService.HandleCallback` の外側 tx と同一 tx 内で `UpsertAdminUser` →
+    `Issue` を atomic に実行できる（旧 design では `Issue` 内部で別 tx を開いていたため、
+    未 commit な `admin_users` 行を FK 参照できず FK 失敗または非原子的になる事故があった。
+    本 spec ではこれを解消）
+  - `Validate(ctx, rawToken)`: sha256(rawToken) → `sessions` lookup（lookup は内部で
+    `BeginTxFunc` 経由の `app.is_superadmin=true` 文脈で短い tx を開く）。**`now > expires_at`
+    または `now > idle_at`**（idle_at 自体が deadline timestamp）で `DeleteSession` +
+    `CodeUnauthenticated`。成功時は **`idle_at = now + IdleMinutes`** に UPDATE
+    （deadline を再延長）して Principal を返す（aud / admin_user_id / role 解決のために
     `admin_role_assignments` を JOIN）
   - `Revoke(ctx, rawToken)`: `sessions` DELETE。respond 側の cookie 削除指示は handler が
     Set-Cookie Max-Age=-1 で発行
@@ -547,21 +663,33 @@ var Matrix map[Role]map[Action]map[ResourceType]bool
 
 ```go
 type SessionManager interface {
-    Issue(ctx context.Context, adminUserID uuid.UUID, aud oidc.Audience) (*http.Cookie, error)
-    Validate(ctx context.Context, rawToken string) (auth.Principal, error)
+    // Issue は呼び出し側から渡された pgx.Tx 上で sessions 行を INSERT する。
+    // AuthService.HandleCallback の outer tx に join する想定（FK / 原子性確保のため）。
+    Issue(ctx context.Context, tx pgx.Tx, adminUserID uuid.UUID, aud authz.Audience) (*http.Cookie, error)
+    // Validate は cookie 生値を受け、内部で `app.is_superadmin=true` 文脈の短い tx を開いて
+    // session lookup + idle_at refresh を 1 tx で実行する。
+    Validate(ctx context.Context, rawToken string) (Principal, error)
+    // Revoke も内部で短い tx を開く。
     Revoke(ctx context.Context, rawToken string) error
 }
 
 func NewSessionManager(
     repo AuthRepository,
+    pool *pgxpool.Pool, // Validate / Revoke の独立 tx 用
     idleMinutes int,
     absoluteHours int,
 ) SessionManager
 ```
-- Preconditions: ctx は通常 HTTP request context。Validate は cookie 値（生値）を受ける
-- Postconditions: Issue 戻り cookie は handler が `http.SetCookie` で送出
-- Invariants: idle/absolute 超過は 401（`CodeUnauthenticated`、Cause に `idle_expired` /
-  `absolute_expired` を持たせる）
+- Preconditions: ctx は通常 HTTP request context。Validate は cookie 値（生値）を受ける。
+  Issue は呼び出し側が outer tx を保持し pgx.Tx を渡す
+- Postconditions: Issue 戻り cookie は handler が `http.SetCookie` で送出。idle_at は
+  deadline timestamp として記録される（`now + IdleMinutes`）
+- Invariants:
+  - idle/absolute 超過は 401（`CodeUnauthenticated`、Cause に `idle_expired` / `absolute_expired`
+    を持たせる）
+  - 失効判定の式は `now > idle_at` および `now > expires_at`（idle_at / expires_at 自体が
+    deadline timestamp）。Issue で `now + IdleMinutes`、Validate 成功時は `idle_at = now +
+    IdleMinutes` に refresh
 
 #### AuthService
 
@@ -572,25 +700,39 @@ func NewSessionManager(
 
 **Responsibilities & Constraints**
 - 主責務:
-  - `HandleCallback(ctx, code, expectedAud, redirectURL)`:
-    1. `Verifier.ExchangeCode(code, redirectURL)` → rawIDToken
+  - `HandleCallback(ctx, code, expectedAud, redirectURL, codeVerifier, postLoginRedirect)`:
+    1. `Verifier.ExchangeCode(code, redirectURL, codeVerifier)` → rawIDToken
     2. `Verifier.Verify(rawIDToken, expectedAud)` → Claims
-    3. `RoleMapping.MapRoles(Claims.Groups)` → []Role（空ならば `CodeUnknownRole` で 401）
-    4. `BeginTxFunc(ctx + WithTenantContext(IsSuperAdmin=true), ...)` 内で:
-       - `AuthRepository.UpsertAdminUser(oidc_subject, email, tenant_id=?)` で id 確保
-       - 解決した roles を `admin_role_assignments` に upsert
-       - `SessionManager.Issue(adminUserID, expectedAud)` で cookie 発行
-    5. cookie を `http.SetCookie` で応答に追加し、`Location: <SPA URL>` に 302
+    3. `RoleMapping.MapClaimsToRoles(Claims)` → []authz.Role（Claims.Roles を優先、無ければ
+       Claims.Groups を使用。空ならば `CodeUnknownRole` で 401 / Req 4.2 / 4.12）
+    4. **Tenant ID 解決**（前述 Tenant ID resolution rule）→ resolvedTenantID（uuid.UUID）。
+       解決失敗時は `CodeOIDCInvalid` (Cause: `missing_tenant_id`) で 401
+    5. `validatePostLoginRedirect(expectedAud, postLoginRedirect)` で redirect URL が config の
+       allowlist prefix (`OIDCTenantPostLoginAllowedPrefixes` / `OIDCAdminPostLoginAllowedPrefixes`)
+       にマッチすることを確認。不一致は 400（open redirect 防止 / Req 1.5）
+    6. `BeginTxFunc(ctx + WithTenantContext(IsSuperAdmin=true), pool, fn)` の **outer tx 内**で:
+       - `AuthRepository.UpsertAdminUser(tx, oidc_subject, email, resolvedTenantID)` で id 確保
+       - `AuthRepository.FindRolesForAdminUser(tx, adminUserID)` で既存 roles を取得
+       - 新 roles と既存 roles を比較し、差分 (added / removed) を計算
+       - `AuthRepository.ReplaceRoles(tx, adminUserID, newRoles, resolvedTenantID)` で同期
+       - **差分があれば** `Recorder.Record(tx, ev RoleChangeEvent{Source: "login_sync"})` を
+         **同一 tx 内**で呼ぶ（Req 7.1 / 7.3。Source field で「ログイン時の自動同期」と
+         「管理者操作による ChangeRole」を区別可能にする）。Record が err を返したら rollback +
+         500 を返す（login 全体を未確定として扱う）
+       - `SessionManager.Issue(tx, adminUserID, expectedAud)` で cookie 発行（tx 引数渡し）
+    7. cookie を `http.SetCookie` で応答に追加し、`Location: <validated SPA URL>` に 302
   - `ChangeRole(ctx, targetAdminUserID, newRole)`:
     1. Authorizer 経由で principal が `manage admin_user` を持つことを確認
-    2. tx 内で role 変更 + `Recorder.Record(role_change event)` を呼ぶ
+    2. tx 内で role 変更 + `Recorder.Record(tx, ev RoleChangeEvent{Source: "admin_change"})` を
+       同一 tx 内で呼ぶ
     3. Recorder.Record が err を返したら rollback + 422（Req 7.3）
 - ドメイン境界: handler から呼ばれる service。AuthRepository / SessionManager / OIDC Verifier
-  / Recorder の 4 つを依存注入
+  / Recorder / Pool の 5 つを依存注入
 - データ所有権: なし（permissions / sessions / admin_users は repo / sessmgr が所有）
 - Invariants:
   - OIDC verify 失敗 → session 未発行（NFR 2.1）
-  - Recorder 失敗 → role 変更未確定（Req 7.3）
+  - Recorder 失敗 → role 変更未確定（ChangeRole も login 時の sync も同じ rollback 規律 / Req 7.3）
+  - post_login_redirect は allowlist 通過しないと 302 しない（open redirect 防止）
 
 **Dependencies**
 - Inbound: AuthHandler (Critical)
@@ -603,15 +745,27 @@ func NewSessionManager(
 
 ```go
 type Service interface {
-    HandleCallback(ctx context.Context, code string, aud oidc.Audience, redirectURL string) (cookie *http.Cookie, postLoginURL string, err error)
+    HandleCallback(ctx context.Context, code string, aud authz.Audience, redirectURL string, codeVerifier string, postLoginRedirect string) (cookie *http.Cookie, postLoginURL string, err error)
     ChangeRole(ctx context.Context, targetAdminUserID uuid.UUID, newRole authz.Role) error
     Logout(ctx context.Context, rawToken string) error
+}
+
+// RoleChangeEvent.Source は "login_sync"（ログイン時の自動同期）/ "admin_change"
+// （管理者操作）を区別する。
+type RoleChangeEvent struct {
+    ActorID            uuid.UUID
+    TargetAdminUserID  uuid.UUID
+    FromRoles          []authz.Role
+    ToRoles            []authz.Role
+    OccurredAt         time.Time
+    Source             string // "login_sync" or "admin_change"
 }
 
 type RecorderInterface interface {
     // audit ドメイン Issue で実装される。本 spec では auth package 内に NoopRecorder を
     // 提供（実 audit Issue で差し替え）。失敗時 error を返す → AuthService が rollback。
-    Record(ctx context.Context, ev RoleChangeEvent) error
+    // 呼び出し側の outer tx に join できるよう pgx.Tx を引数で受ける。
+    Record(ctx context.Context, tx pgx.Tx, ev RoleChangeEvent) error
 }
 ```
 
@@ -655,7 +809,7 @@ type SessionRow struct {
     IssuedAt     time.Time
     IdleAt       time.Time
     ExpiresAt    time.Time
-    Audience     oidc.Audience
+    Audience     authz.Audience
 }
 ```
 
@@ -684,8 +838,8 @@ type SessionRow struct {
 
 | Method | Endpoint | Request | Response | Errors |
 |---|---|---|---|---|
-| GET  | /api/auth/login           | (query: post_login_redirect) | 302 to IdP authorize URL | 400 |
-| GET  | /api/auth/callback        | (query: code, state)         | 302 to post_login_redirect + Set-Cookie ae_session | 401 (oidc_invalid / unknown_role) |
+| GET  | /api/auth/login           | (query: post_login_redirect) | 302 to IdP authorize URL（allowlist 検証通過時） | 400 (invalid_redirect) |
+| GET  | /api/auth/callback        | (query: code, state)         | 302 to validated post_login_redirect + Set-Cookie ae_session | 400 / 401 (oidc_invalid / unknown_role / missing_tenant_id) |
 | POST | /api/auth/logout          | (cookie ae_session)          | 204 + Set-Cookie Max-Age=-1 | 401 |
 | GET  | /api/auth/session         | (cookie ae_session)          | 200 SessionInfo{email, roles, tenant_id, aud} | 401 |
 | GET  | /api/admin/auth/login     | 同上 | 302 to IdP (client_id=admin-console) | 400 |
@@ -693,19 +847,24 @@ type SessionRow struct {
 | POST | /api/admin/auth/logout    | 同上 | 同上 | 401 |
 | GET  | /api/admin/auth/session   | 同上 | 同上 | 401 |
 
-> 上記 `/api/admin/auth/*` 配下は **`RequireSuperAdmin` を通さない**（ログイン前のため）。
-> SuperAdmin ガードは「ログイン済 + admin-console aud + SuperAdmin role」を要求するが、
-> auth login/callback はその前段に位置する。`cmd/api/main.go` の bootstrap で
-> `routers.Admin` の `/auth/*` を SuperAdmin ガード対象から **除外**するか、または
-> `Routes` を `routers.Admin` ではなく **`routers.API` の `/admin/auth` サブツリーに
-> 直接 mount** する。本 spec は **後者**を採用（A2 の `httpserver.NewServer` は
-> `/api/admin/*` 全体に `RequireSuperAdmin` を `Use()` で固定するため、`/api/admin/auth/*`
-> を SuperAdmin ガード対象外にするには `apiRouter.Mount("/admin/auth", auth.AdminRoutes(...))`
-> で別経路に外出しする）。これに合わせて `httpserver.NewServer` には minor 改修が入る
-> （`adminRouter` の SuperAdmin guard は `/api/admin/*` のうち `/auth` を除く path に限定する
-> か、`Routers.Admin` とは別に `Routers.AdminAuth chi.Router` を露出する。**本 spec は
-> 後者を選ぶ**: Routers struct に `AdminAuth chi.Router` を追加し、bootstrap がそちらに
-> mount する）
+> 上記 `/api/auth/*` および `/api/admin/auth/*` 配下は **SessionAuthMiddleware /
+> TenantContextMiddleware / RequireSuperAdmin のいずれも通さない**（cookie 未保持で
+> ログイン開始 / コールバックに到達するため、これら middleware が default-deny や 401 / 403 を
+> 返すと物理的にログインできない）。本 spec は `Routers` struct に **`APIAuth chi.Router` と
+> `AdminAuth chi.Router` を追加**し、bootstrap はこれらに `auth.Routes(...)` を mount する。
+> APIAuth / AdminAuth の chain には auth 用 middleware を一切置かず、各 handler 内で必要な
+> 認証判定（cookie 取り出し / state cookie 検証等）を行う。`routers.API` / `routers.Admin` の
+> chain には従来通り `SessionAuthMiddleware` / `TenantContextMiddleware` /
+> `RequireSuperAdmin`（Admin のみ）を `Use()` で適用する。AC 5.1 の例外 path は
+> requirements.md AC 5.1 でも明示する（本 spec の本 PR で同時更新）。
+
+> **post_login_redirect の allowlist 検証**: query パラメータで受けた `post_login_redirect` を
+> そのまま 302 に使うと open redirect が成立する（攻撃者が `?post_login_redirect=https://evil.example`
+> を送って認証後に外部サイトへ遷移させられる）。本 spec は **config.OIDCTenantPostLoginAllowedPrefixes**
+> および **config.OIDCAdminPostLoginAllowedPrefixes** に許可 URL prefix の slice を持たせ
+> （例: `["https://tenant.ae-mdm.example/"]`）、callback handler が `redirect.HasPrefix(allowed)` の
+> いずれかにマッチしない URL を **400 (invalid_redirect)** で reject する。空 / 未指定の場合は
+> config の各 `OIDC{Tenant,Admin}RedirectURL` から派生した default landing page にフォールバックする。
 
 ### Platform Layer 拡張
 
@@ -713,7 +872,7 @@ type SessionRow struct {
 
 | Field | Detail |
 |-------|--------|
-| Intent | cookie `ae_session` から session token を取り出し SessionManager.Validate を呼んで authClaims を ctx に注入。失敗時 401 |
+| Intent | cookie `ae_session` から session token を取り出し adapter 関数 (SessionValidatorFunc) を呼んで authClaims を ctx に注入。失敗時 401 |
 | Requirements | 3.5, 3.8, 5.2, 5.6, NFR 3.1, NFR 3.2 |
 
 **Responsibilities & Constraints**
@@ -721,11 +880,20 @@ type SessionRow struct {
   `withAuthClaims(ctx, authClaims{TenantID, AdminUserID, Roles, IsSuperAdmin, Audience})` を
   呼ぶ。Validate 失敗時は 401 を返し chain を終端
 - ドメイン境界: `httpserver` package 内（authClaims は package private のため、別 package
-  から書けない）。SessionManager は interface で受け structural typing
+  から書けない）。SessionManager 本体を直接受けず、`SessionValidatorFunc func(ctx, rawToken
+  string) (httpserver.AuthClaims, error)` の adapter を bootstrap で組み立てて受ける
+  （前述「新規コンポーネントの根拠」参照。`httpserver` が `auth` / `authz` を import しない
+  ための層）。`httpserver.AuthClaims` は primitive 型のみで構成された export 構造体
+  （TenantID uuid.UUID / AdminUserID uuid.UUID / Roles []string / IsSuperAdmin bool /
+  Audience string）
 - Invariants:
-  - cookie 不在 → 401（ただし `/api/auth/login` / `/api/auth/callback` / `/healthz` /
-    `/readyz` は本 middleware の chain 対象外）
-  - 失敗時 Set-Cookie Max-Age=-1 で stale cookie を削除指示（NFR 3.3）
+  - **cookie 不在は authClaims 未注入のまま next.ServeHTTP に進む**（401 で chain を終端しない）。
+    後段の `TenantContextMiddleware` も authClaims 不在を default-deny として受け止め、結果的に
+    `/api`・`/api/admin` 配下は 401 になる。`/api/auth/*` / `/api/admin/auth/*` / `/healthz` /
+    `/readyz` は本 middleware を含む chain そのものに乗らないため、cookie 不在で正常に処理される
+    （`Routers.APIAuth` / `Routers.AdminAuth` に mount される）
+  - cookie あり → Validate 失敗（期限切れ / 未知 hash）は 401 + Set-Cookie Max-Age=-1 で stale
+    cookie を削除指示し chain 終端（NFR 3.3）
 
 #### RequireSuperAdmin（拡張）
 
@@ -822,7 +990,7 @@ flowchart TD
     Exch -- err --> E1[CodeOIDCInvalid<br/>401]
     Exch -- ok --> Ver{Verify aud/iss/exp/sig}
     Ver -- err --> E2[CodeOIDCInvalid<br/>401 + Cause 詳細]
-    Ver -- ok --> Map{MapRoles}
+    Ver -- ok --> Map{MapClaimsToRoles}
     Map -- empty --> E3[CodeUnknownRole<br/>401]
     Map -- ok --> Tx[BeginTxFunc<br/>app.is_superadmin=true]
     Tx --> Upsert[UpsertAdminUser + ReplaceRoles]
@@ -835,8 +1003,8 @@ flowchart TD
 ### Unit Tests
 1. `oidc.Verifier.Verify`: httptest で JWKS endpoint を立て、署名正常 + iss / aud / exp の
    4 失敗分岐を網羅（特に aud=tenant-console token を expectedAud=admin-console で reject）
-2. `oidc.RoleMapping.MapRoles`: Keycloak groups claim の代表値 → 4 role への写像、未知のみ
-   の場合 empty 返却
+2. `oidc.RoleMapping.MapClaimsToRoles`: Keycloak groups claim / 標準 roles claim 双方の
+   代表値 → 4 role への写像、未知のみの場合 empty 返却
 3. `authz.Authorize` 表駆動: 4 role × 7 action × 9 resource の 252 セルを test loop で網羅
    （特に Operator の WIPE 拒否、Viewer の write 全拒否、TenantAdmin の cross-tenant 拒否、
    SuperAdmin の audit_log_cross_tenant 許可）
@@ -879,14 +1047,29 @@ flowchart TD
   cookie に short-lived（5 分）保存。callback で MAC 検証 + 一致 random_nonce を要求し
   CSRF + state replay を防ぐ。state cookie 名 `ae_oidc_state`、HttpOnly / Secure /
   SameSite=Lax。
-- **PKCE code_verifier**: SPA 側で生成 + sessionStorage 保持、callback URL に code と共に
-  ?code_verifier= でフロントから backend に送るのは **しない**（漏洩リスクが大きい）。
-  代替: backend が code_verifier 相当の値も自前で発行・state cookie 内に MAC 付きで保持し、
-  ExchangeCode に渡す（SPA 側 PKCE と独立した backend 側 PKCE。本 spec では backend の
-  Authorization Code Flow の安全化のため）。詳細は handler.go の loginHandler 内で実装。
-- **存在の非露出**: aud=tenant-console + SuperAdmin の `/api/admin/*` 到達は 403 で `code:
-  "forbidden"` のみを返し、body / log に対象 path / resource_id を含めない（Req 5.7 /
-  6.1〜6.3）。
+- **PKCE 責務境界の明確化**: 本 spec の OIDC ログインは **backend-driven Authorization Code +
+  PKCE Flow** を採用する。code_verifier / code_challenge は **backend が `/login` で生成**し、
+  code_verifier を MAC 付き state cookie 内（`ae_oidc_state`）に保持して `/callback` で
+  ExchangeCode に渡す。code_challenge のみが IdP 認可リクエストに含まれる。「SPA 側が独自に
+  code_verifier を生成して backend に送る形（SPA-driven PKCE）」は本 spec の対象外（Non-Goals
+  の PKCE 項目に記載）。これは「SPA に code_verifier 漏洩リスクを残さない」「backend が単一の
+  state 管理層として PKCE と CSRF state を併存させる」ため。design.md:65 の Non-Goals 記述は
+  「SPA-driven PKCE が out of scope」の意であり、backend-driven PKCE は本 spec の **対象内**
+  （`handler.go` の loginHandler 内で実装）。本節と Non-Goals の表現を統一する。
+- **open redirect 防止**: callback の `post_login_redirect` query は config の
+  `OIDCTenantPostLoginAllowedPrefixes` / `OIDCAdminPostLoginAllowedPrefixes` allowlist に対する
+  `HasPrefix` 検証を通過しなければ 400 (`invalid_redirect`) で reject する。Req 1.5 の
+  「属する SPA URL」要件と整合させ、攻撃者由来 URL への遷移を防ぐ。
+- **存在の非露出と認可拒否ログの分離（Req 5.7 / 6.1〜6.3 / NFR 5.2）**:
+  - **応答 body**: aud=tenant-console + SuperAdmin の `/api/admin/*` 到達等の 403 は `code:
+    "forbidden"` のみを含む `{code, message, request_id}` を返し、body / response message に
+    対象 path / resource_id / tenant_id を **含めない**（Req 5.7 / 6.1〜6.3）
+  - **構造化ログ**: 認可拒否を構造化ログに記録する際は **拒否理由 (`reason`) / 管理者識別子
+    (`actor_id`) / リクエスト path (`path`)** を field として記録する（NFR 5.2）。body と log の
+    取り扱いは異なる（body は外部公開、log は内部監査用）。design.md:887 と NFR 5.2 で表現が
+    食い違っていた点を本節で統一: **body には path を含めず、log には path を含める**
+  - 403 ログの `resource_id` field は **SuperAdmin 操作時のみ**載せる（NFR 5.2 / 6.2 の
+    「拒否理由は機械可読 error code として応答、リソース ID は応答に含めない」と整合）
 - **role change の audit emit 失敗時の rollback**: Req 7.3 を満たすため、AuthService.
   ChangeRole は単一 tx 内で `admin_role_assignments` の UPDATE と Recorder.Record を実行し、
   どちらかが err なら rollback + 422 を返す。Recorder の実装本体は audit ドメイン Issue。
@@ -925,9 +1108,17 @@ flowchart LR
   Open Questions 3 を継承）
 - 403 応答の body フォーマット（`{code, message, request_id}` を採用するが、後続 Issue の
   domain handler 群でも統一する必要あり。A2 の `errors.WriteHTTP` 既存契約と整合）
-- A2 の `httpserver.NewServer` signature 変更（sessMgr 引数追加 / `AdminAuth` Routers 追加）
-  は A2 integration test の互換性を壊さない（nil 許容 + 既存 Routers field 維持）。実装時に
-  確認
+- A2 の `httpserver.NewServer` signature 変更（validator 引数追加 / `APIAuth` + `AdminAuth`
+  Routers 追加）は A2 integration test の互換性を壊さない（nil 許容 + 既存 `API` / `Admin`
+  Routers field 維持）。実装時に確認
+- **MVP の tenant_id claim 名**: 本 spec は IdP 側で `tenant_id` という名前の custom claim を
+  発行する前提とする。本番 IdP（Azure AD / Okta 等）の確定時に claim 名を変更する場合は
+  `oidc/role_mapping.go` 同梱の tenant 解決ロジックを差し替える（Open Questions 1 と一体）
+- **login-time role 同期での audit event source**: 本 spec は HandleCallback で role 差分が
+  発生した場合、`RoleChangeEvent.Source = "login_sync"` で audit emit する設計とした
+  （ActorID は self-sync として targetAdminUserID と同値、または system actor の UUID）。
+  audit ドメインの後続 Issue で UI 表示時の見せ方（"system sync" としてグルーピングするか）
+  を再確認
 
 ## Supporting References
 
