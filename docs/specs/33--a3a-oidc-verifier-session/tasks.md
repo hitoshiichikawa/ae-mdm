@@ -211,7 +211,7 @@
   - _Boundary: Logger_
   - _Depends: なし（A2 完了済みのため独立）_
 
-- [ ] 2. OIDC Verifier（JWKS キャッシュ + 検証）
+- [x] 2. OIDC Verifier（JWKS キャッシュ + 検証）
 - [ ] 2.1 oidc.Verifier 実装と単体テスト
   - `backend/internal/platform/oidc/verifier.go` を新規追加。`coreos/go-oidc/v3` の
     `oidc.NewProvider` + `oidc.NewRemoteKeySet` を tenant / admin の 2 issuer 分構築し、
