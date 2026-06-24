@@ -15,7 +15,7 @@
   - `backend/internal/config/config.go` に以下を追加:
     - `SessionIdleTimeout time.Duration`（env `SESSION_IDLE_TIMEOUT`, default `30m`）
     - `SessionAbsoluteTimeout time.Duration`（env `SESSION_ABSOLUTE_TIMEOUT`, default `8h`）
-    - `StateCookieTTL time.Duration`（env `STATE_COOKIE_TTL`, default `10m`, **validation: `0 < ttl <= 10m`**。Req 2.4「10 分以内に有効期限が切れる」を上限制約として満たすため、設定値が `0` / 負の duration / `10m` を超える値のいずれかなら起動時 `*errors.Error{Code: config_invalid}` で reject する）
+    - `StateCookieTTL time.Duration`（env `STATE_COOKIE_TTL`, default `10m`, **validation: `1s <= ttl <= 10m`**。Req 2.4「10 分以内に有効期限が切れる」を上限制約として満たすため、設定値が `0` / 負の duration / **1 秒未満（例: `500ms`）** / `10m` を超える値のいずれかなら起動時 `*errors.Error{Code: config_invalid}` で reject する。下限 1 秒は `CookieAttributes(ttl)` が `MaxAge = int(ttl / time.Second)` で導出するため、1 秒未満を許容すると MaxAge=0（= 即時削除 cookie）が発行され login flow が成立しなくなる事を防ぐ）
     - `StateMACSecret string`（env `STATE_MAC_SECRET`, required, len >= 32 bytes）
     - `OIDCTenantClientSecret string`（env `OIDC_TENANT_CLIENT_SECRET`, required, confidential
       client + `client_secret_basic` 認証用 / design.md Req 6.2 と確認事項 6 で確定）
@@ -30,8 +30,9 @@
       `*errors.Error{Code: config_invalid}`
     - (d) duration 不正フォーマットで `*errors.Error{Code: config_invalid}`
     - (e) 正常系で全 6 値が読み込まれること
-    - (f) `STATE_COOKIE_TTL=0s` / `STATE_COOKIE_TTL=-1m` / `STATE_COOKIE_TTL=11m` のいずれも
-      `*errors.Error{Code: config_invalid}`（境界値: `STATE_COOKIE_TTL=10m` は受理 /
+    - (f) `STATE_COOKIE_TTL=0s` / `STATE_COOKIE_TTL=-1m` / `STATE_COOKIE_TTL=500ms` /
+      `STATE_COOKIE_TTL=11m` のいずれも `*errors.Error{Code: config_invalid}`（境界値:
+      `STATE_COOKIE_TTL=1s` / `STATE_COOKIE_TTL=10m` は受理 / `STATE_COOKIE_TTL=999ms` /
       `STATE_COOKIE_TTL=10m1s` は reject）
   - `.env.example` に以下 6 行を追加（管理者セッション暗号化用秘密鍵セクション直下）:
     - `SESSION_IDLE_TIMEOUT=30m`
@@ -54,16 +55,44 @@
     からの UPDATE で対応
   - **`backend/db/migrations/0014_admin_users_add_oidc_issuer.up.sql` を新規追加**:
     `ALTER TABLE admin_users ADD COLUMN oidc_issuer text NOT NULL DEFAULT ''` →
-    `UPDATE admin_users SET oidc_issuer = '<TENANT_ISSUER_URL_PLACEHOLDER>'`（既存行は A2 時点で
-    空のはずだが念のため backfill）→ `ALTER TABLE admin_users ALTER COLUMN oidc_issuer DROP
-    DEFAULT` → `ALTER TABLE admin_users DROP CONSTRAINT admin_users_oidc_subject_key`（既存の
-    `oidc_subject UNIQUE` を解除）→ `ALTER TABLE admin_users ADD CONSTRAINT
-    admin_users_oidc_issuer_subject_key UNIQUE (oidc_issuer, oidc_subject)`。**理由**: OIDC `sub`
-    は issuer スコープでのみ一意のため、tenant / admin issuer を分けられる本設計では
-    `(oidc_issuer, oidc_subject)` の組で admin_users を解決する必要がある（`sub` 単独の
-    UNIQUE 制約は別 issuer の同 sub と衝突する偽陽性を生む）
+    `ALTER TABLE admin_users ALTER COLUMN oidc_issuer DROP DEFAULT` → `ALTER TABLE admin_users
+    DROP CONSTRAINT admin_users_oidc_subject_key`（既存の `oidc_subject UNIQUE` を解除）→
+    `ALTER TABLE admin_users ADD CONSTRAINT admin_users_oidc_issuer_subject_key UNIQUE
+    (oidc_issuer, oidc_subject)`。
+    **重要 — backfill は literal placeholder で行わない**: 既存行が存在する場合、`DEFAULT ''`
+    によって空文字でバックフィルされる。空文字は `claims.Issuer`（実 issuer URL）と一致しないため、
+    既存行は `ResolveAdminUser` で 403 `admin_user_not_provisioned` になる。これは「issuer URL を
+    後から admin-seed CLI / 管理 UI（後続 Issue）で正しい値に上書きするまでログインできない」
+    という意図された fail-closed 挙動である（環境依存の literal placeholder URL を migration に
+    埋めると、本番 / dev 等で異なる issuer URL を必要とする運用で誤動作するため意図的に避ける）。
+    **理由**: OIDC `sub` は issuer スコープでのみ一意のため、tenant / admin issuer を分けられる
+    本設計では `(oidc_issuer, oidc_subject)` の組で admin_users を解決する必要がある（`sub` 単独
+    の UNIQUE 制約は別 issuer の同 sub と衝突する偽陽性を生む）
   - 対応 down: `0014_admin_users_add_oidc_issuer.down.sql` で対称の DROP CONSTRAINT + ADD
     CONSTRAINT（`oidc_subject UNIQUE` 復元）+ `DROP COLUMN oidc_issuer`
+  - **`backend/db/migrations/0015_create_state_nonces.up.sql` を新規追加**（Req 2.9 / state
+    一度限り消費 / design.md 「state_nonces テーブル」節と整合）:
+    ```sql
+    CREATE TABLE state_nonces (
+      nonce text PRIMARY KEY,
+      console text NOT NULL CHECK (console IN ('tenant-console','admin-console')),
+      consumed_at timestamptz NOT NULL DEFAULT now(),
+      expires_at timestamptz NOT NULL
+    );
+    CREATE INDEX idx_state_nonces_expires_at ON state_nonces(expires_at);
+    ```
+    RLS ポリシーは設定しない（tenant_id を持たない / SuperAdmin context で INSERT のみ）。
+    GC（`WHERE expires_at < now()` での DELETE）は後続 sweeper task の責務で本 Issue 範囲外。
+    対応 down: `0015_create_state_nonces.down.sql` で `DROP INDEX idx_state_nonces_expires_at;
+    DROP TABLE state_nonces;`
+  - **既存 admin_users INSERT fixture / test を `oidc_issuer` 列対応に更新**: `grep -rn
+    "INSERT INTO admin_users" backend/test/ backend/internal/` で本 migration の影響箇所を全件
+    列挙する。A2 既存実装の典型例は `backend/test/integration/helpers_test.go:245` 付近で、
+    `oidc_subject` のみ指定して INSERT する形になっている。本 migration で `oidc_issuer NOT
+    NULL` 列が追加されるため、すべての admin_users INSERT 文に `oidc_issuer` カラム + テスト
+    用 issuer URL（例: integration テスト内 mock IdP の issuer URL / `httptest.Server.URL`）を
+    追加する。本更新を怠ると migration 完了後に既存 integration test が「null value in column
+    "oidc_issuer" violates not-null constraint」で全壊する（**本 task 内で必ず併せて実施**）
   - 既存 RLS ポリシー（`tenant_isolation_sessions`）は本マイグレーションで再定義しない
     （A2 で配置済みのまま、列追加のみ）
   - **既存コード / fixture / test の `sessions.idle_at` 参照を確認・置換**:
@@ -77,7 +106,7 @@
   - 結合テストは task 6 で `migrations_reversible_test.go` の対象に含まれる前提（本 task では
     手動で `make migrate-up && make migrate-down && make migrate-up` の整合性を文書化する
     のみ）
-  - _Requirements: 3.7, 3.9, 4.1, 4.2, 4.3, 4.8, 5.1, 6.3_
+  - _Requirements: 2.9, 3.7, 3.9, 4.1, 4.2, 4.3, 4.8, 5.1, 6.3_
   - _Boundary: Migrations_
 - [ ] 1.3 httpserver の authClaims 関連シンボル公開化 (P)
   - `backend/internal/platform/httpserver/middleware.go` の private シンボルを以下に rename:
@@ -152,9 +181,15 @@
     `ReturnTo` / `IssuedAt`**。design.md と整合 / Req 2.9 で MAC 保護下に置く戻り先 URL の
     生値）と `Sign(payload, secret) (cookieValue string, err error)` /
     `Verify(cookieValue, queryState, secret, ttl, now) (StatePayload, error)` /
-    `CookieAttributes(ttl) http.Cookie` を実装。MAC は HMAC-SHA256、cookie 値フォーマットは
-    `base64url(json(payload)) + "." + base64url(MAC)`、比較は `subtle.ConstantTimeCompare`。
-    cookie 名は **`__Host-ae_mdm_state`** 固定（design.md と整合）
+    `CookieAttributes(ttl) http.Cookie` / **`ExpireCookieAttributes() http.Cookie`** を実装。
+    MAC は HMAC-SHA256、cookie 値フォーマットは `base64url(json(payload)) + "." + base64url(MAC)`、
+    比較は `subtle.ConstantTimeCompare`。cookie 名は **`__Host-ae_mdm_state`** 固定
+    （design.md と整合）。`ExpireCookieAttributes()` は **state cookie 専用の削除 helper**
+    で、Name=`__Host-ae_mdm_state` / Value="" / Max-Age=0 / Path=/ / HttpOnly / Secure /
+    SameSite=Lax を返す（session cookie 用の `session.ExpireCookieAttributes()` とは Name が
+    異なるため、Handler / Service は state cookie 削除に **必ず本 helper を使用する** /
+    `session.ExpireCookieAttributes()` を流用すると `__Host-ae_mdm_state` 削除が成立せず
+    Req 2.8 違反になる）
   - `backend/internal/auth/state_test.go` を新規追加。
     - (a) Sign → Verify 往復で `StatePayload.ReturnTo` が cookie 経由で復元される
     - (b) MAC tamper で `*errors.Error{Code: CodeUnauthenticated, failure_kind: state_invalid}`
@@ -166,6 +201,9 @@
       `Name == "__Host-ae_mdm_state"` / `HttpOnly == true` / `Secure == true` /
       `SameSite == http.SameSiteLaxMode` / `Path == "/"` / `MaxAge == int(ttl/time.Second)`
       （`cfg.StateCookieTTL` から導出 / 10 分以下）
+    - **(h) `ExpireCookieAttributes()` の属性検証**（Req 2.8 削除 cookie の helper）:
+      `Name == "__Host-ae_mdm_state"` / `Value == ""` / `MaxAge == 0` / `Path == "/"` /
+      `HttpOnly == true` / `Secure == true` / `SameSite == http.SameSiteLaxMode`
   - `backend/internal/auth/doc.go` を新規追加。`internal/auth` の依存方向ルール（platform/oidc
     と platform/db / platform/httpserver / logger / errors / config のみ import 可）を記載
   - _Requirements: 2.1, 2.2, 2.3, 2.4, 2.5, 2.6, 2.7, 2.9, NFR 4.1_
@@ -173,15 +211,20 @@
   - _Depends: 1.1_
 - [ ] 3.2 auth.session helper + 単体テスト (P)
   - `backend/internal/auth/session.go` を新規追加。`New() (rawToken string, err error)`
-    （`crypto/rand.Read` で 32 byte → base64url no-padding）、`HashToken(raw) string`
-    （SHA-256 hex）、`CookieAttributes() http.Cookie`（`__Host-ae_mdm_session` /
-    HttpOnly / Secure / SameSite=Lax / Path=/）、`ExpireCookieAttributes() http.Cookie`
-    （失効・logout 時の削除 cookie / Max-Age=0）、`HashPrefix(hash) string`（先頭 8 文字 /
+    （`crypto/rand.Read` で 32 byte → base64url no-padding / err は呼び出し側で **必ず**
+    チェックする / Req 3.5 / NFR 3.1）、`HashToken(raw) string`（SHA-256 hex）、
+    **`CookieAttributes(ttl time.Duration) http.Cookie`**（`__Host-ae_mdm_session` /
+    HttpOnly / Secure / SameSite=Lax / Path=/ / `MaxAge = int(ttl/time.Second)` /
+    呼び出し側が `cfg.SessionAbsoluteTimeout` を渡し、cookie の MaxAge を永続ストア側 absolute
+    timeout と一致させる）、`ExpireCookieAttributes() http.Cookie`（失効・logout 時の削除
+    cookie / Max-Age=0 / **session cookie 専用** であり、state cookie 削除には
+    `state.ExpireCookieAttributes()` を使うこと）、`HashPrefix(hash) string`（先頭 8 文字 /
     Req 3.8）を実装
   - `backend/internal/auth/session_test.go` を新規追加。(a) `New()` が 32 byte 相当の
     base64url 文字列を返す（長さ・文字種）、(b) `New()` を 100 回呼んで重複なし
     （乱数性）、(c) `HashToken` が SHA-256 hex（64 文字）を返す、(d) `HashToken` の冪等性、
-    (e) `CookieAttributes` の Name / Secure / HttpOnly / SameSite / Path 値、(f)
+    (e) **`CookieAttributes(ttl)` の Name / Secure / HttpOnly / SameSite / Path 値 +
+    `MaxAge == int(ttl/time.Second)` 検証**（`ttl = 8h` で `MaxAge == 28800` 等）、(f)
     `ExpireCookieAttributes` の Max-Age=0 確認、(g) `HashPrefix` が 8 文字
   - _Requirements: 3.2, 3.3, 3.4, 3.5, 3.7, 3.8, 4.7, NFR 1.2_
   - _Boundary: SessionCookie_
@@ -189,12 +232,16 @@
 
 - [ ] 4. auth.Repository（sessions / admin_users CRUD）
 - [ ] 4.1 Repository 実装 + integration テスト
-  - `backend/internal/auth/repository.go` を新規追加。`Repository` interface（**`ResolveAdminUser(ctx, issuer, subject, email, console)`**
-    / `Create` / `Get` / `Touch` / `Revoke`）と `pgxpool.Pool` ベースの実装を提供
-  - すべての CRUD は `db.BeginTxFunc` 経由で実行する。`Get` / `Touch` / `Revoke` /
-    `ResolveAdminUser` は **`SuperAdmin context`**（`db.WithTenantContext(ctx,
-    db.TenantContext{IsSuperAdmin: true})` で前置）で呼ばれる前提（A2 design.md「sessions の
-    認証 lookup 経路」散文と整合 / 確立 lookup は本 Issue では Service が wrap）
+  - `backend/internal/auth/repository.go` を新規追加。`Repository` interface
+    （**`ConsumeStateNonce(ctx, nonce, console, expiresAt)`** /
+    **`ResolveAdminUser(ctx, issuer, subject, email, console)`** /
+    `Create` / `Get` / `Touch` / `Revoke`）と `pgxpool.Pool` ベースの実装を提供
+  - **すべての CRUD（`Create` / `Get` / `Touch` / `Revoke` / `ConsumeStateNonce` /
+    `ResolveAdminUser` を含む）は `db.BeginTxFunc` 経由**で **`SuperAdmin context`**
+    （`db.WithTenantContext(ctx, db.TenantContext{IsSuperAdmin: true})` で前置）下で実行する
+    （A2 design.md「sessions の認証 lookup 経路」散文と整合 / `Create` も callback ハンドラ
+    から TenantContext 未確立で呼ばれるため、Repository 自身で SuperAdmin context を確立する。
+    TenantContext 未確立のまま BeginTxFunc を呼ぶと A2 の panic ガードに引っかかる）
   - `Get(ctx, tokenHash)` は 0 行で `*errors.Error{Code: CodeUnauthenticated, failure_kind:
     session_tamper}` を返す（Req 5.4）。Session struct + Identity struct を join 取得（join 元
     は `sessions ↔ admin_users`、Identity.Roles は `admin_role_assignments` から groups 風に
@@ -203,6 +250,12 @@
     Req 4.8）
   - `Revoke` は `UPDATE sessions SET revoked_at = $1 WHERE token_hash = $2 AND revoked_at
     IS NULL`（冪等性 / Req 5.1）
+  - **`ConsumeStateNonce(ctx, nonce, console, expiresAt)`** は `INSERT INTO state_nonces
+    (nonce, console, expires_at) VALUES ($1, $2, $3)` を実行する（Req 2.9 / 一度限り消費）。
+    pgx の戻り `pgconn.PgError` で `Code == "23505"`（unique_violation）の場合は
+    `*errors.Error{Code: CodeUnauthenticated, failure_kind: state_replay, Cause: err}` を返す
+    （`pgerrcode.UniqueViolation` を使う）。それ以外の DB エラーは `*errors.Error{Code:
+    CodeUnavailable, Cause: err}` で WrapDB。正常 INSERT 完了で nil を返す
   - **`ResolveAdminUser(ctx, issuer, sub, email, console)`** は事前 provisioning **必須** の
     read-modify-write を以下の手順で実行する（**新規 INSERT は行わない** / design.md と整合）:
     1. SuperAdmin context で `SELECT id, tenant_id FROM admin_users WHERE oidc_issuer = $1 AND oidc_subject = $2 FOR UPDATE`
@@ -230,7 +283,12 @@
     - (f) Touch 後の last_seen_at 更新と expires_at 不変
     - (g) Revoke 後の revoked_at セット
     - (h) Revoke 冪等性
-  - _Requirements: 3.7, 3.9, 4.3, 4.6, 4.8, 5.1, 5.3, 5.4, 6.3_
+    - (i) **`ConsumeStateNonce` 初回成功**（INSERT 1 行 + nil 返却 / Req 2.9）
+    - (j) **`ConsumeStateNonce` 同一 nonce 再呼出で `state_replay` 失敗**（PRIMARY KEY UNIQUE
+      違反を `failure_kind: state_replay` にマッピング / Req 2.9 の物理的拒否）
+    - (k) **`ConsumeStateNonce` の異なる nonce での並行 INSERT が干渉なし**（複数 console / 複数
+      nonce が独立に消費できることを確認）
+  - _Requirements: 2.9, 3.7, 3.9, 4.3, 4.6, 4.8, 5.1, 5.3, 5.4, 6.3_
   - _Boundary: AuthRepository_
   - _Depends: 1.2, 1.3, 3.1, 3.2_
 
@@ -255,11 +313,18 @@
        `state_mismatch` / `state_replay`）で 401
     1a. **`payload.Console == console` 検証**: state cookie 内の `StatePayload.Console` が
        当該 callback の console（引数 `console`）と一致しない場合は `failure_kind:
-       state_console_mismatch` で 401 + 即時 state cookie 削除（Max-Age=0）。tenant login で
-       発行した state を admin callback に提示する cross-console state 混同を拒否する
-       （Req 2.9 / 6.2 の物理分離強制）。本検証は state.Verify の MAC / TTL 検証を通過した
-       直後に Service 層で行う（state.go の `Verify` 戻り値 `StatePayload.Console` を Service が
-       明示的に照合する）
+       state_console_mismatch` で 401 + 即時 state cookie 削除（`state.ExpireCookieAttributes()`）。
+       tenant login で発行した state を admin callback に提示する cross-console state 混同を
+       拒否する（Req 2.9 / 6.2 の物理分離強制）。本検証は state.Verify の MAC / TTL 検証を
+       通過した直後に Service 層で行う（state.go の `Verify` 戻り値 `StatePayload.Console` を
+       Service が明示的に照合する）
+    1b. **`repo.ConsumeStateNonce(ctx, payload.Nonce, console, payload.IssuedAt.Add(cfg.StateCookieTTL))`
+       で state nonce 一度限り消費**（Req 2.9 / design.md「state_nonces テーブル」節と整合）。
+       PRIMARY KEY UNIQUE 制約違反（pgerrcode 23505）は Repository が `failure_kind:
+       state_replay` にマッピングして返すので、Service は当該 error をそのまま伝播して 401 +
+       state cookie 削除を返す（`state.ExpireCookieAttributes()`）。**本処理は後段の token 交換 /
+       session 作成より前**に実行することで、replay 攻撃が IdP token endpoint や DB session
+       INSERT に到達する前に弾く（attack surface 最小化）
     2. `oauth2.Config.Exchange(ctx, code)` で token 取得（5xx は `*errors.Error{Code:
        CodeUpstream, failure_kind: upstream_oidc_token}`）
     3. **token endpoint レスポンスから `id_token` を安全に取り出す**:
@@ -274,15 +339,22 @@
        tenant / admin で issuer を分けられる本設計では **`issuer` + `subject` の組**で
        admin_users を解決する必要がある。`subject` 単独で解決すると別 issuer のユーザーへ誤解決
        するリスクがある / 後述 task 4.1 の Repository signature 変更と整合）
-    5. `rawSessionToken, _ := session.New()`、`tokenHash := session.HashToken(rawSessionToken)`
+    5. **`rawSessionToken, err := session.New()` の err を必ずチェック**: err != nil なら
+       `*errors.Error{Code: CodeInternal, failure_kind: csprng_failure, Cause: err}` を返して
+       500 に倒す（Req 3.5 / NFR 3.1 の fail-closed / `_, _ := session.New()` で error 破棄を
+       すると CSPRNG 失敗時にも hash / cookie 発行に進んでしまい、推測可能な弱乱数で session を
+       発行する事故になる）。err == nil の場合は `tokenHash := session.HashToken(rawSessionToken)`
     6. `now := clock.Now()` を 1 度取得し、`repo.Create(ctx, Session{TokenHash: tokenHash,
        AdminUserID: identity.AdminUserID, Console: console, IssuedAt: now, LastSeenAt: now,
        ExpiresAt: now.Add(cfg.SessionAbsoluteTimeout), RevokedAt: nil})` で 1 行 INSERT
        （Req 4.1 / 4.2 / 4.8 / NFR 2.1 を満たす）
-    7. `sessionCookie := session.CookieAttributes()` の Value に `rawSessionToken` を設定
-       （`MaxAge` は `cfg.SessionAbsoluteTimeout` 由来）
+    7. `sessionCookie := session.CookieAttributes(cfg.SessionAbsoluteTimeout)` の Value に
+       `rawSessionToken` を設定（`MaxAge` は引数 `cfg.SessionAbsoluteTimeout` から
+       `int(ttl/time.Second)` で導出 / session.CookieAttributes の signature 変更と整合）
     8. `(rawSessionToken, sessionCookie, returnTo, nil)` を返す（state cookie の **削除**
-       は Handler が `session.ExpireCookieAttributes()` 相当を発行することで実施）
+       は Handler が **`state.ExpireCookieAttributes()`** を発行することで実施 /
+       `session.ExpireCookieAttributes()` を流用すると `__Host-ae_mdm_state` が削除されず
+       Req 2.8 違反になるため誤用しない）
   - `LookupAndRefresh(ctx, rawSessionToken string, expectedConsole oidc.Console, now time.Time)
     (Identity, Session, error)` — `session.HashToken` → `repo.Get` → **失効判定の順序**
     `1) Session.Console != expectedConsole → console_mismatch（Req 6.2 / 6.3 の Auth Middleware
@@ -315,6 +387,13 @@
     - (c2) **`StatePayload.Console` と handler の console 不一致で `state_console_mismatch`**
       （tenant login で発行した state を admin callback に提示する経路 / Req 2.9 / 6.2 の
       cross-console state 混同 reject）
+    - (c3) **fake Repository が `ConsumeStateNonce` で `state_replay` を返したら Service が
+      401 + state cookie 削除（`state.ExpireCookieAttributes()`）で伝播**し、後段の
+      `oauth2.Exchange` / `verifier.VerifyIDToken` / `repo.Create` のいずれにも到達しないこと
+      （fake mock の call count assert / Req 2.9 の物理的拒否 + attack surface 最小化）
+    - (c4) **fake `session.New` が err を返すよう DI 注入できる構造で、err 発生時 Service が
+      `csprng_failure` で 500 を返す**こと（fake interface 経由で session.New を差し込む /
+      Req 3.5 / NFR 3.1 の fail-closed）
     - (d) **`Claims.MatchedConsole` と handler の expected console 不一致で `invalid_aud`**
       （Req 6.2 のテスト）
     - (e) `ResolveAdminUser` が `admin_user_not_provisioned` を返したら Service が 403 で
@@ -325,7 +404,7 @@
     - (g) `Logout` で Revoke 1 回呼ばれる、2 回目 Logout は no-op
     - (h) 各失敗パスで `log.Warn` に `failure_kind` field が **明示的に**渡されている
       （fake logger で field を assert）
-  - _Requirements: 2.1, 2.5, 2.6, 2.7, 2.8, 2.9, 3.1, 3.9, 4.1, 4.2, 4.3, 4.4, 4.5, 4.6, 4.8, 5.1, 5.3, 5.4, 6.2, 6.3, NFR 3.1, NFR 4.1_
+  - _Requirements: 2.1, 2.5, 2.6, 2.7, 2.8, 2.9, 3.1, 3.5, 3.9, 4.1, 4.2, 4.3, 4.4, 4.5, 4.6, 4.8, 5.1, 5.3, 5.4, 6.2, 6.3, NFR 3.1, NFR 4.1_
   - _Boundary: AuthService_
   - _Depends: 2.1, 3.1, 3.2, 4.1_
 - [ ] 5.2 Handler 実装 + httptest 単体テスト
@@ -338,11 +417,14 @@
   - callback ハンドラ: `code` / `state` クエリ取得 → cookie から state cookie 取得 →
     `rawSessionToken, sessionCookie, returnTo, err := service.HandleCallback(ctx, console,
     code, queryState, rawStateCookie)` → 成功時は **`Set-Cookie: session_cookie`**（生値が
-    Value）+ **`Set-Cookie: state cookie 削除`**（`Max-Age=0; Path=/` の `__Host-ae_mdm_state`）+
+    Value）+ **`Set-Cookie: state.ExpireCookieAttributes()`**（`__Host-ae_mdm_state` を Max-Age=0
+    で削除 / **`session.ExpireCookieAttributes()` を使わない** — 削除対象が
+    `__Host-ae_mdm_session` になり state cookie が残置されて Req 2.8 違反になるため）+
     `302 Found` `Location: returnTo`（**Service が戻す `returnTo` は `StatePayload.ReturnTo`
     由来 / MAC 保護されているので tamper されない / それでも Handler は念のため Location
     値に対する `chi.URLParam` 等での host 解析を行わず生値 string をそのまま `Location` に
-    乗せる**）
+    乗せる**）。エラー時も同様に `state.ExpireCookieAttributes()` を発行して state cookie を
+    即時無効化する（Req 2.8 / state replay 攻撃 surface 縮小）
   - logout ハンドラ: cookie から session token 取得 → `service.Logout(ctx, rawSessionToken)` →
     `Set-Cookie: session_expire`（`session.ExpireCookieAttributes()`）+ `204 No Content`
   - `backend/internal/auth/handler_test.go` を新規追加。`httptest.NewRecorder` + chi router
@@ -461,6 +543,10 @@
       新規 INSERT されないことを assert。本ケースは requirements.md の特定 AC ではなく、
       design.md「Auth Repository」節の `ResolveAdminUser` 仕様および「確認事項 8 admin_users /
       admin_role_assignments の事前 provisioning」由来）
+    - (f) **同一 (state cookie, query state) 組での callback 二度提示で 2 回目は 401 +
+      `failure_kind=state_replay` + state cookie 削除**（Req 2.9 の物理的 replay 拒否 /
+      state_nonces テーブルの PRIMARY KEY UNIQUE 制約に依拠 / 1 回目で 302 + session 作成、
+      2 回目で 401 + sessions テーブルに追加行が無いことを assert）
   - `backend/test/integration/auth_session_lookup_test.go` を新規追加。Create Session 後に
     test 用 stub handler を `/api/devices` 相当に mount し:
     - (a) cookie 提示で 200 + AuthClaims が ctx に到達
@@ -474,7 +560,7 @@
     401（Req 5.4）
   - DATABASE_URL 未設定 / 必要 binary 不在時は各 test が自身で `t.Skip` する設計（A2 既存
     パターンに揃える）
-  - _Requirements: 1.1, 1.3, 1.4, 2.1, 2.5, 2.8, 3.1, 3.6, 3.7, 4.3, 4.4, 4.5, 4.6, 4.7, 5.1, 5.3, 5.4, 6.2, 6.3, NFR 1.2, NFR 4.1_
+  - _Requirements: 1.1, 1.3, 1.4, 2.1, 2.5, 2.8, 2.9, 3.1, 3.6, 3.7, 4.3, 4.4, 4.5, 4.6, 4.7, 5.1, 5.3, 5.4, 6.2, 6.3, NFR 1.2, NFR 4.1_
   - _Boundary: AuthService, AuthHandler, AuthMiddleware, AuthRepository, OIDCVerifier, HTTPServer_
   - _Depends: 6.3_
 

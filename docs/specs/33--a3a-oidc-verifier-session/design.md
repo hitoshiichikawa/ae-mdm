@@ -227,8 +227,12 @@ backend/
 │       └── doc.go                      # package godoc
 ├── db/
 │   └── migrations/                     # 本 Issue 新規追加
-│       ├── 0013_extend_sessions.up.sql   # sessions の idle_at → last_seen_at 改名 + revoked_at / console 列追加
-│       └── 0013_extend_sessions.down.sql # 上記の rollback
+│       ├── 0013_extend_sessions.up.sql                # sessions の idle_at → last_seen_at 改名 + revoked_at / console 列追加
+│       ├── 0013_extend_sessions.down.sql              # 上記の rollback
+│       ├── 0014_admin_users_add_oidc_issuer.up.sql    # admin_users の oidc_issuer 列追加 + UNIQUE 制約を (oidc_issuer, oidc_subject) 複合キーに差し替え
+│       ├── 0014_admin_users_add_oidc_issuer.down.sql  # 上記の rollback
+│       ├── 0015_create_state_nonces.up.sql            # state_nonces テーブル新規追加（Req 2.9 / 一度限り消費）
+│       └── 0015_create_state_nonces.down.sql          # 上記の rollback
 ├── internal/
 │   ├── config/                         # 本 Issue 修正
 │   │   ├── config.go                   # SessionIdleTimeout / SessionAbsoluteTimeout / StateCookieTTL / StateMACSecret / OIDCTenantClientSecret / OIDCAdminClientSecret フィールド追加
@@ -255,6 +259,13 @@ docs/specs/33--a3a-oidc-verifier-session/impl-notes.md  # 本 Issue 新規追加
 
 ### Modified Files
 
+- `backend/test/integration/helpers_test.go` — A2 既存の `admin_users` INSERT 部分（既存実装は
+  `oidc_subject` のみ指定して INSERT する形）を、本 Issue migration `0014_admin_users_add_oidc_issuer.up.sql`
+  で追加される **`oidc_issuer` NOT NULL** 列に合わせて更新する（INSERT 文に `oidc_issuer`
+  カラムを明示的に追加する）。本更新を怠ると migration 完了後に既存 integration test が
+  「null value in column "oidc_issuer" violates not-null constraint」で全壊する（task 1.2 で
+  併せて実施 / 実際の置換対象ファイルは `grep -rn "admin_users" backend/test/integration/` で
+  全件列挙して順次更新する）
 - `backend/internal/platform/httpserver/middleware.go` — `authClaims` 型を `AuthClaims` に
   rename（フィールド構成は不変: `TenantID` / `AdminUserID` / `Roles` / `IsSuperAdmin`）、
   `withAuthClaims` / `authClaimsFromContext` を `WithAuthClaims` / `AuthClaimsFromContext` へ
@@ -313,7 +324,7 @@ docs/specs/33--a3a-oidc-verifier-session/impl-notes.md  # 本 Issue 新規追加
 | 2.6 | state cookie 不在 / 期限切れ / MAC 失敗で失敗 | Auth Service | `Verify` 戻り値 → `errors.CodeUnauthenticated` | error: state_invalid |
 | 2.7 | クエリ state と cookie state 不一致で失敗 | Auth Service | `Verify` 内 `subtle.ConstantTimeCompare` | error: state_mismatch |
 | 2.8 | state cookie を callback で即時無効化 | Auth Service, Handler | `Set-Cookie: max-age=0` で削除 | callback flow |
-| 2.9 | 別ブラウザ / 別 redirect への state 流用拒否 | Auth Service, State Cookie | (a) MAC 付き cookie の物理保護（HttpOnly/Secure/SameSite=Lax + `__Host-` prefix で sub-domain 跨ぎ禁止 / 別ブラウザへの自動転送阻害）+ TTL 10 分、(b) cookie 値と query state の constant-time 一致、(c) **`StatePayload.Console == handler の expected console` を Service 層で明示照合**（tenant login で発行した state を admin callback に提示する cross-console state 混同を `state_console_mismatch` で拒否 / 「別 redirect」ケースのうち別 console への流用を物理的に拒否）。**stateless 設計のため「同一ブラウザ内で cookie 値と query state の組ごとコピー + 同 console へ再提示された場合」の検出はできない**点はリスク・トレードオフ表「state replay 防止の stateless 限界」節および「確認事項 7」を参照 | error: state_replay / state_console_mismatch |
+| 2.9 | 別ブラウザ / 別 redirect への state 流用拒否 | Auth Service, State Cookie, Auth Repository | (a) MAC 付き cookie の物理保護（HttpOnly/Secure/SameSite=Lax + `__Host-` prefix で sub-domain 跨ぎ禁止 / 別ブラウザへの自動転送阻害）+ TTL 10 分、(b) cookie 値と query state の constant-time 一致、(c) **`StatePayload.Console == handler の expected console` を Service 層で明示照合**（tenant login で発行した state を admin callback に提示する cross-console state 混同を `state_console_mismatch` で拒否）、(d) **server-side `state_nonces` テーブルでの一度限り消費**（`Repository.ConsumeStateNonce(ctx, nonce, console, expiresAt)` が PostgreSQL の PRIMARY KEY UNIQUE 制約違反を `failure_kind: state_replay` にマッピングする / 同一 nonce の 2 回目以降の callback 到達を物理的に拒否 / 「同一ブラウザ内で cookie 値 + query state を組ごとコピー / 再提示」ケースも検出可能 / 詳細は後述「state nonce 消費フロー」節および「Data Models」節の `state_nonces` テーブル定義参照） | error: state_replay / state_console_mismatch |
 | 3.1 | OIDC 成功でセッション識別子を発行・cookie 返却 | Session Manager, Auth Handler | `auth/session.go` の `New` + `Set-Cookie` | callback flow |
 | 3.2 | session cookie HttpOnly | Session Cookie | `session.go` の `CookieAttributes` | NFR 1.1 と連動 |
 | 3.3 | session cookie Secure | Session Cookie | 同上 | NFR 1.1 と連動 |
@@ -321,7 +332,7 @@ docs/specs/33--a3a-oidc-verifier-session/impl-notes.md  # 本 Issue 新規追加
 | 3.5 | session 値は暗号学的乱数 | Session Manager | `crypto/rand.Read` で 32 バイト → base64url | callback flow |
 | 3.6 | session 生値をログ / ストアに残さない | Session Manager, Logger | redaction + repository は hash のみ INSERT | NFR 1.2 と連動 |
 | 3.7 | 永続ストアには SHA-256 ハッシュを格納 | Session Repository | `session.go` の `HashToken` + `sessions.token_hash` カラム | NFR 1.2 と連動 |
-| 3.8 | ログには hash または短縮識別子のみ出力 | Session Manager, Logger | logger field ヘルパ `SessionHashPrefix` | observability |
+| 3.8 | ログには hash または短縮識別子のみ出力 | Session Manager, Logger | logger field ヘルパ `session.HashPrefix(hash)`（先頭 8 文字を返す helper / interface 定義および tasks.md と同一名称） | observability |
 | 3.9 | aud で識別したコンソール種別を session に紐付 | Session Manager, Session Repository | `sessions.console` 列追加 | data model: sessions |
 | 4.1 | セッション発行時に最終操作時刻を記録 | Session Manager | `sessions.last_seen_at` カラム | data: sessions |
 | 4.2 | セッション発行時に absolute 有効期限を記録 | Session Manager | `sessions.expires_at` を `issued_at + cfg.SessionAbsoluteTimeout` | data: sessions |
@@ -336,7 +347,7 @@ docs/specs/33--a3a-oidc-verifier-session/impl-notes.md  # 本 Issue 新規追加
 | 5.3 | logout 後の同 cookie 提示は拒否 | Auth Middleware | `revoked_at IS NOT NULL` を失効判定 | request flow |
 | 5.4 | 改竄（hash 不一致）cookie は拒否 | Auth Middleware, Session Repository | `Get(token_hash)` が 0 行で 401 | request flow |
 | 6.1 | tenant / admin の 2 client を独立保持 | OIDC Verifier, Config | `oidc.Verifier` を 2 インスタンス（tenant 用 / admin 用） | configuration |
-| 6.2 | callback の URL パス / 設定値からクライアント確定 | Auth Service, Auth Handler | `/api/auth/callback` と `/api/admin/auth/callback` を別ハンドラに登録、`console` query で識別する経路と併用 | callback flow |
+| 6.2 | callback の URL パス / 設定値からクライアント確定 | Auth Service, Auth Handler | `/api/auth/callback` と `/api/admin/auth/callback` を **path-based に別ハンドラ登録**し、各ハンドラの closure で console を **固定**する（user-controlled な `console` query は読み取らない / 攻撃面を残さないため path のみを信頼 / `Handler.Mount(r, prefix, console)` 経由で各 console 種別を closure 内に注入する設計と整合） | callback flow |
 | 6.3 | session に console 種別を紐付 | Session Repository | `sessions.console` カラム | data model |
 | 6.4 | tenant / admin の信頼 aud を異なる値で設定可 | Config | `OIDCTenantClientID` / `OIDCAdminClientID` 既に独立 | configuration |
 | NFR 1.1 | ID token / cookie / MAC 鍵 / client secret を平文ログに残さない | Logger, OIDC Verifier, Auth Service | redaction allowlist に追加（`state_mac_secret` / `client_secret` を allowlist 化） | NFR 4.2 と連動 |
@@ -506,6 +517,14 @@ func Verify(cookieValue, queryState string, secret []byte, ttl time.Duration, no
 // CookieAttributes は state cookie の Set-Cookie 属性を返す（HttpOnly / Secure /
 // SameSite=Lax / Path=/ / Max-Age=ttl 秒）。
 func CookieAttributes(ttl time.Duration) http.Cookie
+
+// ExpireCookieAttributes は state cookie の **削除用** Set-Cookie 属性を返す
+// （Name=`__Host-ae_mdm_state` / Value="" / Max-Age=0 / Path=/ / HttpOnly / Secure /
+// SameSite=Lax）。callback 成功時 / state 検証失敗時 / state replay 検出時に Handler が
+// `Set-Cookie` ヘッダで返却して state cookie を即時無効化する（Req 2.8 の再利用防止 /
+// session.ExpireCookieAttributes() は session cookie 用で名前が異なるため、state cookie 削除には
+// 必ず本 helper を使用する）。
+func ExpireCookieAttributes() http.Cookie
 ```
 
 **Boundary**: StateCookie（state.go）
@@ -536,8 +555,18 @@ func New() (rawToken string, err error)
 // HashToken は raw token の SHA-256 hex を返す（永続ストア / 比較用）。
 func HashToken(rawToken string) string
 
-// CookieAttributes は session cookie の Set-Cookie 属性を返す。
-func CookieAttributes() http.Cookie
+// CookieAttributes は session cookie の Set-Cookie 属性を返す（HttpOnly / Secure /
+// SameSite=Lax / Path=/ / Name=`__Host-ae_mdm_session` / Max-Age=ttl 秒）。Value は呼び出し側で
+// 設定する。引数 `ttl` には `cfg.SessionAbsoluteTimeout` を渡し、cookie の MaxAge を
+// 永続ストア側 absolute timeout と一致させる（実際の失効判定は DB 側で行うが、ブラウザ側 cookie の
+// 物理的寿命も合わせる）。
+func CookieAttributes(ttl time.Duration) http.Cookie
+
+// ExpireCookieAttributes は session cookie の **削除用** Set-Cookie 属性を返す
+// （Name=`__Host-ae_mdm_session` / Value="" / Max-Age=0 / Path=/ / HttpOnly / Secure /
+// SameSite=Lax）。Logout / 失効検出時に Handler / Middleware が発行する。state cookie 用の
+// `state.ExpireCookieAttributes()` とは Name が異なるため、両者を取り違えない。
+func ExpireCookieAttributes() http.Cookie
 
 // HashPrefix は logger field に載せる短縮識別子（hash 先頭 8 文字）を返す（Req 3.8）。
 func HashPrefix(hash string) string
@@ -549,23 +578,31 @@ func HashPrefix(hash string) string
 
 | Field | Detail |
 |---|---|
-| Intent | `sessions` テーブルと `admin_users` テーブルへのアクセスを集約。token_hash 経由の lookup は SuperAdmin context で実行する（RLS subselect 経由でテナント文脈では 0 行に倒れる経路を回避） |
-| Requirements | 3.7, 3.9, 4.3, 4.6, 5.1, 5.3, 5.4, 6.3 |
+| Intent | `sessions` テーブルと `admin_users` テーブルへのアクセスを集約。token_hash 経由の lookup は SuperAdmin context で実行する（RLS subselect 経由でテナント文脈では 0 行に倒れる経路を回避）。**併せて `state_nonces` テーブルへの一度限り消費書き込み（Req 2.9）を担当する** |
+| Requirements | 2.9, 3.7, 3.9, 4.3, 4.6, 5.1, 5.3, 5.4, 6.3 |
 
 **Responsibilities & Constraints**
 - 主責務: `Create(ctx, session) error` / `Get(ctx, tokenHash) (Session, Identity, error)` /
   `Touch(ctx, tokenHash, now) error` / `Revoke(ctx, tokenHash, now) error` /
+  **`ConsumeStateNonce(ctx, nonce, console, expiresAt) error`**（state nonce の一度限り消費 /
+  PRIMARY KEY UNIQUE 制約違反を `*errors.Error{Code: CodeUnauthenticated, failure_kind:
+  state_replay}` にマッピング / Req 2.9 の replay 拒否を物理的に強制）/
   **`ResolveAdminUser(ctx, issuer, sub, email, console) (Identity, error)`**（事前 provisioning
   必須。**`(issuer, sub)` の組で一意解決**する — OIDC `sub` は issuer スコープでのみ一意のため、
   tenant / admin issuer を分けられる本設計では `sub` 単独で解決すると別 issuer のユーザーへ
   誤解決する。名前は read-modify-write の意図を反映して `Resolve` とした。本 Issue では新規
   admin_users の自動 INSERT は **行わない**）
 - ドメイン境界: `auth` package 内のみ呼び出し可。外部 domain からは Service 経由
-- データ所有権: `sessions`, `admin_users`, `admin_role_assignments`（後 2 者は本 Issue で
-  **read-only**。書込みは admin-seed CLI / 後続 Issue）
+- データ所有権: `sessions`, `state_nonces`（本 Issue 新規 / write-only INSERT）, `admin_users`,
+  `admin_role_assignments`（後 2 者は本 Issue で **read-only**。書込みは admin-seed CLI / 後続 Issue）
 - Invariants:
-  - **すべての CRUD は `BeginTxFunc` 経由**で `SuperAdmin context`（`TenantContext{IsSuperAdmin:
-    true}`）下で実行する。A2 design.md「sessions の認証 lookup 経路」散文と整合
+  - **すべての CRUD（`Create` / `Get` / `Touch` / `Revoke` / `ConsumeStateNonce` /
+    `ResolveAdminUser` を含む）は `BeginTxFunc` 経由**で `SuperAdmin context`
+    （`TenantContext{IsSuperAdmin: true}`）下で実行する。callback ハンドラは A2 の
+    `TenantContextMiddleware` の **外側**で動作するため、Repository は自身で SuperAdmin
+    context を確立する責務を持つ（A2 design.md「sessions の認証 lookup 経路」散文と整合 /
+    `Create` も SuperAdmin context が必須で、TenantContext 未確立のまま BeginTxFunc を
+    呼ぶと panic する）
   - `Touch` は `last_seen_at = now` のみ更新し、`expires_at` を変更しない（Req 4.8）
   - `Revoke` は `revoked_at = now` をセットし、既に revoked の行への 2 度目の Revoke は no-op
     （冪等性）
@@ -582,6 +619,12 @@ func HashPrefix(hash string) string
 
 ```go
 type Repository interface {
+    // ConsumeStateNonce は state_nonces テーブルに 1 行 INSERT する。同一 nonce が既に消費済み
+    // の場合、PostgreSQL の PRIMARY KEY UNIQUE 制約違反が発生し、本メソッドは
+    // *errors.Error{Code: CodeUnauthenticated, failure_kind: state_replay} を返す（Req 2.9）。
+    // expiresAt は元 state cookie の絶対期限（payload.IssuedAt + cfg.StateCookieTTL）で、
+    // 後続 sweeper task（本 Issue 範囲外）がこの値を基準に GC する。
+    ConsumeStateNonce(ctx context.Context, nonce string, console oidc.Console, expiresAt time.Time) error
     // ResolveAdminUser は (issuer, sub) 複合キーで admin_users を解決する。
     // sub 単独では別 issuer のユーザーへ誤解決するリスクがあるため、issuer も必須引数とする。
     ResolveAdminUser(ctx context.Context, issuer, sub, email string, console oidc.Console) (Identity, error)
@@ -601,7 +644,7 @@ func NewRepository(pool *pgxpool.Pool) Repository
 | Field | Detail |
 |---|---|
 | Intent | 4 つのユースケース（BeginLogin / HandleCallback / LookupAndRefresh / Logout）を集約。HTTP / cookie I/O は Handler、tx / DB I/O は Repository に委譲 |
-| Requirements | 2.1, 2.5, 2.6, 2.7, 2.8, 2.9, 3.1, 3.9, 4.3, 4.4, 4.5, 4.6, 5.1, 5.3, 5.4, 6.2, NFR 3.1, NFR 3.2, NFR 4.1 |
+| Requirements | 2.1, 2.5, 2.6, 2.7, 2.8, 2.9, 3.1, 3.5, 3.9, 4.3, 4.4, 4.5, 4.6, 5.1, 5.3, 5.4, 6.2, NFR 3.1, NFR 3.2, NFR 4.1 |
 
 **Responsibilities & Constraints**
 - 主責務:
@@ -609,13 +652,21 @@ func NewRepository(pool *pgxpool.Pool) Repository
     認可エンドポイント URL 組み立て
   - `HandleCallback(ctx, console, code, queryState, rawStateCookie) (sessionToken, sessionCookie, returnTo, error)` —
     state 検証（成功時に `StatePayload.ReturnTo` を取り出す）→ **`StatePayload.Console == console`
-    照合**（不一致は `state_console_mismatch` で 401 / Req 2.9 / 6.2）→ code → token 交換 →
+    照合**（不一致は `state_console_mismatch` で 401 / Req 2.9 / 6.2）→
+    **`repo.ConsumeStateNonce(ctx, payload.Nonce, console, payload.IssuedAt.Add(cfg.StateCookieTTL))`**
+    （PRIMARY KEY UNIQUE 制約違反なら `failure_kind: state_replay` で 401 / Req 2.9 の
+    replay 拒否 / 後段の token 交換 / session 作成より **前**に実行することで、replay 攻撃が
+    IdP token endpoint を叩く前に弾く）→ code → token 交換 →
     **token endpoint レスポンスから `id_token` を安全に取り出す**（`token.Extra("id_token").(string)`
     の直接 type assertion は panic するため、`rawIDToken, ok := ...(string)` で取り出し、
     `!ok || rawIDToken == ""` なら `*errors.Error{Code: CodeUpstream, failure_kind:
     upstream_oidc_token}` で 502 / NFR 3.1 の fail-closed）→ ID トークン検証 →
     `ResolveAdminUser(ctx, claims.Issuer, claims.Subject, claims.Email, console)`（未 provisioning
-    は 403）→ session create（`IssuedAt = now` / `LastSeenAt = now` / `ExpiresAt = now +
+    は 403）→ **`rawSessionToken, err := session.New()` の err を必ずチェック**し、err != nil なら
+    `*errors.Error{Code: CodeInternal, failure_kind: csprng_failure, Cause: err}` で 500 を返す
+    （Req 3.5 / NFR 3.1 の fail-closed / `_, _ := session.New()` で error を捨てると CSPRNG
+    失敗時にも hash / cookie 発行に進んでしまう / 直接 type assertion / 暗黙の error 破棄は禁止）
+    → session create（`IssuedAt = now` / `LastSeenAt = now` / `ExpiresAt = now +
     cfg.SessionAbsoluteTimeout`）。`returnTo` は Handler が `Location` ヘッダで使用
   - `LookupAndRefresh(ctx, rawSessionToken, expectedConsole, now) (Identity, Session, error)` —
     cookie 提示時の検証 + `Session.Console` と `expectedConsole` の一致確認 + absolute /
@@ -755,6 +806,10 @@ func NewMiddleware(svc Service, expectedConsole oidc.Console, log logger.Logger,
 - **Session Aggregate**: `sessions`（A2 で作成済み、本 Issue で列追加 / rename）— `token_hash`
   を root とし、`last_seen_at` / `expires_at` / `revoked_at` / `console` の状態を持つ。状態
   遷移は Auth Service と Auth Middleware のみが行う
+- **State Nonce Aggregate**: `state_nonces`（本 Issue 新規）— `nonce` を root とし、`console` /
+  `consumed_at` / `expires_at` を持つ。state 一度限り消費の atomicity を PRIMARY KEY UNIQUE
+  制約で強制（Req 2.9）。Repository は INSERT のみを行い、UPDATE / SELECT を伴わない
+  （consumed_at は INSERT 時の `DEFAULT now()` で確定。期限切れ行は後続 sweeper task が GC）
 
 ### Logical Data Model
 
@@ -786,6 +841,30 @@ down は対称の DROP / ADD で `idle_at` を復元。
 **RLS**: A2 の `tenant_isolation_sessions` ポリシー（`admin_users.tenant_id` 経由の subselect）
 を本 Issue で変更しない。認証 lookup は `SuperAdmin` context で実行する前提（A2 design.md
 「sessions の認証 lookup 経路」散文）。
+
+### state_nonces テーブル（本 Issue 新規追加）
+
+state nonce の一度限り消費を強制する補助テーブル（Req 2.9）。callback 時に Repository が
+1 行 INSERT し、PRIMARY KEY UNIQUE 制約違反を `state_replay` 失敗にマッピングする:
+
+| Column | Type | Purpose | Notes |
+|---|---|---|---|
+| `nonce` | text PRIMARY KEY | state cookie payload 内 Nonce 値（16 byte base64url） | INSERT 時の UNIQUE 違反が replay 検出 |
+| `console` | text NOT NULL CHECK(console IN ('tenant-console','admin-console')) | 発行時 console 種別 | observability / audit 用途。検証では参照しない |
+| `consumed_at` | timestamptz NOT NULL DEFAULT now() | 消費時刻 | INSERT 時に確定。UPDATE しない |
+| `expires_at` | timestamptz NOT NULL | 元 state cookie の絶対期限（`payload.IssuedAt + cfg.StateCookieTTL`） | 後続 sweeper task がこの値経過の行を DELETE して GC |
+
+**Migration**: `0015_create_state_nonces.up.sql` で `CREATE TABLE` + `CREATE INDEX
+idx_state_nonces_expires_at ON state_nonces(expires_at)`。down は対称の `DROP INDEX` +
+`DROP TABLE`。
+
+**RLS**: `state_nonces` は tenant_id を持たない（callback は TenantContext 未確立で動作するため）。
+RLS ポリシーは設定せず、Repository は SuperAdmin context（`app.is_superadmin=true`）で
+INSERT する。本テーブルは「短寿命の nonce 消費記録」専用で、tenant 跨ぎの参照は発生しない。
+
+**GC**: 本 Issue 範囲外。後続 sweeper task が `WHERE expires_at < now()` で定期 DELETE する想定
+（cookie TTL = 10 分のため、`expires_at` 経過行はもはや検証に使われない）。本 Issue では
+INSERT が累積するため、テスト環境では `t.Cleanup()` で削除する設計（integration test）。
 
 ### State Diagram（Session ライフサイクル）
 
@@ -838,12 +917,16 @@ sequenceDiagram
     H->>S: HandleCallback(ctx, ConsoleTenant, code, queryState, cookie)
     S->>S: state.Verify(cookie, queryState, secret, ttl, now)
     Note over S: MAC / TTL / state == cookieState を constant-time 比較
+    S->>S: payload.Console == ConsoleTenant 照合 (不一致 → state_console_mismatch)
+    S->>R: ConsumeStateNonce(ctx, payload.Nonce, ConsoleTenant, payload.IssuedAt + ttl)
+    Note over R: PRIMARY KEY UNIQUE 違反 → state_replay (Req 2.9 一度限り消費)
     S->>S: oauth2.Exchange(ctx, code) → token
     S->>V: VerifyIDToken(ctx, token.IDToken)
     V-->>S: Claims{Subject, MatchedConsole, ...}
     S->>R: ResolveAdminUser(ctx, issuer, sub, email, ConsoleTenant)
     R-->>S: Identity (未 provisioning なら 403 admin_user_not_provisioned)
-    S->>S: session.New() + session.HashToken()
+    S->>S: rawToken, err := session.New() (err != nil → csprng_failure 500)
+    S->>S: session.HashToken(rawToken)
     S->>R: Create(ctx, Session{tokenHash, adminUserID, issuedAt=now, lastSeenAt=now, expiresAt=now+cfg.SessionAbsoluteTimeout, console, revokedAt=nil})
     S-->>H: (rawSessionToken, sessionCookie, returnTo=StatePayload.ReturnTo)
     H-->>B: 302 Found, Location: returnTo,<br/>Set-Cookie: __Host-ae_mdm_session=raw,<br/>Set-Cookie: __Host-ae_mdm_state=; Max-Age=0
@@ -996,7 +1079,7 @@ A2 既存の allowlist（`session_secret` / `id_token` / `access_token` / `refre
 | `state_invalid` | State Cookie MAC 失敗 / cookie 不在（Req 2.6） | 401 |
 | `state_expired` | State Cookie TTL 超過（Req 2.6） | 401 |
 | `state_mismatch` | query state と cookie state 不一致（Req 2.7） | 401 |
-| `state_replay` | cookie 値の payload 内 Nonce と query `state` の不一致（Req 2.9。**ただし「同一ブラウザで cookie + query state を組ごと提示」かつ同 console への提示ケースは検出不能 / stateless 設計の限界**） | 401 |
+| `state_replay` | `state_nonces` テーブルへの INSERT が PRIMARY KEY UNIQUE 制約違反（= nonce が既に消費済み）。同一 cookie + query state の組を再提示した場合および別ブラウザ / 別 redirect への流用を含む全 replay ケースを物理的に拒否（Req 2.9） | 401 |
 | `state_console_mismatch` | `StatePayload.Console` が callback の console（URL パス由来）と不一致（Req 2.9 / 6.2 の cross-console state 混同 reject） | 401 |
 | `session_expired` | absolute 超過（Req 4.5） | 401 |
 | `session_idle` | idle 超過（Req 4.4） | 401 |
@@ -1004,6 +1087,7 @@ A2 既存の allowlist（`session_secret` / `id_token` / `access_token` / `refre
 | `session_tamper` | hash 不一致で 0 行（Req 5.4） | 401 |
 | `console_mismatch` | `Session.Console` が middleware の expectedConsole と不一致（Req 6.2 / 6.3） | 401 |
 | `admin_user_not_provisioned` | OIDC 認証成功後 admin_users 行が事前 provisioning されていない | 403 |
+| `csprng_failure` | `crypto/rand.Read` 失敗（session.New() の error）— OS の CSPRNG が利用不能な場合のみ発生 / fail-closed で 500（Req 3.5 / NFR 3.1） | 500 |
 | `upstream_oidc_token` | OIDC token endpoint 5xx | 502 |
 | `oidc_discovery` | 起動時 discovery 失敗（NFR 3.2） | exit 1 |
 
@@ -1055,7 +1139,7 @@ A2 既存の allowlist（`session_secret` / `id_token` / `access_token` / `refre
 |---|---|---|---|
 | aud 検証 | 本実装側で「tenant / admin のいずれか 1 つに排他一致」を検証 | `coreos/go-oidc` の `Config.ClientID` に一方を設定して自動検証に委ねる | 後者では aud 配列の曖昧ケース（Req 1.5）を検出できず、2 client 検証のため `Verifier` を 2 インスタンス持つ必要が出る。本実装側で判定すれば 1 インスタンスで両 aud を扱える |
 | state MAC | HMAC-SHA256 + cookie に payload + MAC を載せる stateless 方式 | サーバ側に state テーブルを持つ stateful 方式 | stateless は DB write を削減でき、cookie expiry で自動 GC される。MAC 鍵管理コストはあるが MVP では許容。stateful は scale-out 時の整合性が課題 |
-| **state replay 防止の stateless 限界**（Req 2.9） | cookie 物理保護（`__Host-` prefix + HttpOnly + Secure + SameSite=Lax + TTL 10 分）+ MAC + nonce の constant-time 比較 | サーバ側 `state_nonces` テーブルで 1 度限り消費 + ブラウザセッション ID と payload の bind | MVP では stateless の運用シンプル性を優先。**「同一ブラウザ内で cookie 値 + query state を組ごとコピー / 再提示」のケースは検出不能**だが、攻撃者が cookie 値を取得するには HttpOnly / Secure を回避する必要があり、SameSite=Lax で cross-site での自動付与も阻害される。リスク評価では `TTL 10 分 + __Host- prefix` で実害確率を許容範囲と判断。本制約は確認事項 7 で人間レビュアーに事前確認したい |
+| **state replay 防止**（Req 2.9） | **server-side `state_nonces` テーブルで 1 度限り消費**（PRIMARY KEY UNIQUE 制約違反を `state_replay` にマッピング）+ cookie 物理保護（`__Host-` prefix + HttpOnly + Secure + SameSite=Lax + TTL 10 分）+ MAC + nonce の constant-time 比較 | (a) cookie 物理保護 + MAC のみで stateless 化 / (b) ブラウザセッション ID と payload の bind | (a) は「同一ブラウザ内で cookie 値 + query state を組ごとコピー / 再提示」を検出不能で AC 2.9 を満たさない。(b) は SPA 側追加実装が必要で MVP では負担が大きい。stateful nonce 消費は PostgreSQL の標準的な UNIQUE 制約で実装でき、DB write は callback あたり 1 行追加に留まる（cleanup は後続 sweeper task）。AC 2.9 を物理的に満たしつつ運用シンプル性も維持できる |
 | 鍵ローテーション | 即時切替（旧鍵並行検証なし） | 旧鍵を一定期間並行検証 | MVP では運用シンプル性を優先。進行中ログインは再ログインで救済できる（確認事項 2 で PM 確認） |
 | session 比較 | hash を PK にして DB lookup で実質 constant time | アプリ側で `subtle.ConstantTimeCompare` | DB PK lookup は B-tree index で O(log n) かつ ID 領域に対する 1:1 写像のため side-channel リスクが低い |
 | session lookup の RLS context | SuperAdmin context（`app.is_superadmin=true`）で lookup | sessions に `tenant_id` を denormalize | 後者は umbrella の Logical Data Model 変更を伴う。A2 の subselect ポリシーを前提に SuperAdmin context で lookup する方が変更面が小さい |
@@ -1090,13 +1174,13 @@ A2 既存の allowlist（`session_secret` / `id_token` / `access_token` / `refre
    wrapper を追加する想定（本 Issue では未実装）。Keycloak（dev IdP）/ 想定本番 IdP は両方式
    に対応するため MVP では `client_secret_basic` 固定で十分。public client（PKCE のみ）への
    切替が必要になった場合は別 Issue で対応する
-7. **state replay 防止の stateless 限界**: 本設計では state cookie + MAC + `__Host-` prefix +
-   nonce constant-time 比較 + TTL 10 分の組み合わせで Req 2.9 をカバーするが、サーバ側 nonce
-   消費（`state_nonces` テーブルで 1 度限り消費）/ ブラウザセッション ID へのバインドは
-   持たない。これにより「同一ブラウザ内で cookie 値 + query state を組ごとコピー / 再提示」
-   ケースは検出不能。MVP では cookie 物理保護（HttpOnly / Secure / SameSite=Lax / `__Host-`
-   prefix）と短 TTL（10 分）で実害確率を許容範囲と判断したが、stateful nonce 管理を導入する
-   かは PM / セキュリティレビュアーに確認したい
+7. **state replay 防止の方式（resolved in round 3 review）**: round 2 までは state cookie + MAC +
+   `__Host-` prefix + nonce constant-time 比較 + TTL 10 分の **stateless 設計**で Req 2.9 を
+   カバーする方針だったが、reviewer 指摘により「同一ブラウザ内で cookie 値 + query state を
+   組ごとコピー / 再提示」ケースで AC 2.9 を満たさないことが判明した。round 3 で **server-side
+   `state_nonces` テーブルでの一度限り消費**（PRIMARY KEY UNIQUE 制約違反を `state_replay` に
+   マッピング）を採用することで Req 2.9 を物理的に充足。cleanup は後続 sweeper task（本 Issue
+   範囲外）が `expires_at` 経過行を削除する。本決定で当該確認事項は **resolved**
 8. **admin_users / admin_role_assignments の事前 provisioning**: 本設計では Repository の
    `ResolveAdminUser` が **read-modify-write のみ**を行い、新規 OIDC subject の自動 INSERT
    は行わない方針を採用（`admin_user_not_provisioned` 403）。admin_users.id / tenant_id /
