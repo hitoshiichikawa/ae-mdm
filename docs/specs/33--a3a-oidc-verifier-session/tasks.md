@@ -186,7 +186,7 @@
   - _Requirements: 5.3, 5.4_
   - _Boundary: HTTPServer_
   - _Depends: なし（A2 完了済みのため独立）_
-- [ ] 1.4 logger redaction allowlist 拡張 + ユニットテスト (P)
+- [x] 1.4 logger redaction allowlist 拡張 + ユニットテスト (P)
   - `backend/internal/logger/redact.go` の機密キー allowlist に以下 4 件を追加:
     `state_mac_secret` / `client_secret` / `state_cookie` / `session_cookie`
     （A2 既存 allowlist の `session_secret` / `id_token` / `access_token` / `refresh_token` /
