@@ -311,7 +311,7 @@
   - _Requirements: 2.1, 2.2, 2.3, 2.4, 2.5, 2.6, 2.7, 2.8, 2.9, NFR 4.1_
   - _Boundary: AuthTypes, StateCookie, AuthClock_
   - _Depends: 1.1_
-- [ ] 3.2 auth.session helper + 単体テスト (P)
+- [x] 3.2 auth.session helper + 単体テスト (P)
   - `backend/internal/auth/session.go` を新規追加。`New() (rawToken string, err error)`
     （`crypto/rand.Read` で 32 byte → base64url no-padding / err は呼び出し側で **必ず**
     チェックする / Req 3.5 / NFR 3.1）、`HashToken(raw) string`（SHA-256 hex）、
