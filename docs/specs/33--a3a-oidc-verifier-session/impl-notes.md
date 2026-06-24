@@ -429,6 +429,32 @@ learning を `### Task <id>` 単位で追記する。`docs/specs/33--a3a-oidc-ve
     （task 1.4 で `state_cookie` / `session_cookie` の redaction allowlist 追加済みだが、
     一次防御として実装側で fixed field key + prefix のみを出力する責務が残る）。
 
+### Task 4
+
+- **採用方針**: タスク `4` は umbrella header（`_Requirements:_` / `_Boundary:_` を持たない親 task）
+  であり、本起動では直接の実装は無く、子 task 4.1（Repository 実装 + integration テスト）が
+  後続 fresh iteration で実装される前提として `### Task 4` learning スロットのみ整備する
+  （先行する `### Task 1` / `### Task 2` / `### Task 3` の umbrella 処理パターンを踏襲）。
+- **重要な判断**:
+  - 親 task は `tasks.md` 上で `### Task 4` の learning スロットを成立させるためのプレースホルダ
+    に留め、`backend/internal/auth/repository.go` の新規追加・`pgxpool.Pool` ベース CRUD
+    （`Create` / `Get` / `Touch` / `Revoke` / `ConsumeStateNonce` / `ResolveAdminUser`）の実装・
+    SuperAdmin context での `db.BeginTxFunc` 経路の確立・integration テスト追加は本 iteration
+    では行わない（実装本体は 4.1 の fresh iteration が担当する設計 / `### Task 1` / `### Task 2` /
+    `### Task 3` と同パターン）。
+  - per-task ループ規約「1 commit = 1 task ID」に従い、本 iteration の marker commit は
+    `docs(tasks): mark 4 as done` 単一の subject で `tasks.md` のみを含める。impl-notes.md への
+    `### Task 4` 追加は marker commit と分離した別 commit に積む。
+- **残存課題**: 子 task 4.1（`backend/internal/auth/repository.go` の新規追加、`Repository`
+  interface + `pgxpool.Pool` ベース実装、`ConsumeStateNonce` / `ResolveAdminUser` を含む
+  すべての CRUD を `db.BeginTxFunc` 経由で SuperAdmin context（`db.WithTenantContext(ctx,
+  db.TenantContext{IsSuperAdmin: true})` 前置）下で実行する経路、`Get` 0 行時の
+  `*errors.Error{Code: CodeUnauthenticated, failure_kind: session_tamper}` 返却、`Touch`/
+  `Revoke` の冪等 UPDATE、`ConsumeStateNonce` の unique_violation (`23505`) 分類、
+  `ResolveAdminUser` の `(oidc_issuer, oidc_subject)` 複合 UNIQUE lookup、integration test
+  整備）は後続 fresh iteration で消化する。子 task 全完了時の親 task `4` の昇格は本
+  iteration で完了済みのため、auto-promotion 規約は no-op として扱う。
+
 ## 確認事項
 
 本セクションは `requirements.md` / `design.md` / `tasks.md` 本文の書き換えを伴わずに、実装フェーズ
