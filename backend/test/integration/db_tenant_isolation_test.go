@@ -372,7 +372,7 @@ func TestDBSessions_TenantIsolation_SubselectPolicy(t *testing.T) {
 	t.Run("tenant A 文脈での tenant B session UPDATE / DELETE は 0 rows", func(t *testing.T) {
 		err := platformdb.BeginTxFunc(ctxA, pool, func(tx pgx.Tx) error {
 			ct, e := tx.Exec(ctx,
-				`UPDATE sessions SET idle_at = $1 WHERE token_hash = $2`,
+				`UPDATE sessions SET last_seen_at = $1 WHERE token_hash = $2`,
 				time.Now(), ids.sessionBTH)
 			if e != nil {
 				return e
