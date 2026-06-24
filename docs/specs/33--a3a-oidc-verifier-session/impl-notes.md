@@ -107,6 +107,48 @@ learning を `### Task <id>` 単位で追記する。`docs/specs/33--a3a-oidc-ve
     DROP CONSTRAINT admin_users_oidc_subject_key` が実 DB で成功するかは task 6 の reversibility
     テストで検証される / 本 task ではローカル build のみで担保）。
 
+### Task 1.3
+
+- **採用方針**: `backend/internal/platform/httpserver/middleware.go` で A2 から private だった
+  3 シンボル（`authClaims` 型 / `withAuthClaims` 関数 / `authClaimsFromContext` 関数）を
+  public 化（`AuthClaims` / `WithAuthClaims` / `AuthClaimsFromContext`）し、フィールド構成
+  および default deny / 401 / 403 chain の挙動を一切変えずに rename を完了。`authClaimsCtxKey`
+  は外部から直接 ctx.WithValue で型衝突 / 上書きされる経路を生まないよう private 維持
+  （tasks.md L181 と整合）。
+- **重要な判断**:
+  - **doc comment の歴史的記述の整理**: `AuthClaims` の godoc は「A2 では同型が private
+    （`authClaims`）であり、test 用にのみ内部 helper が露出していた」という背景を 1 文だけ
+    残し、後続 auth domain（`backend/internal/auth`）からの注入経路が確立した旨を明示する。
+    `TenantContextMiddleware` の godoc 内にあった「auth スタブが `*authClaims` を注入する
+    前提」の暫定文言は、A2 直後の暫定状態を指す散文だったので削除し、Issue #33 auth
+    middleware を正式な上流として記述に置換した。
+  - **同 package 外の test も rename に追随**: tasks.md L181〜L182 は「同 package 内の test
+    呼び出し箇所」のみを rename 対象と明示するが、`backend/test/integration/
+    http_subrouter_mount_test.go` の prose 1 箇所が「internal package private な authClaims
+    を package 外から注入できない」と stale 状態になっていたため、test 挙動（TenantContext
+    bypass 経路）はそのままに、bypass の **理由** を「RequireSuperAdmin 単体挙動の境界網羅」
+    に書き換える doc accuracy fix を同 commit に同梱した（test の期待値・bypass の選択は
+    不変）。テスト logic / RequireSuperAdmin の判定経路には触れない（tasks.md L183「既存挙動
+    は不変であること（test の期待値は変えない）」を守る）。
+  - **検証手段**: `go build ./... && go vet ./... && go test ./...` の 3 系統で rename
+    完全性を担保。`grep -rn "\bauthClaims\b\|\bwithAuthClaims\b\|\bauthClaimsFromContext\b"`
+    で残った 1 件（middleware.go の godoc 内 historical 言及）が新 godoc の意図通り
+    backtick 引用で参照される historical literal であることを目視確認し、stale 参照ゼロを
+    確認した。
+- **残存課題**:
+  - 後続 task 4.1 / 5.1 / 6.1: 本 task で public 化した `httpserver.WithAuthClaims(ctx,
+    AuthClaims{...})` は、auth middleware 本体（`backend/internal/auth/middleware.go`）が
+    session lookup 成功後に呼び出す入力契約として使われる。`AuthClaims` のフィールド構成
+    （TenantID / AdminUserID / Roles / IsSuperAdmin）は本 task で不変としたため、auth
+    middleware は `Identity` struct（後段 task 3.1 で定義）から 4 フィールドを転記する単純
+    アダプタとして実装される想定。
+  - 確認事項: 本 task では tasks.md L183 の「test の期待値は変えない」契約を守るため、
+    `http_subrouter_mount_test.go` の bypass 経路（`platformdb.WithTenantContext` を直接
+    呼ぶ）は維持した。本テストは後続 Issue で `httpserver.WithAuthClaims` 経路に書き換える
+    余地があるが、書き換えると RequireSuperAdmin 単体ではなく auth middleware chain 全体を
+    通すテストになるため、責務が変質する。本 task では責務 1 件のテスト構造を維持する
+    判断を採用した。
+
 ## 確認事項
 
 本セクションは `requirements.md` / `design.md` / `tasks.md` 本文の書き換えを伴わずに、実装フェーズ
