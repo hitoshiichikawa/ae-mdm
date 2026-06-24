@@ -6,6 +6,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"time"
 
 	internalerrors "github.com/hitoshiichikawa/ae-mdm/internal/errors"
 )
@@ -15,6 +16,11 @@ import (
 // CodeConfigInvalid を返す」と整合。
 const SessionSecretMinLen = 32
 
+// StateMACSecretMinLen は STATE_MAC_SECRET に要求される最小長（バイト数）。
+// Issue #33 tasks.md 1.1 / design.md StateCookie 節と整合（HMAC-SHA256 鍵として
+// 32 バイト以上）。
+const StateMACSecretMinLen = 32
+
 // 既定値定数（requirements.md / tasks.md 1.1 詳細項目と整合）。
 const (
 	defaultAuditLogRetentionDays         = 180
@@ -23,6 +29,23 @@ const (
 	defaultLogFormat                     = "json"
 	defaultLogOutput                     = "stderr"
 	defaultHTTPListenAddr                = ":8080"
+)
+
+// セッション / state cookie の duration 既定値および境界値（Issue #33 tasks.md 1.1）。
+// 下限 1s は Go の `http.Cookie.MaxAge = int(ttl/time.Second)` が `MaxAge == 0` の
+// 場合に Max-Age 属性を Set-Cookie ヘッダから drop する境界を回避するため
+// （`MaxAge == 0` は browser session cookie 化して TTL 制御が効かなくなる）。
+// 上限 24h は absolute timeout の運用最大値（誤設定による無期限 idle / token 終身化を防ぐ）。
+// StateCookieTTL の上限 10m は Req 2.4 「10 分以内に有効期限が切れる」に由来。
+const (
+	defaultSessionIdleTimeout     = 30 * time.Minute
+	defaultSessionAbsoluteTimeout = 8 * time.Hour
+	defaultStateCookieTTL         = 10 * time.Minute
+
+	sessionTimeoutMin = 1 * time.Second
+	sessionTimeoutMax = 24 * time.Hour
+	stateCookieTTLMin = 1 * time.Second
+	stateCookieTTLMax = 10 * time.Minute
 )
 
 // envGetter は os.LookupEnv を抽象化する関数型。テストでは map[string]string を使った
@@ -75,6 +98,27 @@ func loadFrom(get envGetter) (Config, error) {
 		}
 		*dst = n
 	}
+	// durationWithDefault は env に time.Duration 値を読み込む。`time.ParseDuration` を
+	// ベースとし、parse 失敗 / 境界（min <= ttl <= max）外を invalid に積む。
+	// 機密値ではないため値そのものをエラーメッセージに含める（key 名と値の併記で
+	// 運用者が原因特定できることを優先）。
+	durationWithDefault := func(key string, dst *time.Duration, def, min, max time.Duration) {
+		v, ok := get(key)
+		if !ok || strings.TrimSpace(v) == "" {
+			*dst = def
+			return
+		}
+		d, err := time.ParseDuration(strings.TrimSpace(v))
+		if err != nil {
+			invalid = append(invalid, fmt.Sprintf("%s (not a duration: %q)", key, v))
+			return
+		}
+		if d < min || d > max {
+			invalid = append(invalid, fmt.Sprintf("%s (%s out of range [%s, %s])", key, d, min, max))
+			return
+		}
+		*dst = d
+	}
 
 	// 必須 string
 	requiredStr("DATABASE_URL", &cfg.DatabaseURL)
@@ -90,6 +134,9 @@ func loadFrom(get envGetter) (Config, error) {
 	requiredStr("AMAPI_PROJECT_ID", &cfg.AMAPIProjectID)
 	requiredStr("GOOGLE_APPLICATION_CREDENTIALS", &cfg.GoogleApplicationCredentials)
 	requiredStr("SESSION_SECRET", &cfg.SessionSecret)
+	requiredStr("STATE_MAC_SECRET", &cfg.StateMACSecret)
+	requiredStr("OIDC_TENANT_CLIENT_SECRET", &cfg.OIDCTenantClientSecret)
+	requiredStr("OIDC_ADMIN_CLIENT_SECRET", &cfg.OIDCAdminClientSecret)
 
 	// URL 形式バリデーション（PR #31 round-3 review 由来 / Req 1.3）。
 	// scheme + host を持つ URL を要求する。OIDC 系は http(s) スキームを要求し、
@@ -141,9 +188,49 @@ func loadFrom(get envGetter) (Config, error) {
 	optionalStr("LOG_OUTPUT", &cfg.LogOutput, defaultLogOutput)
 	optionalStr("HTTP_LISTEN_ADDR", &cfg.HTTPListenAddr, defaultHTTPListenAddr)
 
+	// Duration 系（Issue #33 tasks.md 1.1 / Req 2.4 / 4.4 / 4.5 / NFR 2.1）。
+	durationWithDefault("SESSION_IDLE_TIMEOUT", &cfg.SessionIdleTimeout,
+		defaultSessionIdleTimeout, sessionTimeoutMin, sessionTimeoutMax)
+	durationWithDefault("SESSION_ABSOLUTE_TIMEOUT", &cfg.SessionAbsoluteTimeout,
+		defaultSessionAbsoluteTimeout, sessionTimeoutMin, sessionTimeoutMax)
+	durationWithDefault("STATE_COOKIE_TTL", &cfg.StateCookieTTL,
+		defaultStateCookieTTL, stateCookieTTLMin, stateCookieTTLMax)
+
 	// SESSION_SECRET 長さ検証（required が成功している場合のみ）。
 	if cfg.SessionSecret != "" && len(cfg.SessionSecret) < SessionSecretMinLen {
 		invalid = append(invalid, fmt.Sprintf("SESSION_SECRET (length %d < required %d)", len(cfg.SessionSecret), SessionSecretMinLen))
+	}
+	// STATE_MAC_SECRET 長さ検証（HMAC-SHA256 鍵として 32 バイト以上を要求）。
+	// 機密値そのものはエラーメッセージに埋め込まず、長さ情報のみ surface する
+	// （Issue #33 tasks.md 1.1 / NFR 1.1）。
+	if cfg.StateMACSecret != "" && len(cfg.StateMACSecret) < StateMACSecretMinLen {
+		invalid = append(invalid, fmt.Sprintf("STATE_MAC_SECRET (length %d < required %d)", len(cfg.StateMACSecret), StateMACSecretMinLen))
+	}
+
+	// cross-field validation（Issue #33 tasks.md 1.1 / Req 6.1 / 6.2 / 6.4 / Req 4.4 / 4.5）。
+	// 上記の missing / invalid を抜けた段階で実行する（前提が揃ってから比較）。
+	if len(missing) == 0 && len(invalid) == 0 {
+		// (a) SessionIdleTimeout <= SessionAbsoluteTimeout（idle が absolute を
+		//     超える設定は階層的失効判定を破壊するため reject）。
+		if cfg.SessionIdleTimeout > cfg.SessionAbsoluteTimeout {
+			invalid = append(invalid, fmt.Sprintf("SESSION_IDLE_TIMEOUT (%s) must be <= SESSION_ABSOLUTE_TIMEOUT (%s)",
+				cfg.SessionIdleTimeout, cfg.SessionAbsoluteTimeout))
+		}
+		// (b) OIDC_TENANT_CLIENT_ID != OIDC_ADMIN_CLIENT_ID（aud 排他一致が
+		//     無効化される）。
+		if cfg.OIDCTenantClientID == cfg.OIDCAdminClientID {
+			invalid = append(invalid, "OIDC_TENANT_CLIENT_ID and OIDC_ADMIN_CLIENT_ID must differ")
+		}
+		// (c) OIDC_TENANT_CLIENT_SECRET != OIDC_ADMIN_CLIENT_SECRET（一方の漏洩が
+		//     他方の信頼を毀損する構造を防ぐ）。生値はエラーメッセージに含めない。
+		if cfg.OIDCTenantClientSecret == cfg.OIDCAdminClientSecret {
+			invalid = append(invalid, "OIDC_TENANT_CLIENT_SECRET and OIDC_ADMIN_CLIENT_SECRET must differ")
+		}
+		// (d) OIDC_TENANT_REDIRECT_URL != OIDC_ADMIN_REDIRECT_URL（path-based
+		//     console 分離が成立しない）。
+		if cfg.OIDCTenantRedirectURL == cfg.OIDCAdminRedirectURL {
+			invalid = append(invalid, "OIDC_TENANT_REDIRECT_URL and OIDC_ADMIN_REDIRECT_URL must differ")
+		}
 	}
 
 	if len(missing) > 0 || len(invalid) > 0 {
