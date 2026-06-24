@@ -103,9 +103,11 @@ func TestHTTPSubrouterMount_AdminRequiresAuth_Returns401Or403(t *testing.T) {
 }
 
 // TestHTTPSubrouterMount_AdminReachesNextHandler_WhenSuperAdminContextInjected はテスト (j) 対応。
-// 通常の HTTP server 経由では internal package private な authClaims を package 外から
-// 注入できないため、test 専用 router を組み立てて TenantContext を ctx に直接埋め込み、
-// `RequireSuperAdmin` middleware を通過させて next handler に到達することを確認する。
+// 本テストは `RequireSuperAdmin` middleware の単体挙動を確認する目的で、auth スタブ
+// （TenantContextMiddleware 経由の `httpserver.WithAuthClaims` injection）は bypass し、
+// test 専用 router に SuperAdmin の TenantContext を直接埋め込んで next handler への
+// 到達を検証する（RequireSuperAdmin の判定は TenantContext.IsSuperAdmin のみを参照する
+// ため、auth chain 全体を組み立てなくても本 middleware 単体の境界条件を網羅できる）。
 //
 // （tasks.md 6.1 詳細項目「test 用 router で TenantContext を put して IsSuperAdmin=true の
 // 場合に next handler まで到達することを確認」と整合）

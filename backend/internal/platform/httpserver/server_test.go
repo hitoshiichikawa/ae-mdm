@@ -129,14 +129,14 @@ func TestServer_AdminWithoutAuth_Returns401(t *testing.T) {
 // `/api/admin/*` に到達した場合、TenantContextMiddleware は通過し RequireSuperAdmin が
 // 403 を返すことを確認する。
 //
-// 本テストでは内部 helper [withAuthClaims] で claims を ctx に注入し、
+// 本テストでは [WithAuthClaims] で claims を ctx に注入し、
 // TenantContextMiddleware を通過させる経路を成立させる。
 func TestServer_AdminWithTenantContextNotSuperAdmin_Returns403(t *testing.T) {
 	// Arrange
 	srv, _ := newServer(t)
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/api/admin/tenants", nil)
-	req = req.WithContext(withAuthClaims(context.Background(), authClaims{
+	req = req.WithContext(WithAuthClaims(context.Background(), AuthClaims{
 		TenantID:     uuid.New(),
 		AdminUserID:  uuid.New(),
 		Roles:        []string{"TenantAdmin"},
@@ -166,7 +166,7 @@ func TestServer_AdminWithSuperAdminTenantContext_ReachesMountedHandler(t *testin
 	})
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/api/admin/ping", nil)
-	req = req.WithContext(withAuthClaims(context.Background(), authClaims{
+	req = req.WithContext(WithAuthClaims(context.Background(), AuthClaims{
 		TenantID:     uuid.Nil,
 		AdminUserID:  uuid.New(),
 		Roles:        []string{"SuperAdmin"},
@@ -210,7 +210,7 @@ func TestServer_APIWithClaims_ReachesMountedHandler(t *testing.T) {
 	})
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/api/whoami", nil)
-	req = req.WithContext(withAuthClaims(context.Background(), authClaims{
+	req = req.WithContext(WithAuthClaims(context.Background(), AuthClaims{
 		TenantID:     tenantID,
 		AdminUserID:  uuid.New(),
 		Roles:        []string{"TenantAdmin"},
