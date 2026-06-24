@@ -211,6 +211,87 @@ learning を `### Task <id>` 単位で追記する。`docs/specs/33--a3a-oidc-ve
   機密値非埋込契約の遵守）は後続 fresh iteration で消化する。子 task 2.1 完了時の親 task `2` の
   昇格は本 iteration で完了済みのため、auto-promotion 規約は no-op として扱う。
 
+### Task 2.1
+
+- **採用方針**: `backend/internal/platform/oidc/{doc.go, verifier.go, verifier_test.go}` を
+  新規追加。`coreos/go-oidc/v3` で tenant / admin 2 issuer 分の Provider + IDTokenVerifier
+  を構築し、go-oidc 内蔵 aud 検証は `&oidc.Config{ClientID: "", SkipClientIDCheck: true}` で
+  明示的に切ったうえで、`finalize()` 内で aud と tenant / admin の client_id を排他一致
+  検証する 2 層構造に整理した。`failure_kind` は `failureKind string` 型の sentinel error
+  として Cause チェーンに含め、`errors.As` / `errors.Is` で Service / Logger 側から識別
+  できる経路を確立した（NFR 4.1）。
+- **重要な判断**:
+  - **同一 issuer URL を tenant / admin で共有する構成への対応**: Keycloak の典型運用
+    （1 realm 内に tenant-console / admin-console の 2 client を登録）では tenant / admin の
+    issuer URL が同一になる。当初 tenant verifier と admin verifier の両方が成功した場合を
+    `aud_ambiguous` 扱いにする実装にしていたが、これだと同一 issuer 構成で正常 token も
+    必ず ambiguous になってしまうため、戦略を「両 verifier を順に試し、最初に成功した方の
+    IDToken を `finalize` に渡す」に変更し、aud の排他判定は `finalize` 側 client_id 一致で
+    一元化した。これにより別 issuer 構成と同一 issuer 構成の両方が同じコードパスで動作する。
+  - **kid 不在の failure_kind 判定の限界**: `coreos/go-oidc` の RemoteKeySet は kid 不一致と
+    署名検証失敗の双方で `"failed to verify id token signature"` を返し、エラー文字列で両者を
+    区別できない（`go.sum` 上の go-oidc v3.10.0 / `jwks.go:179` で確認）。`isKidNotFound`
+    helper は文字列マッチで best-effort に分類するが、現状はほぼ全ケースで `invalid_sig` に
+    倒れる挙動になる。Req 1.10 は「拒否する」までを保証し、failure_kind の細分化は best-effort
+    扱いとした。テスト (h) では `invalid_kid` / `invalid_sig` の **いずれか**を許容する
+    permissive な assert で「reject されること」を最優先で守っている。
+  - **AuthStyleInHeader の明示上書き**: `Provider.Endpoint()` の戻り値は `AuthStyle=0`
+    （`AuthStyleAutoDetect`）で、`golang.org/x/oauth2` v0.21.0 は初回 token endpoint reject を
+    受けて `client_secret_post` にフォールバックする非決定的挙動を取る。`buildConsoleVerifier`
+    内で `endpoint.AuthStyle = oauth2.AuthStyleInHeader` を明示してから返却し、後続 task 5.1
+    の `oauth2.Config` 構築で Basic 固定を契約として強制する。単体テスト
+    `TestVerifier_EndpointAuthStyle_IsInHeader` で tenant / admin 両 endpoint の
+    `AuthStyle == oauth2.AuthStyleInHeader` を回帰的に守る。
+  - **`SkipClientIDCheck: true` の明示が必須**: go-oidc v3 は `ClientID == "" &&
+    !SkipClientIDCheck` の組合せを `"invalid configuration, clientID must be provided or
+    SkipClientIDCheck must be set"` で reject する仕様（`oidc/verify.go:280`）。`ClientID` を
+    空にするだけでは設定不正になるため `SkipClientIDCheck: true` を必ず併設する。
+  - **nonce reject は Service 層の責務**: tasks.md (j) の指示通り、Verifier は `nonce`
+    クレームを `Claims.Nonce` に surface するだけで一致確認は行わない（不在は空文字を返す）。
+    OIDC `nonce` と `StatePayload.OIDCNonce` の constant-time 比較は後続 task 5.1
+    `HandleCallback` の責務として境界分離した（観点ごとに 1 ヶ所で検証する原則）。
+  - **機密値非埋込契約**: `*errors.Error.Message` および Cause メッセージ本文に raw JWT /
+    client_secret / state MAC 鍵を **文字列補間しない**。go-oidc の error は `joinFailureKind`
+    で `failure_kind` sentinel と join して wrap するに留め、追加 context は console / issuer
+    URL（既に公開情報）のみ。`TestVerifyIDToken_NoSensitiveValueInErrorMessage` で 4 失敗
+    種別について `err.Error()` に raw JWT が含まれないことを assert し、回帰耐性を確保した。
+  - **モック IdP 設計**: `httptest.NewServer` の URL に `/realms/test` を suffix して issuer
+    にし、discovery / JWKS handler を **issuer 配下のパス**（`testIssuerPath + "/.well-known/..."`
+    等）に register する必要がある（go-oidc は `<issuer>/.well-known/openid-configuration` に
+    GET するため）。rotation テストでは `idpServer.rotateKey()` で JWKS を差し替え、`jwksHits`
+    atomic counter で再 fetch の発生を確認する設計。
+  - **依存方向**: `internal/platform/oidc` は `internal/errors` / `internal/config` のみを
+    internal package として import し、上位 domain（auth / db / httpserver）には依存しない
+    （`doc.go` に依存方向ルールを godoc 化）。`internal/depspin/depspin.go` の `coreos-go-oidc`
+    blank import は本 task では削除せず、後続 task 7.1 で扱う（spec の指示通り）。
+- **残存課題**:
+  - 後続 task 5.1 `auth.Service.HandleCallback` で `verifier.VerifyIDToken` の戻り値
+    `Claims.Nonce` と `StatePayload.OIDCNonce` を `subtle.ConstantTimeCompare` で照合する
+    nonce binding（Req 2.9 / OIDC Core 1.0 §3.1.2.7）を実装する。Verifier 側で nonce 一致
+    判定を行わない境界はテスト (j) で固定済み。
+  - 後続 task 6.3 `cmd/api/main.go` bootstrap で `oidc.NewVerifier(ctx, cfg)` を呼び出し、
+    失敗時に `os.Exit(1)` で fail-closed bootstrap を成立させる（NFR 3.2）。本 task で
+    `*errors.Error{Code: CodeUnavailable, failure_kind: oidc_discovery}` を返す経路は
+    `TestNewVerifier_DiscoveryFailure_ReturnsUnavailable` で回帰的に守る。
+  - 後続 task 7.1 で `depspin.go` から `coreos-go-oidc` の blank import を削除する
+    （本 task で direct dependency 化したため、blank import の役目が果たされた）。
+  - `invalid_kid` failure_kind の細分化は best-effort 実装に留まる。実 IdP / 実 Keycloak で
+    kid rotation エラー文言が固定化される場合、後続 Issue で `RemoteKeySet` ラッパを実装して
+    failure_kind を厳密化する余地がある（本 Issue 範囲外）。
+
+### Task 2.1 — Verify 実行結果
+
+- `go build ./...`: PASS
+- `go vet ./...`: PASS
+- `go test ./...`: 全 package PASS（`./internal/platform/oidc` 含む。実行時間
+  約 3.5s、`TestVerifyIDToken_*` を含む 13 トップレベルテスト + nonce サブテスト 2 件が
+  全 PASS）
+- `go mod tidy`: `coreos/go-oidc/v3` と `golang.org/x/oauth2` を direct dependency に昇格
+  （go-jose/go-jose/v4 も test の直接 import により direct 化）
+- DB-backed verify: 本 task は OIDC Verifier のユニットテストのみで完結し、DB を要求しない
+  ため対象外。tasks.md L774〜L802 の DB-backed verify 義務は後続 task 4.1 / 6.4 で
+  integration test として実施される予定。
+
 ## 確認事項
 
 本セクションは `requirements.md` / `design.md` / `tasks.md` 本文の書き換えを伴わずに、実装フェーズ
