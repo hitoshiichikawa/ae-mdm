@@ -10,7 +10,7 @@
 >
 > 並列実行可能なタスクには `(P)` を付け、`_Boundary:_` で担当 Components を明示する。
 
-- [ ] 1. config / migration / 共通公開化（後段の前提整備）
+- [x] 1. config / migration / 共通公開化（後段の前提整備）
 - [ ] 1.1 Config に session timeout / state / OIDC client secret を追加 (P)
   - `backend/internal/config/config.go` に以下を追加:
     - `SessionIdleTimeout time.Duration`（env `SESSION_IDLE_TIMEOUT`, default `30m`,
