@@ -81,6 +81,19 @@
     - `STATE_MAC_SECRET=<REPLACE_ME_GENERATE_32_BYTES_OF_RANDOM_HEX>`
     - `OIDC_TENANT_CLIENT_SECRET=<REPLACE_ME_FROM_KEYCLOAK_TENANT_CLIENT>`
     - `OIDC_ADMIN_CLIENT_SECRET=<REPLACE_ME_FROM_KEYCLOAK_ADMIN_CLIENT>`
+  - **`.env.example` の `OIDC_TENANT_REDIRECT_URL` / `OIDC_ADMIN_REDIRECT_URL` を backend
+    callback へ変更**: A2 時点では SPA 側 URL（`http://localhost:5173/auth/callback` /
+    `http://localhost:5174/auth/callback`）が記載されている。本 Issue は BFF confidential
+    flow で backend が直接 callback を処理する設計（design.md Technology Stack「Authentication」
+    行および確認事項 6）なので、以下の値に置換する（IdP の登録 redirect URL もこれと一致させる
+    必要があるため、本 task で `.env.example` を変更し、Keycloak realm export 側との整合は
+    impl-notes / runbook で扱う）:
+    - `OIDC_TENANT_REDIRECT_URL=http://localhost:8080/api/auth/callback`
+    - `OIDC_ADMIN_REDIRECT_URL=http://localhost:8080/api/admin/auth/callback`
+    SPA 側の `/auth/callback` route は本 Issue 範囲外（後続 SPA Issue / umbrella tasks 12.1 /
+    13.1 で再導入する場合は SPA → backend redirect 経路で扱う）。本変更を怠ると IdP が
+    SPA 側に redirect してしまい、backend の callback handler が呼ばれず Req 1.x / 2.x の
+    全フローが成立しない
   - _Requirements: 6.1, 6.2, 6.4, NFR 1.1, NFR 2.1, NFR 2.2_
   - _Boundary: Config_
 - [ ] 1.2 sessions / admin_users テーブル拡張マイグレーション (P)
@@ -185,6 +198,15 @@
     `session_cookie=raw` のような field を **誤って**出した場合でも値が `***` に置換され、
     NFR 1.1 / NFR 4.2 / Req 1.11 / Req 3.6 の「生値・MAC 鍵をログに残さない」要件が
     多層防御として担保される（一次防御は各呼び出し側が hash / prefix のみ field 化する責務）
+  - **本 redaction は field 名（zap field key）サブストリング一致で値を置換する設計のため、
+    `fmt.Errorf("... client_secret=%s ...", cfg.OIDCTenantClientSecret)` のように Cause 文字列・
+    Error.Message に機密値を文字列補間する経路は redaction を bypass する**。この経路を防ぐ
+    実装契約は design.md「Error Handling」節「機密値を Cause メッセージ本文に埋め込まない実装
+    契約」で宣言済み（task 2.1 / 5.1 / 5.2 / 6.1 の Verifier / Service / Handler / Middleware の
+    各失敗パスで、wrap した error の文言に機密値（`cfg.StateMACSecret` / `cfg.OIDCTenantClientSecret` /
+    `cfg.OIDCAdminClientSecret` / state cookie 生値 / session cookie 生値 / id_token raw JWT）を
+    含めない責務）。本 task では logger 側の field 名 redaction のみを実装し、message-body
+    補間禁止は各失敗パスの実装 task で守る
   - _Requirements: 1.11, 3.6, NFR 1.1, NFR 4.2_
   - _Boundary: Logger_
   - _Depends: なし（A2 完了済みのため独立）_
@@ -199,13 +221,27 @@
     `invalid configuration` で reject するため、両方を明示する必要がある / design.md
     「OIDC Verifier」節と整合）。aud 検証は本パッケージで明示実装（tenant / admin のいずれか
     **排他一致**を強制 / Req 1.4 / 1.5）
-  - `Claims` 型に `Subject` / `Email` / `Groups` / `Issuer` / `MatchedConsole Console` を
+  - `Claims` 型に `Subject` / `Email` / `Groups` / `Issuer` / `MatchedConsole Console` /
+    **`Nonce string`**（ID トークンの `nonce` クレーム / Service 側で `StatePayload.OIDCNonce` と
+    constant-time 比較するために surface する。Req 2.9 の authorization code injection 防止）を
     持たせる。raw JWT は **含めない**（Req 1.11）
   - 起動時 helper `NewVerifier(ctx, cfg config.Config) (Verifier, error)` を提供。
     discovery / JWKS prefetch 失敗時は `*errors.Error{Code: CodeUnavailable, failure_kind:
     oidc_discovery}` を返す（NFR 3.2）。後段（task 6.3）の bootstrap が `oauth2.Config` の
     Endpoint を構築できるよう、`TenantEndpoint() oauth2.Endpoint` / `AdminEndpoint()
-    oauth2.Endpoint` を `Verifier` interface に併せて提供する
+    oauth2.Endpoint` を `Verifier` interface に併せて提供する。**両 Endpoint helper は
+    `Provider.Endpoint()` を取得後、戻り値の `AuthStyle` フィールドを `oauth2.AuthStyleInHeader`
+    に明示上書きしてから返す**（`client_secret_basic` 固定を契約として強制 / design.md
+    Technology Stack「Authentication」行および確認事項 6 と整合 / 単体テスト (j) 直後の追加
+    アサーションで `AuthStyle == oauth2.AuthStyleInHeader` を確認する）
+  - **error wrap 文言の機密値非埋込契約**（NFR 1.1 / NFR 4.2 / design.md「機密値を Cause
+    メッセージ本文に埋め込まない実装契約」節）: 検証失敗 / discovery 失敗 / JWKS fetch 失敗
+    で error を wrap する際、`fmt.Errorf("... raw_token=%s ...", rawIDToken)` のように
+    **id_token raw JWT / `cfg.OIDCTenantClientSecret` / `cfg.OIDCAdminClientSecret` /
+    `cfg.StateMACSecret` を文字列補間しない**。具体的なエラー内容は go-oidc の error を
+    そのまま wrap するに留め、独自追加する context は `failure_kind` / `console` 種別 /
+    `issuer` 等の非機密値のみとする（logger redaction は二次防御 / 本 wrap 段階での非埋込が
+    一次防御）
   - `backend/internal/platform/oidc/doc.go` を追加し、`internal/platform/oidc` は他 internal
     package（errors / config / logger 以外）を import しない（cycle 回避）旨と `auth` domain
     からのみ呼ばれる旨を godoc に記載
@@ -217,7 +253,11 @@
     `failure_kind=invalid_aud`、(f) aud 配列に tenant+admin 同居で `failure_kind=
     aud_ambiguous`（Req 1.5）、(g) exp 切れで `failure_kind=token_expired`、(h) kid 不在で
     `failure_kind=invalid_kid`、(i) kid rotation（JWKS endpoint レスポンスを差し替え）後の
-    再検証で成功復帰
+    再検証で成功復帰、(j) **id_token に `nonce` クレームを含めて `Claims.Nonce` が当該値で
+    populate される**（OIDC Core 1.0 §3.1.2.7 / Service が `StatePayload.OIDCNonce` と比較する
+    前提のため、Verifier は nonce クレームを **そのまま** 取り出して返す責務 / `nonce` 不在
+    の id_token でも Verifier 自身は reject せず `Claims.Nonce == ""` を返す（nonce 一致確認は
+    Service 層の責務 / 単体テストの観点分離））
   - _Requirements: 1.1, 1.2, 1.3, 1.4, 1.5, 1.6, 1.7, 1.8, 1.9, 1.10, 1.11, 6.1, 6.4, NFR 3.2, NFR 4.1_
   - _Boundary: OIDCVerifier_
   - _Depends: 1.1_
@@ -229,9 +269,12 @@
     IssuedAt / LastSeenAt / ExpiresAt / RevokedAt *time.Time）を定義
   - `backend/internal/auth/clock.go` を新規追加。`Clock interface { Now() time.Time }` と
     `SystemClock` 実装。Service / Middleware の DI で利用
-  - `backend/internal/auth/state.go` を新規追加。`StatePayload`（**`Nonce` / `Console` /
-    `ReturnTo` / `IssuedAt`**。design.md と整合 / Req 2.9 で MAC 保護下に置く戻り先 URL の
-    生値）と `Sign(payload, secret) (cookieValue string, err error)` /
+  - `backend/internal/auth/state.go` を新規追加。`StatePayload`（**`Nonce`（OAuth state 用 16 byte
+    base64url / CSRF 防止）/ `OIDCNonce`（OIDC nonce 用 16 byte base64url / authorization code
+    injection 防止 / RFC OIDC Core 1.0 §3.1.2.1 で OAuth `state` と OIDC `nonce` は別パラメータと
+    定義されている）/ `Console` / `ReturnTo` / `IssuedAt`**。design.md StatePayload struct と
+    整合 / Req 2.9 で MAC 保護下に置く戻り先 URL の生値）と `Sign(payload, secret) (cookieValue
+    string, err error)` /
     `Verify(cookieValue, queryState, secret, ttl, now) (StatePayload, error)` /
     `CookieAttributes(ttl) http.Cookie` / **`ExpireCookieAttributes() http.Cookie`** を実装。
     MAC は HMAC-SHA256、cookie 値フォーマットは `base64url(json(payload)) + "." + base64url(MAC)`、
@@ -246,7 +289,9 @@
     cookie 削除に **必ず本 helper を使用する** / `session.ExpireCookieAttributes()` を流用
     すると `__Host-ae_mdm_state` 削除が成立せず Req 2.8 違反になる）
   - `backend/internal/auth/state_test.go` を新規追加。
-    - (a) Sign → Verify 往復で `StatePayload.ReturnTo` が cookie 経由で復元される
+    - (a) Sign → Verify 往復で `StatePayload.ReturnTo` / **`StatePayload.OIDCNonce`** が
+      cookie 経由で復元される（後者は HandleCallback で id_token nonce との照合に使うため
+      cookie 越しに保持される必要がある）
     - (b) MAC tamper で `*errors.Error{Code: CodeUnauthenticated, failure_kind: state_invalid}`
     - (c) TTL 超過で `failure_kind: state_expired`
     - (d) `Nonce` 改竄で `failure_kind: state_invalid`
@@ -321,9 +366,10 @@
        （OIDC の `sub` は **issuer スコープ**でのみ一意のため、tenant / admin issuer を
        分けられる本設計では `(issuer, subject)` の組で一意解決する。`subject` 単独で解決すると
        別 issuer のユーザーへ誤解決する。`admin_users` テーブルに `oidc_issuer text NOT NULL`
-       カラムが存在しない場合は A2 既存スキーマを拡張する migration（後述 task 1.2 / 1.2a の
-       いずれかに統合）が必要 — 詳細は impl-notes.md「OIDC issuer 識別子の永続化方針」節で
-       PM 確認）
+       カラムが存在しない場合は A2 既存スキーマを拡張する migration（本 Issue では task 1.2 内の
+       `0014_admin_users_add_oidc_issuer.up.sql` で実施 / 同 migration が `oidc_issuer text NOT
+       NULL` 追加 + `(oidc_issuer, oidc_subject)` UNIQUE 複合キー化を担当する）が必要 — 詳細は
+       impl-notes.md「OIDC issuer 識別子の永続化方針」節で PM 確認）
     2. 0 行なら `*errors.Error{Code: CodeForbidden, failure_kind:
        admin_user_not_provisioned}` を返す（HTTP 403 に Service が マッピング）
     3. 1 行なら `UPDATE admin_users SET email = $1 WHERE id = $2`（IdP 側で email が変わった
@@ -358,12 +404,16 @@
   - `BeginLogin(ctx, console, returnTo) (redirectURL string, stateCookie http.Cookie, err error)` —
     `returnTo` 正規化と検証（**空文字の場合は default `/` を採用**して callback 成功時に空の
     `Location` ヘッダが出ないようにする / Req 2.5。空でない場合は同一オリジン内相対 URL のみ
-    許容、`http://` `https://` `//` を含む host 指定は 400 / 確認事項 3）→ `StatePayload{Nonce,
-    Console: console, ReturnTo: returnTo, IssuedAt: clock.Now()}` 構築 → `state.Sign` で
-    cookie 値生成 → `state.CookieAttributes(cfg.StateCookieTTL)` に cookie 値をセット →
-    IdP 認可エンドポイント URL を `oauth2.Config.AuthCodeURL(payload.Nonce)` で構築
-    （`state` クエリパラメータには `payload.Nonce` を載せる / cookie 内 Nonce との
-    constant-time 一致確認に使う）→ `(redirectURL, stateCookie, nil)` を返す
+    許容、`http://` `https://` `//` を含む host 指定は 400 / 確認事項 3）→ **`Nonce` と
+    `OIDCNonce` をそれぞれ `crypto/rand` で独立に 16 byte 生成**（同値を使い回すと nonce / state の
+    意味分離が崩れる / 失敗時は `*errors.Error{Code: CodeInternal, failure_kind: csprng_failure}`）
+    → `StatePayload{Nonce, OIDCNonce, Console: console, ReturnTo: returnTo, IssuedAt:
+    clock.Now()}` 構築 → `state.Sign` で cookie 値生成 → `state.CookieAttributes(cfg.StateCookieTTL)`
+    に cookie 値をセット → IdP 認可エンドポイント URL を **`oauth2.Config.AuthCodeURL(payload.Nonce,
+    oauth2.SetAuthURLParam("nonce", payload.OIDCNonce))`** で構築（`state` クエリパラメータには
+    `payload.Nonce`、`nonce` クエリパラメータには `payload.OIDCNonce` を載せる / 前者は
+    cookie 内 Nonce との constant-time 比較、後者は ID トークン `nonce` クレームとの照合に使う
+    / OIDC Core 1.0 §3.1.2.1）→ `(redirectURL, stateCookie, nil)` を返す
   - `HandleCallback(ctx, console, code, queryState, rawStateCookie) (rawSessionToken string,
     sessionCookie http.Cookie, returnTo string, err error)`:
     1. `state.Verify(rawStateCookie, queryState, cfg.StateMACSecret, cfg.StateCookieTTL,
@@ -392,17 +442,26 @@
        （直接 type assertion `token.Extra("id_token").(string)` は token endpoint が `id_token` を
        返さない / 文字列でない場合に panic するため禁止 / NFR 3.1 の fail-closed と整合）。
        `verifier.VerifyIDToken(ctx, rawIDToken)` → `Claims.MatchedConsole != console` なら
-       `failure_kind: invalid_aud` で拒否（Req 6.2 のクライアント分離強制）
+       `failure_kind: invalid_aud` で拒否（Req 6.2 のクライアント分離強制）→
+       **`subtle.ConstantTimeCompare([]byte(Claims.Nonce), []byte(payload.OIDCNonce)) != 1`**
+       なら `*errors.Error{Code: CodeUnauthenticated, failure_kind: nonce_mismatch}` で 401 +
+       state cookie 削除（authorization code injection 防止 / OIDC Core 1.0 §3.1.2.7 / 攻撃者が
+       横取りした code を別ブラウザで提示しても、当該ブラウザの cookie には別 `OIDCNonce` が
+       入っているため id_token の `nonce` クレームと一致しない）。`Claims.Nonce == ""` も同様に
+       `nonce_mismatch` で reject（IdP が `nonce` を要求どおりに返さなかった場合の fail-closed）
     4. `repo.ResolveAdminUser(ctx, claims.Issuer, claims.Subject, claims.Email, console)` →
        `admin_user_not_provisioned` で 403 を伝播（OIDC の `sub` は issuer スコープで一意のため、
        tenant / admin で issuer を分けられる本設計では **`issuer` + `subject` の組**で
        admin_users を解決する必要がある。`subject` 単独で解決すると別 issuer のユーザーへ誤解決
        するリスクがある / 後述 task 4.1 の Repository signature 変更と整合）
-    5. **`rawSessionToken, err := session.New()` の err を必ずチェック**: err != nil なら
+    5. **`rawSessionToken, err := s.tokenGen()` の err を必ずチェック**: err != nil なら
        `*errors.Error{Code: CodeInternal, failure_kind: csprng_failure, Cause: err}` を返して
-       500 に倒す（Req 3.5 / NFR 3.1 の fail-closed / `_, _ := session.New()` で error 破棄を
+       500 に倒す（Req 3.5 / NFR 3.1 の fail-closed / `_, _ := s.tokenGen()` で error 破棄を
        すると CSPRNG 失敗時にも hash / cookie 発行に進んでしまい、推測可能な弱乱数で session を
-       発行する事故になる）。err == nil の場合は `tokenHash := session.HashToken(rawSessionToken)`
+       発行する事故になる）。`s.tokenGen` は Service 構築時に DI 注入する `TokenGenerator`
+       （default は `session.New` / 詳細は本 task の Service 構築 helper 節 + design.md
+       「Auth Service」の TokenGenerator 型定義）。err == nil の場合は `tokenHash :=
+       session.HashToken(rawSessionToken)`
     6. `now := clock.Now()` を 1 度取得し、`repo.Create(ctx, Session{TokenHash: tokenHash,
        AdminUserID: identity.AdminUserID, Console: console, IssuedAt: now, LastSeenAt: now,
        ExpiresAt: now.Add(cfg.SessionAbsoluteTimeout), RevokedAt: nil})` で 1 行 INSERT
@@ -433,10 +492,27 @@
     しない / `logger.TenantID` / `RequestID` / `MessageID` / `ActorID` / `Err` のみが
     field helper / 詳細は `backend/internal/logger/logger.go` の `toZapFields`）。
     `session_hash_prefix` は session lookup 経路でのみ追加（state / OIDC 検証経路では unset）
+  - **error wrap 文言の機密値非埋込契約**（NFR 1.1 / NFR 4.2 / design.md「機密値を Cause
+    メッセージ本文に埋め込まない実装契約」節）: `BeginLogin` / `HandleCallback` /
+    `LookupAndRefresh` / `Logout` で `*errors.Error.Message` や `Cause` に追加する文字列に、
+    **`cfg.StateMACSecret` / `cfg.OIDCTenantClientSecret` / `cfg.OIDCAdminClientSecret` /
+    state cookie 生値（`rawStateCookie`）/ session cookie 生値（`rawSessionToken`）/
+    id_token raw JWT を文字列補間しない**。oauth2 / state.Verify / repository の error は
+    そのまま wrap し、追加する context は `failure_kind` / `console` / `session_hash_prefix` /
+    `oidc_subject_hash`（subject の SHA-256 prefix 等）等の非機密値のみとする
   - `Service` 構築 helper `NewService(cfg, verifier, repo, oauth2Configs map[oidc.Console]
-    *oauth2.Config, clock, log)`。`oauth2Configs` は tenant / admin 別 `ClientID` /
-    `ClientSecret`（`cfg.OIDCTenantClientSecret` / `cfg.OIDCAdminClientSecret` を **必ず**
-    設定）/ `RedirectURL` / `Endpoint`
+    *oauth2.Config, clock, tokenGen TokenGenerator, log)`。`oauth2Configs` は tenant / admin
+    別 `ClientID` / `ClientSecret`（`cfg.OIDCTenantClientSecret` / `cfg.OIDCAdminClientSecret`
+    を **必ず** 設定）/ `RedirectURL` / `Endpoint` / **`Scopes: []string{oidc.ScopeOpenID,
+    "email", "profile"}` を必ず指定**（`coreos/go-oidc/v3/oidc.ScopeOpenID == "openid"`。
+    `scope=openid` が付かないと OIDC IdP は authorization code フローで **`id_token` を
+    発行せず**、後段の `token.Extra("id_token").(string)` が空文字 → `upstream_oidc_token` で
+    502 に化けて Req 1.x が成立しない / Service テストで実 IdP mock の token endpoint
+    レスポンスに `id_token` が含まれることを確認）。**`tokenGen TokenGenerator`** は opaque
+    session token 生成器の DI 境界で、本番は `session.New` をそのまま渡し、テストでは fake
+    実装（err を返す）を差し込んで `csprng_failure` 経路を検証する（design.md「Auth Service」節の
+    `TokenGenerator` 型定義 / 後段 task 6.3 の bootstrap で `auth.NewService(..., session.New, ...)`
+    のように本番値を注入する）
   - `backend/internal/auth/service_test.go` を新規追加。fake `oidc.Verifier` / fake
     `Repository` / fake `Clock` / fake `oauth2` token endpoint（httptest.NewServer）を使い:
     - (a) `BeginLogin` の return_to validate（相対 OK / `//evil.example` 含む host 指定で 400）
@@ -450,11 +526,17 @@
       401 + state cookie 削除（`state.ExpireCookieAttributes()`）で伝播**し、後段の
       `oauth2.Exchange` / `verifier.VerifyIDToken` / `repo.Create` のいずれにも到達しないこと
       （fake mock の call count assert / Req 2.9 の物理的拒否 + attack surface 最小化）
-    - (c4) **fake `session.New` が err を返すよう DI 注入できる構造で、err 発生時 Service が
-      `csprng_failure` で 500 を返す**こと（fake interface 経由で session.New を差し込む /
-      Req 3.5 / NFR 3.1 の fail-closed）
+    - (c4) **`NewService` の `tokenGen TokenGenerator` 引数に「常に err を返す fake」を
+      差し込んだ Service で `HandleCallback` を呼ぶと `csprng_failure` で 500 + repo.Create
+      未呼出**（本番は `session.New` を渡し、テストで fake fn を渡す DI 経路 / Req 3.5 /
+      NFR 3.1 の fail-closed / design.md「Auth Service」節の `TokenGenerator` 型定義 / 本
+      テストで「session 生成 err が無視されない」設計契約を回帰的に守る）
     - (d) **`Claims.MatchedConsole` と handler の expected console 不一致で `invalid_aud`**
       （Req 6.2 のテスト）
+    - (d2) **`Claims.Nonce != StatePayload.OIDCNonce` で `nonce_mismatch` + 401 + state cookie 削除**
+      （fake Verifier に nonce=`<別値>` を返させる経路で authorization code injection 防止経路を
+      検証 / Req 2.9 / OIDC Core 1.0 §3.1.2.7）。`Claims.Nonce == ""` 経路も別ケースで同じ
+      reject 結果を assert（IdP nonce 不返却の fail-closed）
     - (e) `ResolveAdminUser` が `admin_user_not_provisioned` を返したら Service が 403 で
       伝播し、session 作成に到達しないこと
     - (f) `LookupAndRefresh` の境界値（idle 29:59 / 30:00 / 30:01、absolute 7:59:59 /
@@ -482,11 +564,16 @@
     ...)` 2 度呼びと整合する設計 / Mount 内で `r.Get("/login", ...)` を root 相対で登録する誤実装を
     すると `/api/auth/login` ではなく `/login` に登録されて Req 6.2 の path-based クライアント分離
     が成立しないため、必ず `r.Route(consolePrefix, ...)` 経由で sub-router を作る）
+  - **error wrap 文言の機密値非埋込契約**（NFR 1.1 / NFR 4.2 / design.md「機密値を Cause
+    メッセージ本文に埋め込まない実装契約」節）: callback 入口判定 / Service エラー伝播時に
+    Handler が wrap する error 文言・`logger` field 値に **state cookie 生値・session cookie
+    生値・id_token raw JWT・OIDC client secret を文字列補間しない**。`errors.WriteHTTP` 経由の
+    JSON 応答 body にも生値が漏れないよう、cookie 値や token 値を Error.Message に含めない
   - login ハンドラ: `return_to` クエリ取得 → `service.BeginLogin(ctx, console, returnTo)` →
     `Set-Cookie: state_cookie` + `302 Found` `Location: redirectURL`。エラー時 `errors.WriteHTTP`
   - callback ハンドラ: `code` / `state` クエリ取得 → **両クエリの欠落判定**（`code == ""` ||
     `queryState == ""` のいずれかが成立すれば、Service 呼び出し前に **400 `invalid_request`**
-    `*errors.Error{Code: CodeBadRequest, failure_kind: invalid_request}` で即時 reject + state
+    `*errors.Error{Code: CodeInvalidRequest, failure_kind: invalid_request}` で即時 reject + state
     cookie 削除（`state.ExpireCookieAttributes()`）/ design.md「Error Categories and Responses」
     400 行および API Contract `/api/auth/callback` の Errors 列「400（return_to が不正 URL /
     `code` 欠落 / `state` 欠落）」と整合 / 欠落判定を Service 内 state 検証や token 交換に流すと
@@ -541,6 +628,10 @@
        identity.AdminUserID, Roles: identity.Roles, IsSuperAdmin: identity.IsSuperAdmin}`
        を `httpserver.WithAuthClaims(ctx, ...)` で ctx に注入 → `next.ServeHTTP`
   - panic / DB error 等の想定外例外は fail-closed で 401（NFR 3.1）。Cause は ERROR ログ
+  - **error wrap 文言の機密値非埋込契約**（NFR 1.1 / NFR 4.2 / design.md「機密値を Cause
+    メッセージ本文に埋め込まない実装契約」節）: middleware が wrap する error 文言・`log.Warn`
+    の field 値に **session cookie 生値・OIDC client secret・state MAC 鍵を文字列補間しない**。
+    `session_hash_prefix` / `failure_kind` / `console` のみを field 化する
   - `backend/internal/auth/middleware_test.go` を新規追加。fake Service + chi route で:
     - (a) cookie 不在で 401 + cookie 削除
     - (b) LookupAndRefresh が `session_idle` を返したら 401 + cookie 削除
@@ -590,16 +681,21 @@
   - _Depends: 6.1, 5.2_
 - [ ] 6.3 cmd/api bootstrap に OIDC Verifier / Auth 配線追加
   - `backend/cmd/api/main.go` を編集。`config.Load()` の後に `oidc.NewVerifier(ctx, cfg)` を
-    呼び（失敗時は exit 1 / NFR 3.2）、`auth.NewRepository(pool)` → `auth.NewService(cfg,
-    verifier, repo, oauth2Configs, clock, log)` → **`authMWTenant :=
+    呼び（失敗時は exit 1 / NFR 3.2）、`auth.NewRepository(pool)` → **`auth.NewService(cfg,
+    verifier, repo, oauth2Configs, clock, auth.TokenGenerator(session.New), log)`**
+    （`TokenGenerator` は本番では `session.New` をそのまま渡す DI 経路 / テストでは fake fn
+    を渡せる構造 / 詳細は task 5.1 + design.md「Auth Service」節）→ **`authMWTenant :=
     auth.NewMiddleware(svc, oidc.ConsoleTenant, log, clock)`** + **`authMWAdmin :=
     auth.NewMiddleware(svc, oidc.ConsoleAdmin, log, clock)`** を構築 →
     `httpserver.NewServer(cfg, log, pool, authMWTenant, authMWAdmin, authMount)` に注入
   - `oauth2Configs` の構築は `cmd/api/main.go` 内で `map[oidc.Console]*oauth2.Config{
     oidc.ConsoleTenant: { ClientID: cfg.OIDCTenantClientID, **ClientSecret:
-    cfg.OIDCTenantClientSecret**, RedirectURL: cfg.OIDCTenantRedirectURL, Endpoint:
-    verifier.TenantEndpoint() }, oidc.ConsoleAdmin: { ClientID: cfg.OIDCAdminClientID,
-    **ClientSecret: cfg.OIDCAdminClientSecret**, RedirectURL: cfg.OIDCAdminRedirectURL,
+    cfg.OIDCTenantClientSecret**, RedirectURL: cfg.OIDCTenantRedirectURL,
+    **Scopes: []string{goidc.ScopeOpenID, "email", "profile"}** (※ `goidc` は
+    `github.com/coreos/go-oidc/v3/oidc` の import alias / `oidc.ScopeOpenID == "openid"`),
+    Endpoint: verifier.TenantEndpoint() }, oidc.ConsoleAdmin: { ClientID:
+    cfg.OIDCAdminClientID, **ClientSecret: cfg.OIDCAdminClientSecret**, RedirectURL:
+    cfg.OIDCAdminRedirectURL, **Scopes: []string{goidc.ScopeOpenID, "email", "profile"}**,
     Endpoint: verifier.AdminEndpoint() } }` のように構築
     （Endpoint 取得は task 2.1 で `Verifier` interface に追加する helper を使う。**helper 側で
     返却する `oauth2.Endpoint` の `AuthStyle` フィールドに `oauth2.AuthStyleInHeader` を必ず
@@ -666,7 +762,11 @@
     を indirect → direct 依存に昇格する `go.mod` / `go.sum` 更新が必要、(b) Keycloak realm
     export の 2 client 定義への依存、(c) 確認事項 1–6 のうち本 Issue 実装時点で未解消のもの、
     (d) `internal/depspin/depspin.go` 内 `coreos-go-oidc` の blank import を本 Issue で
-    削除（A2 task 5.2 で残置されていれば）、を箇条書きで記載
+    削除（A2 task 5.2 で残置されていれば）、**(e) 「DB-backed verify 実行結果」節を必ず追加**
+    し、Developer がローカル or CI のいずれの経路で `make migrate-up && go test ./test/integration/...`
+    を実行したか、pass / skip 件数 / 実行コマンドのスニペット / 実行日時を記録する
+    （Reviewer が同節の有無で DB-backed verify 実施を確認する / 詳細は tasks.md 末尾の
+    「Verify」節「DB-backed verify は本 Issue の必須補完工程」を参照）、を箇条書きで記載
   - _Requirements: NFR 2.1_
   - _Boundary: Documentation_
   - _Depends: 6.3_
@@ -678,6 +778,28 @@
 ユニットテストおよび `_test.go` の整合性が担保される。integration test（`backend/test/integration/
 auth_*.go`）は DATABASE_URL 接続が確立できない環境で `t.Skip` する設計のため、DB 不在環境でも
 verify は false-fail しない。
+
+**DB-backed verify は本 Issue の必須補完工程**: 本 Issue の主要リスクである migrations
+（`0013_extend_sessions` / `0014_admin_users_add_oidc_issuer` / `0015_create_state_nonces`）/
+RLS（`state_nonces_superadmin_only` 等）/ repository（`ConsumeStateNonce` の PK UNIQUE 違反
+マッピング / `ResolveAdminUser` の `(issuer, subject)` 複合キー）/ callback e2e（`/api/auth/callback`
+での state replay / console mismatch / nonce mismatch reject）は **DB 接続が確立している環境
+でしか検証できず**、`t.Skip` 経路では SQL 破損や RLS 漏れを検出できない。Developer は本 Issue
+の Stage A 完了前に、以下のいずれかで DB-backed 検証を **必ず** 実施し、結果を `impl-notes.md`
+の「DB-backed verify 実行結果」節に記録する責務を負う:
+
+1. **推奨（ローカル）**: `docker compose up -d postgres && cd backend && make migrate-up &&
+   DATABASE_URL="<test_dsn>" go test ./test/integration/... -count=1` を実行し、auth_*.go
+   integration test 群が **全て pass（`t.Skip` した個数を含めて記録）** することを確認
+2. **CI 経路**: 本 Issue マージ後の CI で別途 docker compose + integration test を実行する
+   GitHub Actions workflow（CI 整備自体は別 Issue 範疇 / 本 Issue では「ローカル / CI のいずれかで
+   実施したことを `impl-notes.md` に記録」までを Developer 責務とする）
+
+stage-a-verify gate（下記の構造化ブロック）は **DB 不在環境でも false-fail させない**
+（watcher の standalone 実行性を維持 / NFR 3.1 の fail-closed と watcher の信頼性は別レイヤ）
+ため、DB-backed verify は **Developer が手動で実施し `impl-notes.md` に結果記録する** 形を
+取る。Reviewer は `impl-notes.md` の「DB-backed verify 実行結果」節の有無と内容で
+DB-backed verify 実施を確認する（無記録は missing-test に類する reject 理由になる）。
 
 <!-- stage-a-verify -->
 ```sh

@@ -111,7 +111,7 @@ flowchart LR
     Handler -->|code → token exchange<br/>+ ID token 検証| Service
     Service -->|VerifyIDToken| Verifier[oidc.Verifier<br/>JWKS cache]
     Verifier -->|JWKS fetch| IdP[(OIDC IdP)]
-    Service -->|admin_user upsert<br/>+ session create| Repo[auth.Repository]
+    Service -->|admin_user resolve (read-modify-write, no INSERT)<br/>+ session create| Repo[auth.Repository]
     Repo -->|BeginTxFunc<br/>SuperAdmin ctx| DB[(PostgreSQL<br/>sessions, admin_users)]
     Service -->|opaque session id<br/>+ HttpOnly/Secure cookie| Handler
     Handler -->|Set-Cookie + 302| Browser
@@ -215,7 +215,7 @@ backend/
 │       ├── state_test.go               # MAC tamper / expiry / nonce 一意性
 │       ├── session.go                  # opaque ID 生成 / SHA-256 hash / cookie 属性
 │       ├── session_test.go             # cookie 属性 / hash 化 / 乱数性検証
-│       ├── repository.go               # sessions CRUD + admin_users upsert
+│       ├── repository.go               # sessions CRUD + state_nonces INSERT + admin_users resolve（read-modify-write, no INSERT / 事前 provisioning 必須）
 │       ├── repository_test.go          # 実 PostgreSQL（integration tag）
 │       ├── service.go                  # login / callback / lookup / logout ユースケース
 │       ├── service_test.go             # fake Verifier / fake Repository / fake clock で動作検証
@@ -298,7 +298,15 @@ docs/specs/33--a3a-oidc-verifier-session/impl-notes.md  # 本 Issue 新規追加
 - `.env.example` — `SESSION_IDLE_TIMEOUT=30m` / `SESSION_ABSOLUTE_TIMEOUT=8h` /
   `STATE_COOKIE_TTL=10m` / `STATE_MAC_SECRET=<REPLACE_ME_GENERATE_32_BYTES_OF_RANDOM_HEX>` /
   `OIDC_TENANT_CLIENT_SECRET=<REPLACE_ME_FROM_KEYCLOAK_CLIENT>` /
-  `OIDC_ADMIN_CLIENT_SECRET=<REPLACE_ME_FROM_KEYCLOAK_CLIENT>` を追加
+  `OIDC_ADMIN_CLIENT_SECRET=<REPLACE_ME_FROM_KEYCLOAK_CLIENT>` を追加。
+  **加えて A2 時点で SPA 側を指している `OIDC_TENANT_REDIRECT_URL` / `OIDC_ADMIN_REDIRECT_URL`
+  を backend callback へ置換**する（A2 値はそれぞれ `http://localhost:5173/auth/callback` /
+  `http://localhost:5174/auth/callback` → 本 Issue で `http://localhost:8080/api/auth/callback` /
+  `http://localhost:8080/api/admin/auth/callback` に書き換え）。本 Issue の BFF confidential
+  flow（Technology Stack「Authentication」行）は backend が直接 callback を処理する設計のため、
+  IdP からの redirect 先を backend に向けないと Req 1.x / 2.x のフローが成立しない。
+  Keycloak realm 側 client 登録 redirect URI もこの 2 URL と一致させる必要があり、運用手順は
+  `docs/runbook/local-dev.md` に追記する（task 7.1）
 - `docs/runbook/local-dev.md` — 「OIDC 認証フロー検証手順」節を追加（Keycloak realm 設定の
   前提、`STATE_MAC_SECRET` の生成手順）
 
@@ -325,7 +333,7 @@ docs/specs/33--a3a-oidc-verifier-session/impl-notes.md  # 本 Issue 新規追加
 | 2.6 | state cookie 不在 / 期限切れ / MAC 失敗で失敗 | Auth Service | `Verify` 戻り値 → `errors.CodeUnauthenticated` | error: state_invalid |
 | 2.7 | クエリ state と cookie state 不一致で失敗 | Auth Service | `Verify` 内 `subtle.ConstantTimeCompare` | error: state_mismatch |
 | 2.8 | state cookie を callback で即時無効化 | Auth Service, Handler | `Set-Cookie: max-age=0` で削除 | callback flow |
-| 2.9 | 別ブラウザ / 別 redirect への state 流用拒否 | Auth Service, State Cookie, Auth Repository | (a) MAC 付き cookie の物理保護（HttpOnly/Secure/SameSite=Lax + `__Host-` prefix で sub-domain 跨ぎ禁止 / 別ブラウザへの自動転送阻害）+ TTL 10 分、(b) cookie 値と query state の constant-time 一致、(c) **`StatePayload.Console == handler の expected console` を Service 層で明示照合**（tenant login で発行した state を admin callback に提示する cross-console state 混同を `state_console_mismatch` で拒否）、(d) **server-side `state_nonces` テーブルでの一度限り消費**（`Repository.ConsumeStateNonce(ctx, nonce, console, expiresAt)` が PostgreSQL の PRIMARY KEY UNIQUE 制約違反を `failure_kind: state_replay` にマッピングする / 同一 nonce の 2 回目以降の callback 到達を物理的に拒否 / 「同一ブラウザ内で cookie 値 + query state を組ごとコピー / 再提示」ケースも検出可能 / 詳細は後述「state nonce 消費フロー」節および「Data Models」節の `state_nonces` テーブル定義参照） | error: state_replay / state_console_mismatch |
+| 2.9 | 別ブラウザ / 別 redirect への state 流用拒否 | Auth Service, State Cookie, Auth Repository, OIDC Verifier | **AC 2.9「別ブラウザセッション」カバー戦略の分解**: (a) MAC 付き cookie の **物理保護**（HttpOnly + Secure + SameSite=Lax + `__Host-` prefix で sub-domain 跨ぎ禁止 / cookie 自体が「発行されたブラウザ・オリジン以外には到達しない」ことをブラウザ機構で強制 / TTL 10 分）— **これが「別ブラウザセッションでの初回提示」を阻害する一次防御**（cookie が物理的に別ブラウザに渡らないため、攻撃者が valid cookie を別ブラウザに持ち込めない / SameSite=Lax + `__Host-` で sub-domain や iframe 経由の自動転送も不可能）、(b) cookie 値と query state の constant-time 一致（cookie だけ・query だけの片側偽造を拒否）、(c) **`StatePayload.Console == handler の expected console` を Service 層で明示照合**（tenant login で発行した state を admin callback に提示する cross-console state 混同を `state_console_mismatch` で拒否）、(d) **OIDC nonce binding**（`StatePayload.OIDCNonce` を `oauth2.SetAuthURLParam("nonce", ...)` で IdP に送信し、ID トークン `nonce` クレームを `Claims.Nonce` として取り出して `subtle.ConstantTimeCompare` で照合 / 不一致は `nonce_mismatch` 401 / 横取りした code を別ブラウザ・別セッションで提示する authorization code injection を OIDC Core 1.0 §3.1.2.7 準拠で物理的に拒否）、(e) **server-side `state_nonces` テーブルでの一度限り消費**（`Repository.ConsumeStateNonce(ctx, nonce, console, expiresAt)` が PostgreSQL の PRIMARY KEY UNIQUE 制約違反を `failure_kind: state_replay` にマッピング / **「同一ブラウザ内で cookie 値 + query state を組ごとコピーして再提示する 2 回目以降」を物理的に拒否する追加防御**。初回提示 1 回は (a)〜(d) で阻害される一方、攻撃者が事前に cookie + state の組を盗み取って当該ブラウザに戻したケースの 2 回目以降を弾く）/ 詳細は後述「state_nonces テーブル」節および「Data Models」節を参照 | error: state_replay / state_console_mismatch / nonce_mismatch |
 | 3.1 | OIDC 成功でセッション識別子を発行・cookie 返却 | Session Manager, Auth Handler | `auth/session.go` の `New` + `Set-Cookie` | callback flow |
 | 3.2 | session cookie HttpOnly | Session Cookie | `session.go` の `CookieAttributes` | NFR 1.1 と連動 |
 | 3.3 | session cookie Secure | Session Cookie | 同上 | NFR 1.1 と連動 |
@@ -417,6 +425,8 @@ type Claims struct {
     Groups         []string // groups クレーム（OIDC IdP の役割マッピング元）
     Issuer         string   // iss
     MatchedConsole Console  // aud から判別した console 種別（必ず 1 つ）
+    Nonce          string   // OIDC `nonce` クレーム（authorization code injection 防止用 /
+                            // Service 側で StatePayload.OIDCNonce と constant-time 比較する）
 }
 
 // Verifier は OIDC ID トークン検証の単一エントリポイント。
@@ -426,7 +436,11 @@ type Verifier interface {
     // Cause チェーンに含める）。raw JWT は戻り値・error にも含めない。
     VerifyIDToken(ctx context.Context, rawIDToken string) (Claims, error)
     // TenantEndpoint / AdminEndpoint は cmd/api bootstrap が oauth2.Config を組み立てる
-    // ために利用する。Provider.Endpoint() からそのまま返す。
+    // ために利用する。`Provider.Endpoint()` を取得した後、戻り値の `AuthStyle` フィールドを
+    // **`oauth2.AuthStyleInHeader` に明示上書き** してから返す（`golang.org/x/oauth2` の
+    // default は `AuthStyleAutoDetect` で初回 token endpoint reject を見て
+    // `client_secret_post` へフォールバックする非決定的挙動を取るため、Basic 固定を契約として
+    // 強制する。設計の Technology Stack 表および確認事項 6 と整合）。
     TenantEndpoint() oauth2.Endpoint
     AdminEndpoint() oauth2.Endpoint
 }
@@ -501,7 +515,12 @@ type Session struct {
 
 ```go
 type StatePayload struct {
-    Nonce    string  // 16 byte base64url
+    Nonce    string  // OAuth `state` クエリ用 16 byte base64url（CSRF 防止 / cookie 内値と
+                    // query state の constant-time 比較に使用）
+    OIDCNonce string // OIDC `nonce` 用 16 byte base64url（authorization code injection 防止 /
+                    // 認可リクエストの `nonce` パラメータと ID トークン `nonce` クレームの
+                    // constant-time 一致確認に使用 / RFC 6749 OAuth `state` と OIDC Core 1.0
+                    // §3.1.2.1 `nonce` は別パラメータでなくてはならない）
     Console  oidc.Console
     ReturnTo string  // SPA が指定した戻り先 URL の生値（同一オリジン内の相対パスのみ許容 /
                     // BeginLogin で validate 済み。MAC 保護下なので tamper されない前提）
@@ -695,6 +714,13 @@ type Service interface {
     Logout(ctx context.Context, rawSessionToken string) error
 }
 
+// TokenGenerator は opaque session token の生成を抽象化する DI 境界。default は
+// `session.New`（`crypto/rand.Read` 32 byte → base64url）。Service テストで CSPRNG 失敗
+// シナリオ（Req 3.5 / NFR 3.1 の fail-closed）を観測するために fake 実装を差し込むことを
+// 想定する。本型は Service 構築時に必須引数として渡し、`cmd/api/main.go` bootstrap は
+// `session.New` を直接渡す。
+type TokenGenerator func() (rawToken string, err error)
+
 func NewService(
     cfg config.Config,
     verifier oidc.Verifier,
@@ -702,8 +728,15 @@ func NewService(
     // tenant / admin で別 client_id / client_secret / redirect_uri / endpoints。
     // `client_secret_basic` 認証で token endpoint を叩く前提（cfg.OIDCTenantClientSecret /
     // cfg.OIDCAdminClientSecret を ClientSecret に設定）。
+    // **Scopes には `oidc.ScopeOpenID`（= "openid"）を必ず含める**（`openid` scope が無いと
+    // IdP は authorization code フローで id_token を発行せず、token.Extra("id_token") が
+    // 空文字に化けて Req 1.x が成立しない / cmd/api bootstrap で
+    // `Scopes: []string{oidc.ScopeOpenID, "email", "profile"}` を設定する責務）。
     oauth2Configs map[oidc.Console]*oauth2.Config,
     clock Clock,
+    // tokenGen は session.New 相当の opaque token 生成器。テストで CSPRNG 失敗 fake を
+    // 注入できるように DI 引数として明示する（NFR 3.1 fail-closed の単体検証経路）。
+    tokenGen TokenGenerator,
     log logger.Logger,
 ) Service
 ```
@@ -934,7 +967,8 @@ sequenceDiagram
     Note over R: PRIMARY KEY UNIQUE 違反 → state_replay (Req 2.9 一度限り消費)
     S->>S: oauth2.Exchange(ctx, code) → token
     S->>V: VerifyIDToken(ctx, token.IDToken)
-    V-->>S: Claims{Subject, MatchedConsole, ...}
+    V-->>S: Claims{Subject, MatchedConsole, Nonce, ...}
+    S->>S: subtle.ConstantTimeCompare(Claims.Nonce, payload.OIDCNonce) → 不一致なら nonce_mismatch (Req 2.9 authorization code injection 防止)
     S->>R: ResolveAdminUser(ctx, issuer, sub, email, ConsoleTenant)
     R-->>S: Identity (未 provisioning なら 403 admin_user_not_provisioned)
     S->>S: rawToken, err := session.New() (err != nil → csprng_failure 500)
@@ -1062,6 +1096,27 @@ A2 既存の allowlist（`session_secret` / `id_token` / `access_token` / `refre
   redaction allowlist の二次防御（task 1.4 で追加する `state_mac_secret` /
   `session_cookie` / `state_cookie` / `client_secret`）が、誤って生値を field 化した場合の
   保険として働く
+- **機密値を Cause メッセージ本文に埋め込まない実装契約**（NFR 1.1 / NFR 4.2）: A2 の
+  `internal/logger` の redaction は **field 名**（zap field key 名のサブストリング一致）で
+  値を `***` に置換する設計のため、`fmt.Errorf("oauth exchange failed: client_secret=%s ...",
+  cfg.OIDCTenantClientSecret)` のような `Cause` 文字列・`*errors.Error.Message` 内に **生の
+  機密値を文字列補間する経路は redaction を bypass する**。`auth.Service` / `oidc.Verifier` /
+  `auth.Handler` / `auth.Middleware` は以下を実装契約として守ること:
+  1. **`Cause` / `*errors.Error.Message` には機密値（`cfg.StateMACSecret` /
+     `cfg.OIDCTenantClientSecret` / `cfg.OIDCAdminClientSecret` / state cookie 生値 /
+     session cookie 生値 / id_token raw JWT）を文字列補間しない**。具体的なエラー内容は
+     呼び出し元ライブラリ（go-oidc / pgx / oauth2）の error をそのまま wrap するに留め、
+     独自に追加するコンテキストは hash / prefix / failure_kind / console 種別 等の
+     非機密 field のみとする
+  2. **構造化ログの field 値に機密値を渡さない**（redaction は二次防御。一次防御は
+     呼び出し側で `session.HashPrefix(hash)` / `failure_kind` / console 種別等の
+     非機密代替値のみを field 化する責務）
+  3. **panic recover 経路でも同様**（`recover()` で復旧した値を `fmt.Sprintf("%v", r)`
+     等でログ出力する際、機密 struct 全体を `%+v` で出さない / `runtime.Stack` を含める
+     場合も機密フィールドが文字列化されないよう注意）
+  本契約は実装段階で各失敗パスの error wrap 文言を code review で確認することにより担保する
+  （A2 既存 `internal/errors/errors.go` の `Error.Error()` も Cause を chain して文字列化する
+  ため、wrapped error の文言制御は呼び出し側の責務になる）
 
 ### Error Categories and Responses
 
@@ -1093,6 +1148,7 @@ A2 既存の allowlist（`session_secret` / `id_token` / `access_token` / `refre
 | `state_mismatch` | query state と cookie state 不一致（Req 2.7） | 401 |
 | `state_replay` | `state_nonces` テーブルへの INSERT が PRIMARY KEY UNIQUE 制約違反（= nonce が既に消費済み）。同一 cookie + query state の組を再提示した場合および別ブラウザ / 別 redirect への流用を含む全 replay ケースを物理的に拒否（Req 2.9） | 401 |
 | `state_console_mismatch` | `StatePayload.Console` が callback の console（URL パス由来）と不一致（Req 2.9 / 6.2 の cross-console state 混同 reject） | 401 |
+| `nonce_mismatch` | ID トークンの `nonce` クレームが `StatePayload.OIDCNonce` と不一致（authorization code injection 防止 / RFC OIDC Core 1.0 §3.1.2.7） | 401 |
 | `session_expired` | absolute 超過（Req 4.5） | 401 |
 | `session_idle` | idle 超過（Req 4.4） | 401 |
 | `session_revoked` | revoked_at != nil（Req 5.3） | 401 |
@@ -1152,7 +1208,7 @@ A2 既存の allowlist（`session_secret` / `id_token` / `access_token` / `refre
 |---|---|---|---|
 | aud 検証 | 本実装側で「tenant / admin のいずれか 1 つに排他一致」を検証 | `coreos/go-oidc` の `Config.ClientID` に一方を設定して自動検証に委ねる | 後者では aud 配列の曖昧ケース（Req 1.5）を検出できず、2 client 検証のため `Verifier` を 2 インスタンス持つ必要が出る。本実装側で判定すれば 1 インスタンスで両 aud を扱える |
 | state MAC | HMAC-SHA256 + cookie に payload + MAC を載せる stateless 方式 | サーバ側に state テーブルを持つ stateful 方式 | stateless は DB write を削減でき、cookie expiry で自動 GC される。MAC 鍵管理コストはあるが MVP では許容。stateful は scale-out 時の整合性が課題 |
-| **state replay 防止**（Req 2.9） | **server-side `state_nonces` テーブルで 1 度限り消費**（PRIMARY KEY UNIQUE 制約違反を `state_replay` にマッピング）+ cookie 物理保護（`__Host-` prefix + HttpOnly + Secure + SameSite=Lax + TTL 10 分）+ MAC + nonce の constant-time 比較 | (a) cookie 物理保護 + MAC のみで stateless 化 / (b) ブラウザセッション ID と payload の bind | (a) は「同一ブラウザ内で cookie 値 + query state を組ごとコピー / 再提示」を検出不能で AC 2.9 を満たさない。(b) は SPA 側追加実装が必要で MVP では負担が大きい。stateful nonce 消費は PostgreSQL の標準的な UNIQUE 制約で実装でき、DB write は callback あたり 1 行追加に留まる（cleanup は後続 sweeper task）。AC 2.9 を物理的に満たしつつ運用シンプル性も維持できる |
+| **state replay 防止**（Req 2.9） | **多層防御**: (a) cookie 物理保護（`__Host-` prefix + HttpOnly + Secure + SameSite=Lax + TTL 10 分）が「**別ブラウザセッション**へ cookie が渡ること自体」を機構的に阻害 → 別ブラウザで cookie+state を**初回提示**するシナリオを物理的に発生させない、(b) MAC + nonce の constant-time 比較で片側偽造を拒否、(c) OIDC nonce binding（`StatePayload.OIDCNonce` + id_token `nonce` クレーム照合）で横取り code の別ブラウザ提示を拒否、(d) **server-side `state_nonces` テーブルで 1 度限り消費**（PRIMARY KEY UNIQUE 制約違反 → `state_replay`）で**同一ブラウザ内 2 回目以降**の再提示を拒否 | (i) cookie 物理保護 + MAC のみで stateless 化 / (ii) ブラウザセッション ID と payload の bind | (i) は「同一ブラウザ内で cookie 値 + query state を組ごとコピー / 再提示」を検出不能で AC 2.9 を満たさない。(ii) は SPA 側追加実装が必要で MVP では負担が大きい。stateful nonce 消費は PostgreSQL の標準的な UNIQUE 制約で実装でき、DB write は callback あたり 1 行追加に留まる（cleanup は後続 sweeper task）。**(a)〜(d) の組合せで AC 2.9 の「別ブラウザセッション」「別 IdP リダイレクト」両ケースを物理的に拒否しつつ運用シンプル性も維持できる**（state_nonces 単体では「2 回目以降」しか弾けないが、cookie 物理保護と nonce binding が「初回提示」を別経路で阻害する組合せ） |
 | 鍵ローテーション | 即時切替（旧鍵並行検証なし） | 旧鍵を一定期間並行検証 | MVP では運用シンプル性を優先。進行中ログインは再ログインで救済できる（確認事項 2 で PM 確認） |
 | session 比較 | hash を PK にして DB lookup で実質 constant time | アプリ側で `subtle.ConstantTimeCompare` | DB PK lookup は B-tree index で O(log n) かつ ID 領域に対する 1:1 写像のため side-channel リスクが低い |
 | session lookup の RLS context | SuperAdmin context（`app.is_superadmin=true`）で lookup | sessions に `tenant_id` を denormalize | 後者は umbrella の Logical Data Model 変更を伴う。A2 の subselect ポリシーを前提に SuperAdmin context で lookup する方が変更面が小さい |
@@ -1190,13 +1246,21 @@ A2 既存の allowlist（`session_secret` / `id_token` / `access_token` / `refre
    設定切替のみで完結する）。Keycloak（dev IdP）/ 想定本番 IdP は両方式に対応するため MVP では
    `client_secret_basic` 固定で十分。public client（PKCE のみ）への切替が必要になった場合は
    別 Issue で対応する
-7. **state replay 防止の方式（resolved in round 3 review）**: round 2 までは state cookie + MAC +
+7. **state replay 防止の方式（resolved through rounds 3 / 5）**: round 2 までは state cookie + MAC +
    `__Host-` prefix + nonce constant-time 比較 + TTL 10 分の **stateless 設計**で Req 2.9 を
    カバーする方針だったが、reviewer 指摘により「同一ブラウザ内で cookie 値 + query state を
    組ごとコピー / 再提示」ケースで AC 2.9 を満たさないことが判明した。round 3 で **server-side
    `state_nonces` テーブルでの一度限り消費**（PRIMARY KEY UNIQUE 制約違反を `state_replay` に
-   マッピング）を採用することで Req 2.9 を物理的に充足。cleanup は後続 sweeper task（本 Issue
-   範囲外）が `expires_at` 経過行を削除する。本決定で当該確認事項は **resolved**
+   マッピング）を採用することで「2 回目以降の再提示」を物理的に拒否する経路を追加。さらに
+   round 5 で「**初回提示の別ブラウザセッション / 別 IdP リダイレクト**」シナリオは (a) cookie 物理保護
+   （`__Host-` prefix + HttpOnly + Secure + SameSite=Lax）が cookie 自体を別ブラウザに到達させない
+   こと、(b) OIDC nonce binding（`StatePayload.OIDCNonce` を `oauth2.SetAuthURLParam("nonce", ...)`
+   経由で IdP に送り、id_token `nonce` クレームを `Claims.Nonce` として取り出して
+   `subtle.ConstantTimeCompare` で照合 / OIDC Core 1.0 §3.1.2.7）で別ブラウザでの code 提示を
+   拒否することの双方で阻害される、と明示。state_nonces 単体は「2 回目以降」しか弾けないが、
+   cookie 物理保護 + nonce binding が「初回提示」を別経路で阻害する組合せで AC 2.9 の両ケースを
+   満たす。cleanup は後続 sweeper task（本 Issue 範囲外）が `expires_at` 経過行を削除する。
+   本決定で当該確認事項は **resolved**
 8. **admin_users / admin_role_assignments の事前 provisioning**: 本設計では Repository の
    `ResolveAdminUser` が **read-modify-write のみ**を行い、新規 OIDC subject の自動 INSERT
    は行わない方針を採用（`admin_user_not_provisioned` 403）。admin_users.id / tenant_id /
