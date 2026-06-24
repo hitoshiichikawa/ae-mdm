@@ -86,7 +86,7 @@ A2（Issue #2）で以下が完成済み（本 Issue の前提）:
   Error code 定数は本 package 内に置く
 - umbrella design.md の `## Data Models` に列挙された `sessions` テーブルのカラム構成
   （`token_hash`, `admin_user_id`, `issued_at`, `idle_at`, `expires_at`）を維持する
-  （本 Issue では `last_seen_at` `revoked_at` `aud` 等の追加カラムが必要なため migration 追加）
+  （本 Issue では `last_seen_at`（`idle_at` を rename）/ `revoked_at` / `console` の 3 カラム変更が必要なため migration 追加）
 
 **解消する technical debt**:
 - A2 が default deny で待機している `TenantContextMiddleware` の入力経路に、本 Issue で実
@@ -192,7 +192,7 @@ ctx に注入する。
 | Data / Storage | PostgreSQL 16 + 既存 `sessions` テーブル + 本 Issue で追加カラム | session 永続化 | RLS（`tenant_isolation_sessions`）は A2 で配置済み |
 | Messaging / Events | （該当なし） | — | — |
 | Infrastructure / Runtime | Docker Compose（A2 で確立）、Keycloak（dev IdP） | OIDC discovery / JWKS | `infra/keycloak/realm-export.json` への 2 client 定義は umbrella task 1.2 で完了済み前提 |
-| Authentication | OIDC IdP（Keycloak / 本番ジェネリック OIDC）、authorization code flow（PKCE は SPA 側で実施 / backend は code → token 交換と ID トークン検証のみ） | — | `aud` 検証で tenant-console / admin-console を判別 |
+| Authentication | OIDC IdP（Keycloak / 本番ジェネリック OIDC）、**BFF confidential authorization code flow**（backend = confidential client。`/api/auth/login`・`/api/auth/callback` を backend が直接ハンドル。code → token 交換は `oauth2.Config.Exchange` の default 動作 `client_secret_basic` で行い、`OIDC_TENANT_CLIENT_SECRET` / `OIDC_ADMIN_CLIENT_SECRET` を env から注入する。PKCE は本 Issue では使用しない / SPA は backend にリダイレクトするだけ） | — | `aud` 検証で tenant-console / admin-console を判別 |
 
 ## File Structure Plan
 
@@ -264,11 +264,13 @@ docs/specs/33--a3a-oidc-verifier-session/impl-notes.md  # 本 Issue 新規追加
   `apiRouter.Use(authMW)` を `TenantContextMiddleware` より前段に挿入。auth エンドポイント群
   `/api/auth/login` / `/api/auth/callback` / `/api/auth/logout` は **TenantContextMiddleware の
   外側**（認証が未確立の段階で到達するため）に新規 router group として登録
-- `backend/internal/config/config.go` + `env.go` — `SessionIdleTimeout time.Duration`（default
-  30m）/ `SessionAbsoluteTimeout time.Duration`（default 8h）/ `StateCookieTTL time.Duration`
-  （default 10m）/ `StateMACSecret string`（required, len >= 32）/ `OIDCTenantClientSecret string`
-  （required, OIDC token endpoint で `client_secret_basic` 認証する confidential client 用）/
-  `OIDCAdminClientSecret string`（同上）を追加。`duration` パーサは `env.go` の既存パターンに揃える
+- `backend/internal/config/config.go` + `env.go` — 以下を追加（すべて env 経由読込）。`duration` パーサは `env.go` の既存パターンに揃える:
+  - `SessionIdleTimeout time.Duration`（env: `SESSION_IDLE_TIMEOUT`, default `30m`）
+  - `SessionAbsoluteTimeout time.Duration`（env: `SESSION_ABSOLUTE_TIMEOUT`, default `8h`）
+  - `StateCookieTTL time.Duration`（env: `STATE_COOKIE_TTL`, default `10m`）
+  - `StateMACSecret string`（env: `STATE_MAC_SECRET`, required, len >= 32 bytes）
+  - `OIDCTenantClientSecret string`（env: `OIDC_TENANT_CLIENT_SECRET`, required, confidential client / `client_secret_basic` 認証用）
+  - `OIDCAdminClientSecret string`（env: `OIDC_ADMIN_CLIENT_SECRET`, required, 同上）
 - `backend/internal/logger/redact.go` — 既存 redaction allowlist に 4 件追加
   （`state_mac_secret` / `client_secret` / `state_cookie` / `session_cookie`）。A2 既存の
   allowlist（`session_secret` / `id_token` / `access_token` / `refresh_token` / `cookie` /
@@ -306,7 +308,7 @@ docs/specs/33--a3a-oidc-verifier-session/impl-notes.md  # 本 Issue 新規追加
 | 2.6 | state cookie 不在 / 期限切れ / MAC 失敗で失敗 | Auth Service | `Verify` 戻り値 → `errors.CodeUnauthenticated` | error: state_invalid |
 | 2.7 | クエリ state と cookie state 不一致で失敗 | Auth Service | `Verify` 内 `subtle.ConstantTimeCompare` | error: state_mismatch |
 | 2.8 | state cookie を callback で即時無効化 | Auth Service, Handler | `Set-Cookie: max-age=0` で削除 | callback flow |
-| 2.9 | 別ブラウザ / 別 redirect への state 流用拒否 | Auth Service, State Cookie | `nonce` の 1 ペア性 + MAC + cookie 属性（HttpOnly/Secure/SameSite=Lax）+ TTL 10 分。stateless 設計の限界はリスク・トレードオフ表「state replay 防止の限界」節を参照 | error: state_replay |
+| 2.9 | 別ブラウザ / 別 redirect への state 流用拒否 | Auth Service, State Cookie | MAC 付き cookie の物理保護（HttpOnly/Secure/SameSite=Lax + `__Host-` prefix で sub-domain 跨ぎ禁止）+ TTL 10 分 + cookie 値と query state の constant-time 一致。**stateless 設計のため「同一ブラウザ内で cookie 値と query state の組ごとコピーされた場合」の検出はできない**点はリスク・トレードオフ表「state replay 防止の stateless 限界」節および「確認事項 7」を参照 | error: state_replay |
 | 3.1 | OIDC 成功でセッション識別子を発行・cookie 返却 | Session Manager, Auth Handler | `auth/session.go` の `New` + `Set-Cookie` | callback flow |
 | 3.2 | session cookie HttpOnly | Session Cookie | `session.go` の `CookieAttributes` | NFR 1.1 と連動 |
 | 3.3 | session cookie Secure | Session Cookie | 同上 | NFR 1.1 と連動 |
@@ -355,11 +357,14 @@ docs/specs/33--a3a-oidc-verifier-session/impl-notes.md  # 本 Issue 新規追加
 **Responsibilities & Constraints**
 - 主責務: `coreos/go-oidc/v3` の `oidc.Provider` + `oidc.RemoteKeySet` を 2 つ（tenant / admin）
   保持し、`VerifyIDToken(ctx, rawIDToken)` で署名・iss・exp を検証。aud は本パッケージ側で
-  独自に検証する。`coreos/go-oidc/v3` の `oidc.Config` では `SkipClientIDCheck = true` を設定
-  して **aud 自動検証を無効化**し（`ClientID` 空 + `SkipClientIDCheck` 欠落だと `Verifier` が
-  `invalid configuration` で初期化失敗するため、両方を明示する必要がある）、本実装側で
-  「tenant-console と admin-console のいずれか 1 つに排他一致」を強制する（Req 1.4 / 1.5）。
-  一致した console 種別を `Claims.MatchedConsole` に返す
+  独自に検証する。`coreos/go-oidc/v3` の go-oidc 内蔵 aud 検証は `oidc.Config{ClientID: "",
+  SkipClientIDCheck: true}` を `provider.Verifier(cfg)` に渡して **明示的に無効化**する
+  （go-oidc v3 では `ClientID == "" && !SkipClientIDCheck` の組み合わせを `invalid configuration`
+  として reject するため、`ClientID` 空のままにする場合は **`SkipClientIDCheck = true` を必ず
+  併設**する必要がある）。go-oidc 内蔵検証を切ったうえで、本実装側が「ID トークンの `aud`
+  クレーム値の集合と、本 Issue で許容する 2 値 `{tenant-console, admin-console}` のうち
+  **正確に 1 つ**が一致する」ことを強制する（Req 1.4 / 1.5）。一致した console 種別を
+  `Claims.MatchedConsole` に返す
 - ドメイン境界: `platform/oidc` 内に閉じる。auth domain からのみ呼ばれる
 - データ所有権: JWKS のメモリキャッシュ（`coreos/go-oidc` の `RemoteKeySet` が TTL 内で
   自動更新 / kid mismatch 時に refresh）
@@ -545,10 +550,12 @@ func HashPrefix(hash string) string
 **Responsibilities & Constraints**
 - 主責務: `Create(ctx, session) error` / `Get(ctx, tokenHash) (Session, Identity, error)` /
   `Touch(ctx, tokenHash, now) error` / `Revoke(ctx, tokenHash, now) error` /
-  `UpsertAdminUser(ctx, sub, email, console) (Identity, error)`
+  **`ResolveAdminUser(ctx, sub, email, console) (Identity, error)`**（事前 provisioning 必須。
+  名前は read-modify-write の意図を反映して `Resolve` とした。本 Issue では新規 admin_users
+  の自動 INSERT は **行わない**）
 - ドメイン境界: `auth` package 内のみ呼び出し可。外部 domain からは Service 経由
-- データ所有権: `sessions`, `admin_users`, `admin_role_assignments`（後者は本 Issue で
-  read-only。書込みは admin-seed CLI / 後続 Issue）
+- データ所有権: `sessions`, `admin_users`, `admin_role_assignments`（後 2 者は本 Issue で
+  **read-only**。書込みは admin-seed CLI / 後続 Issue）
 - Invariants:
   - **すべての CRUD は `BeginTxFunc` 経由**で `SuperAdmin context`（`TenantContext{IsSuperAdmin:
     true}`）下で実行する。A2 design.md「sessions の認証 lookup 経路」散文と整合
@@ -556,10 +563,16 @@ func HashPrefix(hash string) string
   - `Revoke` は `revoked_at = now` をセットし、既に revoked の行への 2 度目の Revoke は no-op
     （冪等性）
   - 生 token はカラムに記録せず、`token_hash` のみ保存（Req 3.6 / 3.7 / NFR 1.2）
+  - **`ResolveAdminUser`** は `admin_users` を `oidc_subject` で SELECT し、`email` のみ
+    `UPDATE` する read-modify-write を行う。0 行（未 provisioning）の場合は
+    `*errors.Error{Code: CodeForbidden, failure_kind: admin_user_not_provisioned}` を返す
+    （Service が 403 にマッピング）。`admin_role_assignments` を join して `Identity.Roles`
+    と `IsSuperAdmin` を構築する。**新規 INSERT は行わない**（admin_users.id / tenant_id /
+    role assignment の根拠は admin-seed CLI が事前配置する責務 / 後続 Issue で UI 化）
 
 ```go
 type Repository interface {
-    UpsertAdminUser(ctx context.Context, sub, email string, console oidc.Console) (Identity, error)
+    ResolveAdminUser(ctx context.Context, sub, email string, console oidc.Console) (Identity, error)
     Create(ctx context.Context, s Session) error
     Get(ctx context.Context, tokenHash string) (Session, Identity, error) // 0 行は errors.CodeUnauthenticated
     Touch(ctx context.Context, tokenHash string, now time.Time) error
@@ -584,7 +597,9 @@ func NewRepository(pool *pgxpool.Pool) Repository
     認可エンドポイント URL 組み立て
   - `HandleCallback(ctx, console, code, queryState, rawStateCookie) (sessionToken, sessionCookie, returnTo, error)` —
     state 検証（成功時に `StatePayload.ReturnTo` を取り出す）→ code → token 交換 → ID トークン
-    検証 → admin_user lookup → session create。`returnTo` は Handler が `Location` ヘッダで使用
+    検証 → `ResolveAdminUser`（未 provisioning は 403）→ session create（`IssuedAt = now` /
+    `LastSeenAt = now` / `ExpiresAt = now + cfg.SessionAbsoluteTimeout`）。`returnTo` は Handler が
+    `Location` ヘッダで使用
   - `LookupAndRefresh(ctx, rawSessionToken, expectedConsole, now) (Identity, Session, error)` —
     cookie 提示時の検証 + `Session.Console` と `expectedConsole` の一致確認 + absolute /
     revoked / idle 判定（この順）+ last_seen_at 更新
@@ -713,23 +728,25 @@ func NewMiddleware(svc Service, expectedConsole oidc.Console, log logger.Logger,
 ### Domain Model
 
 - **Identity Aggregate**: `admin_users` + `admin_role_assignments`（A2 で作成済み）— OIDC
-  subject → 内部 admin_user_id のマッピング、ロール割当。本 Issue では UpsertAdminUser の
-  read-modify-write のみ。`admin_role_assignments` は本 Issue では read-only（書込みは
-  admin-seed CLI / 後続 Issue）
-- **Session Aggregate**: `sessions`（A2 で作成済み、本 Issue で列追加）— token_hash を root と
-  し、idle_at / expires_at / revoked_at / aud（console 種別）の状態を持つ。状態遷移は Auth
-  Service と Auth Middleware のみが行う
+  subject → 内部 admin_user_id のマッピング、ロール割当。本 Issue では `ResolveAdminUser` の
+  read-modify-write のみ（事前 provisioning 必須 / 0 行は 403 `admin_user_not_provisioned`）。
+  `admin_users.id` / `tenant_id` / `admin_role_assignments` の生成は admin-seed CLI / 後続
+  Issue が担当（本 Issue では read-only）
+- **Session Aggregate**: `sessions`（A2 で作成済み、本 Issue で列追加 / rename）— `token_hash`
+  を root とし、`last_seen_at` / `expires_at` / `revoked_at` / `console` の状態を持つ。状態
+  遷移は Auth Service と Auth Middleware のみが行う
 
 ### Logical Data Model
 
-A2 で確立した `sessions` テーブルを本 Issue で以下のカラム追加 + 制約調整:
+A2 で確立した `sessions` テーブルを本 Issue で以下のカラム追加 + rename + 制約調整。
+**本表は migration 完了後の最終状態を示す**（`idle_at` は drop されて存在しない）:
 
 | Column | Type | Purpose | Notes |
 |---|---|---|---|
 | `token_hash` | text PRIMARY KEY | SHA-256(opaque ID) hex | A2 既存 |
 | `admin_user_id` | uuid NOT NULL | admin_users への FK | A2 既存 |
 | `issued_at` | timestamptz NOT NULL DEFAULT now() | 発行時刻 | A2 既存 |
-| `idle_at` | timestamptz NOT NULL | A2 で「最終操作時刻」として既存。本 Issue で `last_seen_at` に rename | A2 → 本 Issue で改名 |
+| `last_seen_at` | timestamptz NOT NULL | 最終操作時刻（idle 判定の基準） | **本 Issue で `idle_at` から rename** |
 | `expires_at` | timestamptz NOT NULL | absolute 有効期限 | A2 既存 |
 | `revoked_at` | timestamptz NULL | logout / 失効検出時にセット | **本 Issue 追加** |
 | `console` | text NOT NULL CHECK(console IN ('tenant-console','admin-console')) | session が紐付くコンソール種別 | **本 Issue 追加 / Req 3.9 / 6.3** |
@@ -752,13 +769,19 @@ down は対称の DROP / ADD で `idle_at` を復元。
 
 ### State Diagram（Session ライフサイクル）
 
+**失効判定順序の宣言**: `LookupAndRefresh` および `Auth Middleware` は、Session を取得した
+時点で **必ず `absolute → revoked → idle` の順**でチェックする（同一順序を Service /
+Middleware / tasks.md / 状態遷移図のすべてで宣言）。理由は (a) `absolute` 超過が最強拘束で
+Req 4.5 が最優先、(b) 明示的な `Logout` 由来の `revoked` を `idle` 由来より優先的に
+ログ記録するため。
+
 ```mermaid
 stateDiagram-v2
     [*] --> Active: HandleCallback (Create)
     Active --> Active: LookupAndRefresh (Touch last_seen_at)
-    Active --> Revoked: Logout (Req 5.1)
-    Active --> Expired: now > expires_at (Req 4.5)
-    Active --> Idle: now - last_seen_at > idle_timeout (Req 4.4)
+    Active --> Expired: 1st check / now > expires_at (Req 4.5 absolute)
+    Active --> Revoked: 2nd check / revoked_at != nil (Req 5.1 logout)
+    Active --> Idle: 3rd check / now - last_seen_at > idle_timeout (Req 4.4 idle)
     Idle --> Revoked: Middleware Revoke (Req 4.6)
     Expired --> Revoked: Middleware Revoke (Req 4.6)
     Revoked --> [*]
@@ -798,8 +821,8 @@ sequenceDiagram
     S->>S: oauth2.Exchange(ctx, code) → token
     S->>V: VerifyIDToken(ctx, token.IDToken)
     V-->>S: Claims{Subject, MatchedConsole, ...}
-    S->>R: UpsertAdminUser(ctx, sub, email, ConsoleTenant)
-    R-->>S: Identity
+    S->>R: ResolveAdminUser(ctx, sub, email, ConsoleTenant)
+    R-->>S: Identity (未 provisioning なら 403 admin_user_not_provisioned)
     S->>S: session.New() + session.HashToken()
     S->>R: Create(ctx, Session{tokenHash, adminUserID, issuedAt=now, lastSeenAt=now, expiresAt=now+cfg.SessionAbsoluteTimeout, console, revokedAt=nil})
     S-->>H: (rawSessionToken, sessionCookie, returnTo=StatePayload.ReturnTo)
@@ -871,8 +894,13 @@ sequenceDiagram
 - 鍵: `cfg.StateMACSecret`（env `STATE_MAC_SECRET`、required, len >= 32 bytes）
 - 鍵ローテーション: 本 Issue では **即時切替** を採用（旧鍵での並行検証なし）。進行中ログインは
   state 検証失敗で再ログイン誘導される（確認事項 2 の MVP 方針）
-- ペイロード: nonce(16B) + console + redirectKey(32B hex) + issuedAt(unix sec)
-- フォーマット: `base64url(payload) + "." + base64url(MAC)`
+- ペイロード: `StatePayload{Nonce(16B base64url) + Console + ReturnTo(string, BeginLogin で
+  validate 済みの同一オリジン内相対パス) + IssuedAt(unix sec)}`
+- フォーマット: `base64url(json(payload)) + "." + base64url(HMAC-SHA256(secret, base64url(json(payload))))`
+- callback 時の検証: cookie 値を `.` で 2 分割 → payload 部の base64url を decode → `HMAC-SHA256`
+  を再計算して MAC 部と `subtle.ConstantTimeCompare` → query state と payload 内 Nonce を
+  constant-time 比較 → `IssuedAt` からの経過が `cfg.StateCookieTTL` 以内であることを確認 →
+  payload を JSON decode して `ReturnTo` を Service の戻り値として返す
 
 ### JWKS キャッシュ
 - `coreos/go-oidc/v3` の `oidc.RemoteKeySet` を利用。同パッケージは kid mismatch を検出すると
@@ -911,6 +939,14 @@ A2 既存の allowlist（`session_secret` / `id_token` / `access_token` / `refre
 - 起動失敗は **`*errors.Error{Code: CodeUnavailable}`** で `cmd/api` を exit 1
 - OIDC token endpoint upstream エラーは **`*errors.Error{Code: CodeUpstream}`** で 502
 - すべての 4xx / 5xx は `errors.WriteHTTP` 経由で構造化 JSON 応答
+- **`failure_kind` ログ field 出力の実装責務**: NFR 4.1（失敗種別を構造化ログで識別可能に）
+  は単に `failure_kind` を `Cause` チェーンに乗せるだけでは満たされない。`auth.Service` /
+  `oidc.Verifier` / `auth.Middleware` / `auth.Handler` の **各失敗パスが** `logger.Warn` ／
+  `logger.Error` の構造化 field として **明示的に** `failure_kind` を出力する必要がある
+  （実装手順は tasks.md task 2.1 / 5.1 / 5.2 / 6.1 の詳細項目で個別に求める）。logger
+  redaction allowlist の二次防御（task 1.4 で追加する `state_mac_secret` /
+  `session_cookie` / `state_cookie` / `client_secret`）が、誤って生値を field 化した場合の
+  保険として働く
 
 ### Error Categories and Responses
 
@@ -938,7 +974,7 @@ A2 既存の allowlist（`session_secret` / `id_token` / `access_token` / `refre
 | `state_invalid` | State Cookie MAC 失敗 / cookie 不在（Req 2.6） | 401 |
 | `state_expired` | State Cookie TTL 超過（Req 2.6） | 401 |
 | `state_mismatch` | query state と cookie state 不一致（Req 2.7） | 401 |
-| `state_replay` | nonce / redirectKey 不一致（Req 2.9） | 401 |
+| `state_replay` | cookie 値の payload 内 Nonce と query `state` の不一致（Req 2.9。**ただし「同一ブラウザで cookie + query state を組ごと提示」のケースは検出不能 / stateless 設計の限界**） | 401 |
 | `session_expired` | absolute 超過（Req 4.5） | 401 |
 | `session_idle` | idle 超過（Req 4.4） | 401 |
 | `session_revoked` | revoked_at != nil（Req 5.3） | 401 |
@@ -981,7 +1017,7 @@ A2 既存の allowlist（`session_secret` / `id_token` / `access_token` / `refre
 3. `auth_logout_revoke_test.go` — `/api/auth/logout` 後の同 cookie 提示が 401、改竄 cookie
    （hash が一致しない値）でも 401（Req 5.1 / 5.3 / 5.4）
 4. RLS 経路: テナント A 文脈で B の sessions 行に到達不可（A2 で確認済みのため本 Issue では
-   再検証不要だが、`UpsertAdminUser` が SuperAdmin context で動作することは確認）
+   再検証不要だが、`ResolveAdminUser` が SuperAdmin context で動作することは確認）
 
 ### E2E/UI Tests
 - 本 Issue 範囲外（SPA は後続 Issue）。umbrella tasks 12.1 / 13.1 で実 Keycloak と統合した
@@ -996,6 +1032,7 @@ A2 既存の allowlist（`session_secret` / `id_token` / `access_token` / `refre
 |---|---|---|---|
 | aud 検証 | 本実装側で「tenant / admin のいずれか 1 つに排他一致」を検証 | `coreos/go-oidc` の `Config.ClientID` に一方を設定して自動検証に委ねる | 後者では aud 配列の曖昧ケース（Req 1.5）を検出できず、2 client 検証のため `Verifier` を 2 インスタンス持つ必要が出る。本実装側で判定すれば 1 インスタンスで両 aud を扱える |
 | state MAC | HMAC-SHA256 + cookie に payload + MAC を載せる stateless 方式 | サーバ側に state テーブルを持つ stateful 方式 | stateless は DB write を削減でき、cookie expiry で自動 GC される。MAC 鍵管理コストはあるが MVP では許容。stateful は scale-out 時の整合性が課題 |
+| **state replay 防止の stateless 限界**（Req 2.9） | cookie 物理保護（`__Host-` prefix + HttpOnly + Secure + SameSite=Lax + TTL 10 分）+ MAC + nonce の constant-time 比較 | サーバ側 `state_nonces` テーブルで 1 度限り消費 + ブラウザセッション ID と payload の bind | MVP では stateless の運用シンプル性を優先。**「同一ブラウザ内で cookie 値 + query state を組ごとコピー / 再提示」のケースは検出不能**だが、攻撃者が cookie 値を取得するには HttpOnly / Secure を回避する必要があり、SameSite=Lax で cross-site での自動付与も阻害される。リスク評価では `TTL 10 分 + __Host- prefix` で実害確率を許容範囲と判断。本制約は確認事項 7 で人間レビュアーに事前確認したい |
 | 鍵ローテーション | 即時切替（旧鍵並行検証なし） | 旧鍵を一定期間並行検証 | MVP では運用シンプル性を優先。進行中ログインは再ログインで救済できる（確認事項 2 で PM 確認） |
 | session 比較 | hash を PK にして DB lookup で実質 constant time | アプリ側で `subtle.ConstantTimeCompare` | DB PK lookup は B-tree index で O(log n) かつ ID 領域に対する 1:1 写像のため side-channel リスクが低い |
 | session lookup の RLS context | SuperAdmin context（`app.is_superadmin=true`）で lookup | sessions に `tenant_id` を denormalize | 後者は umbrella の Logical Data Model 変更を伴う。A2 の subselect ポリシーを前提に SuperAdmin context で lookup する方が変更面が小さい |
@@ -1030,6 +1067,18 @@ A2 既存の allowlist（`session_secret` / `id_token` / `access_token` / `refre
    wrapper を追加する想定（本 Issue では未実装）。Keycloak（dev IdP）/ 想定本番 IdP は両方式
    に対応するため MVP では `client_secret_basic` 固定で十分。public client（PKCE のみ）への
    切替が必要になった場合は別 Issue で対応する
+7. **state replay 防止の stateless 限界**: 本設計では state cookie + MAC + `__Host-` prefix +
+   nonce constant-time 比較 + TTL 10 分の組み合わせで Req 2.9 をカバーするが、サーバ側 nonce
+   消費（`state_nonces` テーブルで 1 度限り消費）/ ブラウザセッション ID へのバインドは
+   持たない。これにより「同一ブラウザ内で cookie 値 + query state を組ごとコピー / 再提示」
+   ケースは検出不能。MVP では cookie 物理保護（HttpOnly / Secure / SameSite=Lax / `__Host-`
+   prefix）と短 TTL（10 分）で実害確率を許容範囲と判断したが、stateful nonce 管理を導入する
+   かは PM / セキュリティレビュアーに確認したい
+8. **admin_users / admin_role_assignments の事前 provisioning**: 本設計では Repository の
+   `ResolveAdminUser` が **read-modify-write のみ**を行い、新規 OIDC subject の自動 INSERT
+   は行わない方針を採用（`admin_user_not_provisioned` 403）。admin_users.id / tenant_id /
+   role assignment の生成は本 Issue 範囲外で、admin-seed CLI が事前配置する責務とした。
+   MVP リリース時の運用フロー（誰がいつ admin-seed CLI を実行するか）を PM に確認したい
 
 ## Supporting References
 
