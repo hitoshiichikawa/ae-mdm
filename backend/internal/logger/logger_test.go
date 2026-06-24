@@ -139,6 +139,11 @@ func TestRedactFields_RedactsSecretsBySubstring(t *testing.T) {
 		{"private_key", true},
 		{"password", true},
 		{"X-User-Password", true}, // case-insensitive
+		// Task 1.4: auth 領域 4 件の独立 allowlist 追加（Req 1.11 / 3.6 / NFR 1.1 / NFR 4.2）
+		{"state_mac_secret", true},
+		{"client_secret", true},
+		{"state_cookie", true},
+		{"session_cookie", true},
 		{"tenant_id", false},
 		{"request_id", false},
 		{"latency_ms", false},
@@ -157,6 +162,68 @@ func TestRedactFields_RedactsSecretsBySubstring(t *testing.T) {
 				if val == redactedPlaceholder {
 					t.Fatalf("key %q should NOT be redacted, got %v", c.key, val)
 				}
+			}
+		})
+	}
+}
+
+// TestRedactFields_AuthAllowlistAdditions は task 1.4 で追加した 4 件の独立 allowlist
+// （`state_mac_secret` / `client_secret` / `state_cookie` / `session_cookie`）が任意の
+// field 名サブストリング一致（prefix / 中央埋込 / 完全一致）で redaction を発火することを
+// 確認する（Req 1.11 / 3.6 / NFR 1.1 / NFR 4.2）。
+//
+// 既存 `cookie` substring 由来で `session_cookie` / `state_cookie` も substring 一致でカバー
+// される（`TestRedactFields_RedactsSecretsBySubstring` の `set-cookie` ケースと同様）が、
+// 本 task は「追加 4 件の独立 allowlist 化」を契約として明示する責務であり、本テストは
+// その独立 allowlist が実際に独立して効くことを以下の観点で固定する:
+//
+//   - prefix を伴うキー（例: `X-State-MAC-Secret` / `OIDC_Client_Secret`）の redaction
+//   - 中央埋込キー（例: `oidc_client_secret_admin`）の redaction
+//   - cookie substring を含むキー（例: `session_cookie_raw`）と完全一致キー（`session_cookie`）
+//     の両方が redact されること（独立 allowlist と既存 `cookie` substring の重複カバレッジ）
+func TestRedactFields_AuthAllowlistAdditions(t *testing.T) {
+	cases := []struct {
+		name string
+		key  string
+	}{
+		// state_mac_secret: prefix 付き / case-insensitive / 中央埋込
+		// 注: substring 一致は underscore 区切りキー前提（既存 `set-cookie` 等のハイフン
+		// 区切りは `cookie` のような単一 word allowlist でのみ機能する）。auth 領域の
+		// 構造化ログ field 名は snake_case で field 化される前提のため、本テストも
+		// snake_case の prefix / 中央埋込で独立 allowlist の発火を確認する。
+		{"state_mac_secret 完全一致", "state_mac_secret"},
+		{"app_state_mac_secret prefix", "app_state_mac_secret"},
+		{"state_mac_secret_value suffix", "state_mac_secret_value"},
+		{"app_state_mac_secret_value 中央埋込", "app_state_mac_secret_value"},
+		{"State_MAC_Secret case-insensitive", "State_MAC_Secret"},
+		// client_secret: prefix 付き / 中央埋込 / case-insensitive
+		{"client_secret 完全一致", "client_secret"},
+		{"oidc_client_secret prefix", "oidc_client_secret"},
+		{"oidc_client_secret_admin 中央埋込", "oidc_client_secret_admin"},
+		{"oidc_client_secret_tenant 中央埋込（tenant 側も同様）", "oidc_client_secret_tenant"},
+		{"OIDC_Client_Secret case-insensitive", "OIDC_Client_Secret"},
+		// state_cookie: 独立 allowlist として効く（cookie substring 由来でも redact されるが、
+		// state_cookie 完全一致経路が独立 allowlist で発火することを明示）
+		{"state_cookie 完全一致", "state_cookie"},
+		{"auth_state_cookie prefix", "auth_state_cookie"},
+		// session_cookie: 同上
+		{"session_cookie 完全一致", "session_cookie"},
+		{"auth_session_cookie prefix", "auth_session_cookie"},
+		// cookie substring を含むキー（既存 `cookie` allowlist でも redact されるが、
+		// session_cookie 由来の独立 allowlist でも redact されることを示す）
+		{"session_cookie_raw cookie 重複カバレッジ", "session_cookie_raw"},
+	}
+	for _, c := range cases {
+		c := c
+		t.Run(c.name, func(t *testing.T) {
+			// Arrange
+			in := []any{c.key, "secret-value-xxx"}
+			// Act
+			out := redactFields(in)
+			// Assert
+			val := out[1]
+			if val != redactedPlaceholder {
+				t.Fatalf("key %q should be redacted, got %v", c.key, val)
 			}
 		})
 	}
