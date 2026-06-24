@@ -96,7 +96,7 @@
     全フローが成立しない
   - _Requirements: 6.1, 6.2, 6.4, NFR 1.1, NFR 2.1, NFR 2.2_
   - _Boundary: Config_
-- [ ] 1.2 sessions / admin_users テーブル拡張マイグレーション (P)
+- [x] 1.2 sessions / admin_users テーブル拡張マイグレーション (P)
   - `backend/db/migrations/0013_extend_sessions.up.sql` を新規追加。`ALTER TABLE sessions ADD
     COLUMN last_seen_at timestamptz NOT NULL DEFAULT now()` → `UPDATE sessions SET last_seen_at
     = idle_at` → `ALTER TABLE sessions DROP COLUMN idle_at` → `ALTER TABLE sessions ADD
