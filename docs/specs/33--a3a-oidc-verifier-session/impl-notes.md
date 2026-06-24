@@ -193,6 +193,24 @@ learning を `### Task <id>` 単位で追記する。`docs/specs/33--a3a-oidc-ve
     防御を守りつつ、誤って `session_cookie` field 名で生値を渡してしまった場合の二次
     防御として本 allowlist が効く（NFR 1.1 / NFR 4.2 / Req 1.11 / Req 3.6）。
 
+### Task 2
+
+- **採用方針**: タスク `2` は umbrella header（`_Requirements:_` / `_Boundary:_` を持たない親 task）
+  であり、本起動では直接の実装は無く、子 task 2.1（OIDC Verifier 本体 + 単体テスト）が後続
+  iteration で実装される前提として `### Task 2` learning スロットのみ整備する。
+- **重要な判断**:
+  - 親 task は `tasks.md` 上で `### Task 2` の learning スロットを成立させるためのプレースホルダ
+    に留め、`backend/internal/platform/oidc/` 配下のコード追加・テスト追加は本 iteration では
+    行わない（実装本体は 2.1 の fresh iteration が担当する設計 / `### Task 1` と同パターン）。
+  - per-task ループ規約「1 commit = 1 task ID」に従い、本 iteration の marker commit は
+    `docs(tasks): mark 2 as done` 単一の subject で `tasks.md` のみを含める。impl-notes.md への
+    `### Task 2` 追加は marker commit と分離した別 commit に積む。
+- **残存課題**: 子 task 2.1（`backend/internal/platform/oidc/verifier.go` + `verifier_test.go` /
+  `doc.go` の新規追加、`coreos/go-oidc/v3` を用いた JWKS キャッシュ + ID トークン検証実装、
+  tenant / admin の aud 排他一致 + nonce 取り出し + `oauth2.AuthStyleInHeader` 固定 +
+  機密値非埋込契約の遵守）は後続 fresh iteration で消化する。子 task 2.1 完了時の親 task `2` の
+  昇格は本 iteration で完了済みのため、auto-promotion 規約は no-op として扱う。
+
 ## 確認事項
 
 本セクションは `requirements.md` / `design.md` / `tasks.md` 本文の書き換えを伴わずに、実装フェーズ
