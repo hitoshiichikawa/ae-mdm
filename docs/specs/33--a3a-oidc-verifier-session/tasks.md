@@ -262,7 +262,7 @@
   - _Boundary: OIDCVerifier_
   - _Depends: 1.1_
 
-- [ ] 3. auth domain: 型 + state cookie + session cookie helpers
+- [x] 3. auth domain: 型 + state cookie + session cookie helpers
 - [ ] 3.1 auth.types + state cookie helper + 単体テスト (P)
   - `backend/internal/auth/types.go` を新規追加。`Identity`（AdminUserID / OIDCSubject /
     Email / TenantID / Roles / IsSuperAdmin）と `Session`（TokenHash / AdminUserID / Console /
