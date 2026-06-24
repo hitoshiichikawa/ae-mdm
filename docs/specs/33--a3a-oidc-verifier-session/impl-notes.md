@@ -316,6 +316,60 @@ learning を `### Task <id>` 単位で追記する。`docs/specs/33--a3a-oidc-ve
   全完了時の親 task `3` の昇格は本 iteration で完了済みのため、auto-promotion 規約は no-op
   として扱う。
 
+### Task 3.1
+
+- **採用方針**: `backend/internal/auth/{types.go, clock.go, state.go, doc.go, state_test.go}`
+  の 5 ファイルを新規追加。`Identity` / `Session` のドメイン型は design.md L460〜L490 の構造
+  そのままに `Console` のみ `internal/platform/oidc.Console` を再利用する形に整理し、`Clock`
+  interface + `SystemClock` で時刻 DI 境界を確立。state cookie の Sign / Verify は HMAC-SHA256
+  + base64url no-padding（`base64.RawURLEncoding`） + `subtle.ConstantTimeCompare` の 3 点で
+  CSRF / replay / 偽造を防御し、失敗種別を `state_invalid` / `state_expired` /
+  `state_mismatch` の 3 sentinel に分類した（Req 2.1〜2.9 / NFR 4.1）。
+- **重要な判断**:
+  - **`failureKind` sentinel を auth package に独立再定義した理由**: `internal/platform/oidc`
+    にも同名 type が存在するが、当該型は **unexported**（package private）であり外部から
+    `errors.Is` で参照できない。本 task 3.1 で auth domain の `state_invalid` / `state_expired` /
+    `state_mismatch` を分類するには、auth package で同一パターン（`type failureKind string` +
+    `Error() string` メソッド + 公開定数）を再定義する必要があった。oidc 側の `FailureKind*`
+    定数を import すると auth → oidc → 何らかの逆方向依存を作る誘惑が生じるため、両 package
+    で同型を独立に持つ方が依存方向ルール（doc.go 記載）を機械的に守れる。tasks.md L295 の
+    「auth package 用に独立に再定義する」指示と整合。
+  - **`state.ExpireCookieAttributes` の `MaxAge = -1` 選択理由**: Go の `http.Cookie` の
+    Set-Cookie 出力規約では `MaxAge < 0` のみが「削除 cookie」として扱われ、ヘッダに
+    `Max-Age=0` 属性 + 過去日付の `Expires` 属性を出力する。`MaxAge = 0` は Max-Age 属性
+    自体が省略されて session cookie 化（ブラウザを閉じるまで保持）するため、callback 完了時
+    の即時無効化（Req 2.8）が成立しない。design.md L542〜L548 / tasks.md L283〜L290 の指示
+    通り具体値 `-1` を採用し、テスト (h) で `MaxAge < 0` および `MaxAge == -1` の双方を
+    assert することで「`= 0` への退行」を回帰耐性で守る形にした。
+  - **Verify の検証順序**: 空文字 → フォーマット split → base64 decode → MAC 検証 → payload
+    unmarshal → TTL → queryState の順に並べ、**payload unmarshal を MAC 検証通過後**に行う
+    ことで「攻撃者が任意の JSON を unmarshal させる経路」を物理的に断った。TTL 境界は **`>`**
+    の strict 不等式とし、`now == IssuedAt + ttl` は受理する設計（テスト (c2) で boundary
+    挙動を回帰耐性で固定）。
+  - **機密値の非埋込契約**: error wrap の `Message` 引数には固定文字列（`"state cookie missing"`
+    等）のみを渡し、secret / cookie 生値 / queryState を `fmt.Sprintf` 経由で文字列補間しない。
+    `TestStateCookie_VerifyError_DoesNotEmbedSensitiveValues` と `_NoSensitiveLeak_AllFailureKinds`
+    で 4 失敗種別について `err.Error()` に当該値が含まれないことを assert し、NFR 1.1 / NFR 4.2
+    を回帰的に守る。
+  - **`payload.Nonce` の重複検証経路**: query state vs cookie 内 Nonce の不一致判定は
+    `subtle.ConstantTimeCompare` を使い、長さ差・内容差ともに副チャネル耐性を確保した。
+    平易な `!=` 比較だと早期 return のタイミング差から長さ漏洩が起こり得るため `crypto/subtle`
+    を採用した（NFR 4.x 系の標準的な安全実装）。
+- **残存課題**:
+  - 後続 task 3.2: `backend/internal/auth/session.go` で `New()` / `HashToken` /
+    `CookieAttributes(ttl)` / `ExpireCookieAttributes()` / `HashPrefix` を実装する。本 task で
+    確立した `failureKind` パターンと doc.go の依存方向ルールを継承し、`__Host-ae_mdm_session`
+    cookie 名 + `MaxAge = -1` 削除 helper を session 側でも同パターンで実装する。
+  - 後続 task 4.1: `Repository.Create` で `Session` struct を pgxpool で INSERT する経路、
+    `Repository.Get` で `Session` + `Identity` を join 取得する経路で本 task の型を利用する。
+    `Identity.TenantID == uuid.Nil` 表現も Repository 側で SuperAdmin context 解決時に
+    そのまま使う。
+  - 後続 task 5.1: `auth.Service.BeginLogin` / `HandleCallback` で本 task の `Sign` /
+    `Verify` / `CookieAttributes` / `ExpireCookieAttributes` および `StatePayload` の
+    `Nonce` / `OIDCNonce` 分離を活用する。`oauth2.AuthCodeURL(payload.Nonce, SetAuthURLParam("nonce",
+    payload.OIDCNonce))` の呼び出しで OAuth `state` と OIDC `nonce` を別パラメータとして
+    IdP に渡す前提（OIDC Core 1.0 §3.1.2.1）に本 task の型設計が直接対応している。
+
 ## 確認事項
 
 本セクションは `requirements.md` / `design.md` / `tasks.md` 本文の書き換えを伴わずに、実装フェーズ
