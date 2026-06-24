@@ -56,7 +56,8 @@ A2（Issue #2）で以下が完成済み（本 Issue の前提）:
 
 - `internal/config/config.go` — `OIDCTenantIssuerURL` / `OIDCTenantClientID` /
   `OIDCTenantRedirectURL` / `OIDCAdminIssuerURL` / `OIDCAdminClientID` /
-  `OIDCAdminRedirectURL` / `SessionSecret` を保持
+  `OIDCAdminRedirectURL` / `SessionSecret` を保持（本 Issue で `OIDCTenantClientSecret` /
+  `OIDCAdminClientSecret` を追加する。後述「File Structure Plan / Modified Files」参照）
 - `internal/errors/{errors,codes,http_mapping,worker_mapping}.go` — `Error{Code, Message,
   HTTPStatus, IsTransient, Cause}` 型と `WriteHTTP(w, r, err, log)` ヘルパ。
   `CodeUnauthenticated` / `CodeForbidden` / `CodeInvalidRequest` 等が定義済み
@@ -226,12 +227,12 @@ backend/
 │       └── doc.go                      # package godoc
 ├── db/
 │   └── migrations/                     # 本 Issue 新規追加
-│       ├── 0013_extend_sessions.up.sql   # sessions に last_seen_at / revoked_at / aud / console 列追加
+│       ├── 0013_extend_sessions.up.sql   # sessions の idle_at → last_seen_at 改名 + revoked_at / console 列追加
 │       └── 0013_extend_sessions.down.sql # 上記の rollback
 ├── internal/
 │   ├── config/                         # 本 Issue 修正
-│   │   ├── config.go                   # SessionIdleTimeout / SessionAbsoluteTimeout / StateCookieTTL / StateMACSecret フィールド追加
-│   │   └── env.go                      # 対応する duration パーサ呼び出し追加
+│   │   ├── config.go                   # SessionIdleTimeout / SessionAbsoluteTimeout / StateCookieTTL / StateMACSecret / OIDCTenantClientSecret / OIDCAdminClientSecret フィールド追加
+│   │   └── env.go                      # 対応する duration パーサ呼び出し + client secret の env 読込追加
 │   ├── logger/                         # 本 Issue 修正
 │   │   └── redact.go                   # redaction allowlist に state_mac_secret / client_secret / state_cookie / session_cookie の 4 件追加
 │   └── platform/
@@ -265,8 +266,9 @@ docs/specs/33--a3a-oidc-verifier-session/impl-notes.md  # 本 Issue 新規追加
   外側**（認証が未確立の段階で到達するため）に新規 router group として登録
 - `backend/internal/config/config.go` + `env.go` — `SessionIdleTimeout time.Duration`（default
   30m）/ `SessionAbsoluteTimeout time.Duration`（default 8h）/ `StateCookieTTL time.Duration`
-  （default 10m）/ `StateMACSecret string`（required, len >= 32）を追加。`duration` パーサは
-  `env.go` の既存パターンに揃える
+  （default 10m）/ `StateMACSecret string`（required, len >= 32）/ `OIDCTenantClientSecret string`
+  （required, OIDC token endpoint で `client_secret_basic` 認証する confidential client 用）/
+  `OIDCAdminClientSecret string`（同上）を追加。`duration` パーサは `env.go` の既存パターンに揃える
 - `backend/internal/logger/redact.go` — 既存 redaction allowlist に 4 件追加
   （`state_mac_secret` / `client_secret` / `state_cookie` / `session_cookie`）。A2 既存の
   allowlist（`session_secret` / `id_token` / `access_token` / `refresh_token` / `cookie` /
@@ -275,8 +277,9 @@ docs/specs/33--a3a-oidc-verifier-session/impl-notes.md  # 本 Issue 新規追加
   失敗で exit 1 / NFR 3.2）→ Auth Repository / Auth Service / Auth Handler / Auth Middleware を
   組み立て → `httpserver.NewServer` に注入
 - `.env.example` — `SESSION_IDLE_TIMEOUT=30m` / `SESSION_ABSOLUTE_TIMEOUT=8h` /
-  `STATE_COOKIE_TTL=10m` / `STATE_MAC_SECRET=<REPLACE_ME_GENERATE_32_BYTES_OF_RANDOM_HEX>` を
-  追加
+  `STATE_COOKIE_TTL=10m` / `STATE_MAC_SECRET=<REPLACE_ME_GENERATE_32_BYTES_OF_RANDOM_HEX>` /
+  `OIDC_TENANT_CLIENT_SECRET=<REPLACE_ME_FROM_KEYCLOAK_CLIENT>` /
+  `OIDC_ADMIN_CLIENT_SECRET=<REPLACE_ME_FROM_KEYCLOAK_CLIENT>` を追加
 - `docs/runbook/local-dev.md` — 「OIDC 認証フロー検証手順」節を追加（Keycloak realm 設定の
   前提、`STATE_MAC_SECRET` の生成手順）
 
@@ -286,7 +289,7 @@ docs/specs/33--a3a-oidc-verifier-session/impl-notes.md  # 本 Issue 新規追加
 |---|---|---|---|---|
 | 1.1 | JWKS 公開鍵で署名検証 | OIDC Verifier | `platform/oidc/verifier.go` の `VerifyIDToken` | callback flow |
 | 1.2 | iss を信頼発行者と完全一致 | OIDC Verifier | `verifier.go` の `expectedIssuer` 比較 | callback flow |
-| 1.3 | aud が tenant-console / admin-console を識別 | OIDC Verifier | `Claims.AudienceMatched Console` | callback flow |
+| 1.3 | aud が tenant-console / admin-console を識別 | OIDC Verifier | `Claims.MatchedConsole` | callback flow |
 | 1.4 | aud 不一致は拒否 | OIDC Verifier | `verifier.go` の aud 検証ロジック | error: invalid_aud |
 | 1.5 | aud 配列で両方含む場合は曖昧として拒否 | OIDC Verifier | `verifier.go` の aud uniqueness check | error: aud_ambiguous |
 | 1.6 | exp ≤ now で拒否 | OIDC Verifier | `coreos/go-oidc` の exp 自動検証 + 明示再確認 | error: token_expired |
@@ -303,7 +306,7 @@ docs/specs/33--a3a-oidc-verifier-session/impl-notes.md  # 本 Issue 新規追加
 | 2.6 | state cookie 不在 / 期限切れ / MAC 失敗で失敗 | Auth Service | `Verify` 戻り値 → `errors.CodeUnauthenticated` | error: state_invalid |
 | 2.7 | クエリ state と cookie state 不一致で失敗 | Auth Service | `Verify` 内 `subtle.ConstantTimeCompare` | error: state_mismatch |
 | 2.8 | state cookie を callback で即時無効化 | Auth Service, Handler | `Set-Cookie: max-age=0` で削除 | callback flow |
-| 2.9 | 別ブラウザ / 別 redirect への state 流用拒否 | Auth Service, State Cookie | `nonce` の 1 ペア性 + MAC | error: state_replay |
+| 2.9 | 別ブラウザ / 別 redirect への state 流用拒否 | Auth Service, State Cookie | `nonce` の 1 ペア性 + MAC + cookie 属性（HttpOnly/Secure/SameSite=Lax）+ TTL 10 分。stateless 設計の限界はリスク・トレードオフ表「state replay 防止の限界」節を参照 | error: state_replay |
 | 3.1 | OIDC 成功でセッション識別子を発行・cookie 返却 | Session Manager, Auth Handler | `auth/session.go` の `New` + `Set-Cookie` | callback flow |
 | 3.2 | session cookie HttpOnly | Session Cookie | `session.go` の `CookieAttributes` | NFR 1.1 と連動 |
 | 3.3 | session cookie Secure | Session Cookie | 同上 | NFR 1.1 と連動 |
@@ -352,9 +355,11 @@ docs/specs/33--a3a-oidc-verifier-session/impl-notes.md  # 本 Issue 新規追加
 **Responsibilities & Constraints**
 - 主責務: `coreos/go-oidc/v3` の `oidc.Provider` + `oidc.RemoteKeySet` を 2 つ（tenant / admin）
   保持し、`VerifyIDToken(ctx, rawIDToken)` で署名・iss・exp を検証。aud は本パッケージ側で
-  独自に検証し（`coreos/go-oidc` の `Config.ClientID` を空に設定して aud 自動検証を **無効化**
-  → 本実装側で「tenant-console と admin-console のいずれか 1 つに排他一致」を強制 / Req 1.4 /
-  1.5）、一致した console 種別を `Claims.MatchedConsole` に返す
+  独自に検証する。`coreos/go-oidc/v3` の `oidc.Config` では `SkipClientIDCheck = true` を設定
+  して **aud 自動検証を無効化**し（`ClientID` 空 + `SkipClientIDCheck` 欠落だと `Verifier` が
+  `invalid configuration` で初期化失敗するため、両方を明示する必要がある）、本実装側で
+  「tenant-console と admin-console のいずれか 1 つに排他一致」を強制する（Req 1.4 / 1.5）。
+  一致した console 種別を `Claims.MatchedConsole` に返す
 - ドメイン境界: `platform/oidc` 内に閉じる。auth domain からのみ呼ばれる
 - データ所有権: JWKS のメモリキャッシュ（`coreos/go-oidc` の `RemoteKeySet` が TTL 内で
   自動更新 / kid mismatch 時に refresh）
@@ -458,10 +463,12 @@ type Session struct {
 | Requirements | 2.1, 2.2, 2.3, 2.4, 2.5, 2.6, 2.7, 2.8, 2.9, NFR 1.1 |
 
 **Responsibilities & Constraints**
-- 主責務: 128 bit nonce + console 種別 + redirect_uri ハッシュ + 発行時刻を payload とし、
-  `HMAC-SHA256(cfg.StateMACSecret, payload)` を付与した文字列を cookie 値として発行。callback
-  時に再計算した MAC と一致 + 発行時刻からの経過が `cfg.StateCookieTTL` 以内 + クエリ state と
-  cookie state が constant-time 一致することを検証
+- 主責務: 128 bit nonce + console 種別 + return_to URL（callback 後の遷移先 / 同一オリジン内
+  の相対パスのみ許容）+ 発行時刻を payload とし、`HMAC-SHA256(cfg.StateMACSecret, payload)` を
+  付与した文字列を cookie 値として発行。callback 時に再計算した MAC と一致 + 発行時刻からの
+  経過が `cfg.StateCookieTTL` 以内 + クエリ state と cookie state が constant-time 一致する
+  ことを検証し、検証成功時は payload を復号して `ReturnTo` を Service / Handler に返す
+  （Handler はこれを `Location` ヘッダの遷移先として使用）
 - ドメイン境界: `auth` package 内 helper。外部から見える IF は `Sign(payload) string` /
   `Verify(rawCookie string, queryState string, now time.Time) (StatePayload, error)`
 - データ所有権: なし（stateless）
@@ -472,10 +479,11 @@ type Session struct {
 
 ```go
 type StatePayload struct {
-    Nonce       string  // 16 byte base64url
-    Console     oidc.Console
-    RedirectKey string  // SPA が指定した戻り先 URL の SHA-256 hex（外部からの開リダイレクト防止）
-    IssuedAt    time.Time
+    Nonce    string  // 16 byte base64url
+    Console  oidc.Console
+    ReturnTo string  // SPA が指定した戻り先 URL の生値（同一オリジン内の相対パスのみ許容 /
+                    // BeginLogin で validate 済み。MAC 保護下なので tamper されない前提）
+    IssuedAt time.Time
 }
 
 // Sign は payload を MAC 付き cookie 値文字列に変換する。
@@ -574,10 +582,12 @@ func NewRepository(pool *pgxpool.Pool) Repository
 - 主責務:
   - `BeginLogin(ctx, console, returnTo) (redirectURL, stateCookie, error)` — state 生成 + IdP
     認可エンドポイント URL 組み立て
-  - `HandleCallback(ctx, console, code, queryState, rawStateCookie) (sessionToken, error)` —
-    state 検証 → code → token 交換 → ID トークン検証 → admin_user upsert → session create
-  - `LookupAndRefresh(ctx, rawSessionToken, now) (Identity, Session, error)` — cookie 提示時の
-    検証 + idle / absolute 判定 + last_seen_at 更新
+  - `HandleCallback(ctx, console, code, queryState, rawStateCookie) (sessionToken, sessionCookie, returnTo, error)` —
+    state 検証（成功時に `StatePayload.ReturnTo` を取り出す）→ code → token 交換 → ID トークン
+    検証 → admin_user lookup → session create。`returnTo` は Handler が `Location` ヘッダで使用
+  - `LookupAndRefresh(ctx, rawSessionToken, expectedConsole, now) (Identity, Session, error)` —
+    cookie 提示時の検証 + `Session.Console` と `expectedConsole` の一致確認 + absolute /
+    revoked / idle 判定（この順）+ last_seen_at 更新
   - `Logout(ctx, rawSessionToken) error` — Revoke 発行
 - ドメイン境界: `auth` package 内。`oidc.Verifier` / `Repository` / `clock` を DI
 - データ所有権: なし
@@ -590,8 +600,8 @@ func NewRepository(pool *pgxpool.Pool) Repository
 ```go
 type Service interface {
     BeginLogin(ctx context.Context, console oidc.Console, returnTo string) (redirectURL string, stateCookie http.Cookie, err error)
-    HandleCallback(ctx context.Context, console oidc.Console, code, queryState, rawStateCookie string) (sessionToken string, sessionCookie http.Cookie, err error)
-    LookupAndRefresh(ctx context.Context, rawSessionToken string, now time.Time) (Identity, Session, error)
+    HandleCallback(ctx context.Context, console oidc.Console, code, queryState, rawStateCookie string) (sessionToken string, sessionCookie http.Cookie, returnTo string, err error)
+    LookupAndRefresh(ctx context.Context, rawSessionToken string, expectedConsole oidc.Console, now time.Time) (Identity, Session, error)
     Logout(ctx context.Context, rawSessionToken string) error
 }
 
@@ -599,7 +609,10 @@ func NewService(
     cfg config.Config,
     verifier oidc.Verifier,
     repo Repository,
-    oauth2Configs map[oidc.Console]*oauth2.Config, // tenant / admin で別 client_id / redirect_uri / endpoints
+    // tenant / admin で別 client_id / client_secret / redirect_uri / endpoints。
+    // `client_secret_basic` 認証で token endpoint を叩く前提（cfg.OIDCTenantClientSecret /
+    // cfg.OIDCAdminClientSecret を ClientSecret に設定）。
+    oauth2Configs map[oidc.Console]*oauth2.Config,
     clock Clock,
     log logger.Logger,
 ) Service
@@ -637,26 +650,36 @@ func NewService(
 
 **Boundary**: AuthHandler（handler.go）
 
-#### Auth Middleware（session lookup + idle refresh + authClaims 注入）
+#### Auth Middleware（session lookup + console 照合 + idle refresh + authClaims 注入）
 
 | Field | Detail |
 |---|---|
-| Intent | 認証済みリクエストで session cookie を lookup し、idle / absolute を判定。OK なら `AuthClaims` を ctx に注入して A2 の `TenantContextMiddleware` に橋渡し |
-| Requirements | 3.7, 4.3, 4.4, 4.5, 4.6, 4.7, 5.3, 5.4, NFR 3.1, NFR 4.1 |
+| Intent | 認証済みリクエストで session cookie を lookup し、`Session.Console` と当該 middleware が紐付くルートグループ（tenant 系 / admin 系）の一致を検証し、idle / absolute を判定。OK なら `AuthClaims` を ctx に注入して A2 の `TenantContextMiddleware` に橋渡し |
+| Requirements | 3.7, 3.9, 4.3, 4.4, 4.5, 4.6, 4.7, 5.3, 5.4, 6.2, 6.3, NFR 3.1, NFR 4.1 |
 
 **Responsibilities & Constraints**
-- 主責務: cookie → hash → `Repository.Get` → idle / absolute / revoked 判定 → 失効なら 401 +
+- 主責務: cookie → hash → `Repository.Get` → **`Session.Console` と middleware の expected
+  console（tenant or admin）の一致確認**（不一致なら `failure_kind=console_mismatch` で 401 /
+  Req 6 の「対応ルート群でのみ受理」の強制）→ idle / absolute / revoked 判定 → 失効なら 401 +
   cookie 削除、有効なら `Touch` + `AuthClaims` 注入
-- ドメイン境界: `auth` package 内。`httpserver.NewServer` から DI で受け取られる
+- ドメイン境界: `auth` package 内。`httpserver.NewServer` から DI で受け取られる。tenant 系 /
+  admin 系で **別インスタンス**を構築し、`/api` サブルータには tenant middleware を、`/api/admin`
+  サブルータには admin middleware を挿入する（cookie 名は `__Host-ae_mdm_session` 共通で、
+  console 照合は middleware が担う）
 - データ所有権: なし
 - Invariants:
   - 例外時（DB エラー等）は fail-closed で 401（NFR 3.1）。Cause は ERROR ログに記録
-  - 失効判定は **必ず最初に absolute → idle → revoked の順**でチェック（Req 4.5 が最強拘束）
+  - 失効判定は **必ず最初に absolute → revoked → idle の順**でチェック（Req 4.5 の absolute
+    超過が最強拘束。revoked を idle より先に判定するのは「明示的なログアウトを idle 失効より
+    優先記録する」ため。tasks.md 5.1 の HandleCallback / LookupAndRefresh と同一順序）
+  - **console 照合は失効判定より前段**に置く（漏洩した tenant session が `/api/admin` に提示
+    された場合、idle/absolute を経由せず即 401 + cookie 削除する経路を成立させる）
 
 ```go
-// Middleware は session cookie を lookup して AuthClaims を ctx に注入する chi middleware。
-// 戻り値は httpserver.NewServer に渡す。
-func NewMiddleware(svc Service, log logger.Logger, clock Clock) func(http.Handler) http.Handler
+// Middleware は session cookie を lookup し、Session.Console が expectedConsole と一致する
+// ことを検証してから AuthClaims を ctx に注入する chi middleware。tenant 系 / admin 系で
+// 別インスタンスを構築する。戻り値は httpserver.NewServer に渡す。
+func NewMiddleware(svc Service, expectedConsole oidc.Console, log logger.Logger, clock Clock) func(http.Handler) http.Handler
 ```
 
 **Boundary**: AuthMiddleware（middleware.go）
@@ -753,7 +776,7 @@ sequenceDiagram
     participant SC as auth.StateCookie
     B->>H: GET /api/auth/login?return_to=/dashboard
     H->>S: BeginLogin(ctx, ConsoleTenant, return_to)
-    S->>SC: Sign(StatePayload{nonce, console, returnKey, now})
+    S->>SC: Sign(StatePayload{nonce, console, returnTo, now})
     SC-->>S: cookieValue
     S-->>H: (redirectURL=IdP/authorize?..., stateCookie)
     H-->>B: 302 Found, Location: redirectURL, Set-Cookie: __Host-ae_mdm_state=...
@@ -778,8 +801,8 @@ sequenceDiagram
     S->>R: UpsertAdminUser(ctx, sub, email, ConsoleTenant)
     R-->>S: Identity
     S->>S: session.New() + session.HashToken()
-    S->>R: Create(ctx, Session{tokenHash, adminUserID, issuedAt, lastSeenAt, expiresAt, console})
-    S-->>H: (rawSessionToken, sessionCookie)
+    S->>R: Create(ctx, Session{tokenHash, adminUserID, issuedAt=now, lastSeenAt=now, expiresAt=now+cfg.SessionAbsoluteTimeout, console, revokedAt=nil})
+    S-->>H: (rawSessionToken, sessionCookie, returnTo=StatePayload.ReturnTo)
     H-->>B: 302 Found, Location: returnTo,<br/>Set-Cookie: __Host-ae_mdm_session=raw,<br/>Set-Cookie: __Host-ae_mdm_state=; Max-Age=0
 ```
 
@@ -794,11 +817,11 @@ sequenceDiagram
     participant TCMW as httpserver.TenantContextMiddleware
     participant H as domain handler (後続 Issue)
     B->>MW: GET /api/devices (with __Host-ae_mdm_session cookie)
-    MW->>S: LookupAndRefresh(ctx, rawToken, now)
+    MW->>S: LookupAndRefresh(ctx, rawToken, expectedConsole, now)
     S->>S: session.HashToken(raw)
     S->>R: Get(ctx, hash) [SuperAdmin context]
     R-->>S: Session, Identity
-    S->>S: now > expires_at? → Expired<br/>now - last_seen_at > idle? → Idle<br/>revoked_at != nil? → Revoked
+    S->>S: Session.Console != expectedConsole? → ConsoleMismatch<br/>now > expires_at? → Expired<br/>revoked_at != nil? → Revoked<br/>now - last_seen_at > idle? → Idle
     alt 失効
         S->>R: Revoke(ctx, hash, now)
         S-->>MW: *errors.Error{Code: CodeUnauthenticated, failure_kind: ...}
@@ -920,6 +943,8 @@ A2 既存の allowlist（`session_secret` / `id_token` / `access_token` / `refre
 | `session_idle` | idle 超過（Req 4.4） | 401 |
 | `session_revoked` | revoked_at != nil（Req 5.3） | 401 |
 | `session_tamper` | hash 不一致で 0 行（Req 5.4） | 401 |
+| `console_mismatch` | `Session.Console` が middleware の expectedConsole と不一致（Req 6.2 / 6.3） | 401 |
+| `admin_user_not_provisioned` | OIDC 認証成功後 admin_users 行が事前 provisioning されていない | 403 |
 | `upstream_oidc_token` | OIDC token endpoint 5xx | 502 |
 | `oidc_discovery` | 起動時 discovery 失敗（NFR 3.2） | exit 1 |
 
@@ -998,10 +1023,13 @@ A2 既存の allowlist（`session_secret` / `id_token` / `access_token` / `refre
 5. **logout エンドポイントの method**: 本設計では `POST /api/auth/logout`（CSRF 観点で GET より
    POST を推奨）。SPA 実装側で fetch POST + credentials: 'include' を呼ぶ前提だが、`GET
    /api/auth/logout`（fragment 越しのリンクで logout 可能にする）が必要かどうか確認したい
-6. **OIDC token endpoint の認証方式**: `client_secret_basic`（基本認証）と
-   `client_secret_post`（body の form param）の 2 方式があり、本設計では `coreos/go-oidc` 経由
-   `oauth2.Config.Exchange` の default（`client_secret_basic`）を採用。本番 IdP の対応方式に
-   合わせる必要があるため、`.env.example` に `OIDC_CLIENT_AUTH_METHOD` を追加するかは確認事項
+6. **OIDC token endpoint の認証方式**: 本設計では **confidential client + `client_secret_basic`**
+   を採用。`oauth2.Config.Exchange` の default 動作（`client_secret_basic`）に乗り、
+   `OIDC_TENANT_CLIENT_SECRET` / `OIDC_ADMIN_CLIENT_SECRET` を env 経由で注入する。本番 IdP が
+   `client_secret_post` のみ対応の場合、`oauth2.SetAuthURLParam` で auth style を上書きする
+   wrapper を追加する想定（本 Issue では未実装）。Keycloak（dev IdP）/ 想定本番 IdP は両方式
+   に対応するため MVP では `client_secret_basic` 固定で十分。public client（PKCE のみ）への
+   切替が必要になった場合は別 Issue で対応する
 
 ## Supporting References
 
