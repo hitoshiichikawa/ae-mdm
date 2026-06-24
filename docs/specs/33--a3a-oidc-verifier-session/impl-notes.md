@@ -292,6 +292,30 @@ learning を `### Task <id>` 単位で追記する。`docs/specs/33--a3a-oidc-ve
   ため対象外。tasks.md L774〜L802 の DB-backed verify 義務は後続 task 4.1 / 6.4 で
   integration test として実施される予定。
 
+### Task 3
+
+- **採用方針**: タスク `3` は umbrella header（`_Requirements:_` / `_Boundary:_` を持たない親 task）
+  であり、本起動では直接の実装は無く、子 task 3.1（auth.types + state cookie helper + 単体テスト）/
+  3.2（auth.session helper + 単体テスト）が後続 fresh iteration で順次実装される前提として
+  `## Implementation Notes` 構造のみ整備する（先行する `### Task 1` / `### Task 2` の umbrella
+  処理パターンを踏襲）。
+- **重要な判断**:
+  - 親 task は `tasks.md` 上で `### Task 3` の learning スロットを成立させるためのプレースホルダ
+    に留め、`backend/internal/auth/` 配下のコード追加（types.go / clock.go / state.go / session.go /
+    doc.go）・テスト追加（state_test.go / session_test.go）は本 iteration では行わない（実装本体は
+    3.1 / 3.2 の fresh iteration が担当する設計 / `### Task 1` / `### Task 2` と同パターン）。
+  - per-task ループ規約「1 commit = 1 task ID」に従い、本 iteration の marker commit は
+    `docs(tasks): mark 3 as done` 単一の subject で `tasks.md` のみを含める。impl-notes.md への
+    `### Task 3` 追加は marker commit と分離した別 commit に積む。
+- **残存課題**: 子 task 3.1（`backend/internal/auth/{types.go, clock.go, state.go, doc.go}` +
+  `state_test.go` の新規追加、`StatePayload` の `Nonce` / `OIDCNonce` 分離 + HMAC-SHA256 MAC +
+  `__Host-ae_mdm_state` cookie + `ExpireCookieAttributes()` 削除 helper の実装）/ 3.2
+  （`backend/internal/auth/session.go` + `session_test.go` の新規追加、`crypto/rand` 32 byte
+  base64url session token + SHA-256 hex hash + `__Host-ae_mdm_session` cookie + `MaxAge < 0`
+  削除 helper + `HashPrefix` 8 文字 helper の実装）は後続 fresh iteration で消化する。子 task
+  全完了時の親 task `3` の昇格は本 iteration で完了済みのため、auto-promotion 規約は no-op
+  として扱う。
+
 ## 確認事項
 
 本セクションは `requirements.md` / `design.md` / `tasks.md` 本文の書き換えを伴わずに、実装フェーズ
