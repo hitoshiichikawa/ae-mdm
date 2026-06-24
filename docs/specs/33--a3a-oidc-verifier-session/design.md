@@ -192,7 +192,7 @@ ctx に注入する。
 | Data / Storage | PostgreSQL 16 + 既存 `sessions` テーブル + 本 Issue で追加カラム | session 永続化 | RLS（`tenant_isolation_sessions`）は A2 で配置済み |
 | Messaging / Events | （該当なし） | — | — |
 | Infrastructure / Runtime | Docker Compose（A2 で確立）、Keycloak（dev IdP） | OIDC discovery / JWKS | `infra/keycloak/realm-export.json` への 2 client 定義は umbrella task 1.2 で完了済み前提 |
-| Authentication | OIDC IdP（Keycloak / 本番ジェネリック OIDC）、**BFF confidential authorization code flow**（backend = confidential client。`/api/auth/login`・`/api/auth/callback` を backend が直接ハンドル。code → token 交換は `oauth2.Config.Exchange` の default 動作 `client_secret_basic` で行い、`OIDC_TENANT_CLIENT_SECRET` / `OIDC_ADMIN_CLIENT_SECRET` を env から注入する。PKCE は本 Issue では使用しない / SPA は backend にリダイレクトするだけ） | — | `aud` 検証で tenant-console / admin-console を判別 |
+| Authentication | OIDC IdP（Keycloak / 本番ジェネリック OIDC）、**BFF confidential authorization code flow**（backend = confidential client。`/api/auth/login`・`/api/auth/callback` を backend が直接ハンドル。code → token 交換は `client_secret_basic` で行い、**`oauth2.Endpoint.AuthStyle = oauth2.AuthStyleInHeader` を明示設定**（`golang.org/x/oauth2` v0.x は `AuthStyle` 未指定時 `AuthStyleAutoDetect` でランタイム auto-detect する仕様だが、auto-detect は初回リクエストで IdP の reject を受けて `client_secret_post` へフォールバックする等の非決定的挙動を取るため、本 Issue では Basic 固定を契約として `AuthStyleInHeader` を明示する / 確認事項 6 参照）。`OIDC_TENANT_CLIENT_SECRET` / `OIDC_ADMIN_CLIENT_SECRET` を env から注入する。なお OIDC `nonce` パラメータを login flow に組み込み、ID トークンの `nonce` クレームと state cookie 内 `OIDCNonce` の一致を Service が検証することで authorization code injection（state 流用攻撃）を防ぐ（Req 2.9 / 後述「OIDC nonce binding」節）。PKCE は本 Issue では使用しない / SPA は backend にリダイレクトするだけ） | — | `aud` 検証で tenant-console / admin-console を判別 |
 
 ## File Structure Plan
 
@@ -280,13 +280,14 @@ docs/specs/33--a3a-oidc-verifier-session/impl-notes.md  # 本 Issue 新規追加
   `/api/auth/{login,callback,logout}` と `/api/admin/auth/{login,callback,logout}` は
   **TenantContextMiddleware の外側**（認証が未確立の段階で到達するため）に新規 router group
   として `authMount` で 2 回（tenant prefix / admin prefix）登録する
-- `backend/internal/config/config.go` + `env.go` — 以下を追加（すべて env 経由読込）。`duration` パーサは `env.go` の既存パターンに揃える:
-  - `SessionIdleTimeout time.Duration`（env: `SESSION_IDLE_TIMEOUT`, default `30m`）
-  - `SessionAbsoluteTimeout time.Duration`（env: `SESSION_ABSOLUTE_TIMEOUT`, default `8h`）
-  - `StateCookieTTL time.Duration`（env: `STATE_COOKIE_TTL`, default `10m`）
+- `backend/internal/config/config.go` + `env.go` — 以下を追加（すべて env 経由読込）。`duration` パーサは `env.go` の既存パターンに揃える。各 duration は **`1s <= ttl <= 24h`** の境界 validation を行い（Go の `http.Cookie.MaxAge = int(ttl/time.Second)` が `MaxAge == 0` で Max-Age 属性を Set-Cookie ヘッダから drop する境界を回避するため。`StateCookieTTL` は上限 10m に絞る）、不一致は起動時 `*errors.Error{Code: config_invalid}` で reject:
+  - `SessionIdleTimeout time.Duration`（env: `SESSION_IDLE_TIMEOUT`, default `30m`, validation `1s..24h`）
+  - `SessionAbsoluteTimeout time.Duration`（env: `SESSION_ABSOLUTE_TIMEOUT`, default `8h`, validation `1s..24h`）
+  - `StateCookieTTL time.Duration`（env: `STATE_COOKIE_TTL`, default `10m`, validation `1s..10m`）
   - `StateMACSecret string`（env: `STATE_MAC_SECRET`, required, len >= 32 bytes）
   - `OIDCTenantClientSecret string`（env: `OIDC_TENANT_CLIENT_SECRET`, required, confidential client / `client_secret_basic` 認証用）
   - `OIDCAdminClientSecret string`（env: `OIDC_ADMIN_CLIENT_SECRET`, required, 同上）
+  - **fail-fast cross-field validation**: `Load()` 最終段で (a) `SessionIdleTimeout <= SessionAbsoluteTimeout`、(b) `OIDCTenantClientID != OIDCAdminClientID`、(c) `OIDCTenantClientSecret != OIDCAdminClientSecret`、(d) `OIDCTenantRedirectURL != OIDCAdminRedirectURL` を検査。違反は `*errors.Error{Code: config_invalid}` で reject（Req 6.1 / 6.4 の aud 排他一致 / Req 6.2 の path-based 分離 / Req 4.4 / 4.5 の階層的失効判定の前提を起動時に強制）
 - `backend/internal/logger/redact.go` — 既存 redaction allowlist に 4 件追加
   （`state_mac_secret` / `client_secret` / `state_cookie` / `session_cookie`）。A2 既存の
   allowlist（`session_secret` / `id_token` / `access_token` / `refresh_token` / `cookie` /
@@ -346,10 +347,10 @@ docs/specs/33--a3a-oidc-verifier-session/impl-notes.md  # 本 Issue 新規追加
 | 5.2 | logout で cookie 削除レスポンス | Auth Handler | `Set-Cookie: max-age=0` | logout flow |
 | 5.3 | logout 後の同 cookie 提示は拒否 | Auth Middleware | `revoked_at IS NOT NULL` を失効判定 | request flow |
 | 5.4 | 改竄（hash 不一致）cookie は拒否 | Auth Middleware, Session Repository | `Get(token_hash)` が 0 行で 401 | request flow |
-| 6.1 | tenant / admin の 2 client を独立保持 | OIDC Verifier, Config | `oidc.Verifier` を 2 インスタンス（tenant 用 / admin 用） | configuration |
+| 6.1 | tenant / admin の 2 client を独立保持 | OIDC Verifier, Config | `oidc.Verifier` を 2 インスタンス（tenant 用 / admin 用）+ `Config.Load()` 最終段で `OIDCTenantClientID != OIDCAdminClientID` / `OIDCTenantClientSecret != OIDCAdminClientSecret` の fail-fast 検査 | configuration |
 | 6.2 | callback の URL パス / 設定値からクライアント確定 | Auth Service, Auth Handler | `/api/auth/callback` と `/api/admin/auth/callback` を **path-based に別ハンドラ登録**し、各ハンドラの closure で console を **固定**する（user-controlled な `console` query は読み取らない / 攻撃面を残さないため path のみを信頼 / `Handler.Mount(r, prefix, console)` 経由で各 console 種別を closure 内に注入する設計と整合） | callback flow |
 | 6.3 | session に console 種別を紐付 | Session Repository | `sessions.console` カラム | data model |
-| 6.4 | tenant / admin の信頼 aud を異なる値で設定可 | Config | `OIDCTenantClientID` / `OIDCAdminClientID` 既に独立 | configuration |
+| 6.4 | tenant / admin の信頼 aud を異なる値で設定可 | Config | `OIDCTenantClientID` / `OIDCAdminClientID` 既に独立 + `Config.Load()` 最終段で `OIDCTenantRedirectURL != OIDCAdminRedirectURL` も含めた 3 不一致検査（同値だと Req 6.2 の path-based 分離が無効化されるため） | configuration |
 | NFR 1.1 | ID token / cookie / MAC 鍵 / client secret を平文ログに残さない | Logger, OIDC Verifier, Auth Service | redaction allowlist に追加（`state_mac_secret` / `client_secret` を allowlist 化） | NFR 4.2 と連動 |
 | NFR 1.2 | session ID を SHA-256 ハッシュとして格納し提示値と比較 | Session Manager, Session Repository | `HashToken` + `Get(token_hash)` | data: sessions |
 | NFR 2.1 | idle / absolute / state TTL を env から変更可 | Config | `SessionIdleTimeout` / `SessionAbsoluteTimeout` / `StateCookieTTL` | configuration |
@@ -1098,6 +1099,7 @@ A2 既存の allowlist（`session_secret` / `id_token` / `access_token` / `refre
 | `session_tamper` | hash 不一致で 0 行（Req 5.4） | 401 |
 | `console_mismatch` | `Session.Console` が middleware の expectedConsole と不一致（Req 6.2 / 6.3） | 401 |
 | `admin_user_not_provisioned` | OIDC 認証成功後 admin_users 行が事前 provisioning されていない | 403 |
+| `invalid_request` | callback Handler 入口で `code` / `state` クエリのいずれかが空文字（Handler が Service 呼び出し前に 400 で reject / API Contract `/api/auth/callback` Errors 列および「Error Categories and Responses」400 行と整合） | 400 |
 | `csprng_failure` | `crypto/rand.Read` 失敗（session.New() の error）— OS の CSPRNG が利用不能な場合のみ発生 / fail-closed で 500（Req 3.5 / NFR 3.1） | 500 |
 | `upstream_oidc_token` | OIDC token endpoint 5xx | 502 |
 | `oidc_discovery` | 起動時 discovery 失敗（NFR 3.2） | exit 1 |
@@ -1179,12 +1181,15 @@ A2 既存の allowlist（`session_secret` / `id_token` / `access_token` / `refre
    POST を推奨）。SPA 実装側で fetch POST + credentials: 'include' を呼ぶ前提だが、`GET
    /api/auth/logout`（fragment 越しのリンクで logout 可能にする）が必要かどうか確認したい
 6. **OIDC token endpoint の認証方式**: 本設計では **confidential client + `client_secret_basic`**
-   を採用。`oauth2.Config.Exchange` の default 動作（`client_secret_basic`）に乗り、
-   `OIDC_TENANT_CLIENT_SECRET` / `OIDC_ADMIN_CLIENT_SECRET` を env 経由で注入する。本番 IdP が
-   `client_secret_post` のみ対応の場合、`oauth2.SetAuthURLParam` で auth style を上書きする
-   wrapper を追加する想定（本 Issue では未実装）。Keycloak（dev IdP）/ 想定本番 IdP は両方式
-   に対応するため MVP では `client_secret_basic` 固定で十分。public client（PKCE のみ）への
-   切替が必要になった場合は別 Issue で対応する
+   を採用し、`oauth2.Endpoint{AuthStyle: oauth2.AuthStyleInHeader}` を明示設定する
+   （`golang.org/x/oauth2` v0.x の default は `AuthStyleAutoDetect` で、初回 token endpoint
+   呼び出しの reject を見て `client_secret_post` へフォールバックする非決定的挙動を取るため、
+   挙動を契約として明示する）。`OIDC_TENANT_CLIENT_SECRET` / `OIDC_ADMIN_CLIENT_SECRET` を
+   env 経由で注入する。本番 IdP が `client_secret_post` のみ対応の場合は本 Issue で固定した
+   `AuthStyleInHeader` を別 Issue で `AuthStyleInParams` に切り替える（wrapper 追加ではなく
+   設定切替のみで完結する）。Keycloak（dev IdP）/ 想定本番 IdP は両方式に対応するため MVP では
+   `client_secret_basic` 固定で十分。public client（PKCE のみ）への切替が必要になった場合は
+   別 Issue で対応する
 7. **state replay 防止の方式（resolved in round 3 review）**: round 2 までは state cookie + MAC +
    `__Host-` prefix + nonce constant-time 比較 + TTL 10 分の **stateless 設計**で Req 2.9 を
    カバーする方針だったが、reviewer 指摘により「同一ブラウザ内で cookie 値 + query state を

@@ -13,16 +13,43 @@
 - [ ] 1. config / migration / 共通公開化（後段の前提整備）
 - [ ] 1.1 Config に session timeout / state / OIDC client secret を追加 (P)
   - `backend/internal/config/config.go` に以下を追加:
-    - `SessionIdleTimeout time.Duration`（env `SESSION_IDLE_TIMEOUT`, default `30m`）
-    - `SessionAbsoluteTimeout time.Duration`（env `SESSION_ABSOLUTE_TIMEOUT`, default `8h`）
+    - `SessionIdleTimeout time.Duration`（env `SESSION_IDLE_TIMEOUT`, default `30m`,
+      **validation: `1s <= ttl <= 24h`**。`auth.session.CookieAttributes(ttl)` および
+      `LookupAndRefresh` の idle 判定で同値を共有するため、StateCookieTTL と同根の境界問題
+      （Go の `http.Cookie.MaxAge == 0` で Max-Age 属性が Set-Cookie ヘッダから消える / `<= 0`
+      の duration を idle 判定に渡すと全 session が常時失効する）を防ぐ。`0` / 負の duration /
+      1 秒未満（例: `500ms`）/ 24 時間超のいずれかなら起動時 `*errors.Error{Code: config_invalid}`
+      で reject する。上限 `24h` は absolute timeout の運用最大値（後述 `SessionAbsoluteTimeout`
+      の上限と一致 / NFR 2.1 の env 可変性を維持しつつ、誤設定による無期限 idle / token 終身化を防ぐ
+      保守的な上限）
+    - `SessionAbsoluteTimeout time.Duration`（env `SESSION_ABSOLUTE_TIMEOUT`, default `8h`,
+      **validation: `1s <= ttl <= 24h`**。同じく `session.CookieAttributes(ttl)` の Max-Age
+      導出と `LookupAndRefresh` の absolute 判定で同値を共有するため、`0` / 負の duration /
+      1 秒未満 / 24 時間超のいずれかなら起動時 `*errors.Error{Code: config_invalid}` で reject する。
+      `SessionIdleTimeout` と `SessionAbsoluteTimeout` の関係性 validation: **`SessionIdleTimeout <=
+      SessionAbsoluteTimeout`** を満たさない場合も `config_invalid` で reject する（idle が
+      absolute を超える設定は Req 4.4 / 4.5 の階層的失効判定を破壊するため）
     - `StateCookieTTL time.Duration`（env `STATE_COOKIE_TTL`, default `10m`, **validation: `1s <= ttl <= 10m`**。Req 2.4「10 分以内に有効期限が切れる」を上限制約として満たすため、設定値が `0` / 負の duration / **1 秒未満（例: `500ms`）** / `10m` を超える値のいずれかなら起動時 `*errors.Error{Code: config_invalid}` で reject する。下限 1 秒は `CookieAttributes(ttl)` が `MaxAge = int(ttl / time.Second)` で導出するため、1 秒未満を許容すると Go の `http.Cookie.MaxAge == 0`（= Max-Age 属性を Set-Cookie ヘッダに **出力しない** / browser session cookie 化して TTL 制御が効かない）になり、Req 2.4 の「短寿命の有効期限」が成立しなくなる事を防ぐ）
     - `StateMACSecret string`（env `STATE_MAC_SECRET`, required, len >= 32 bytes）
     - `OIDCTenantClientSecret string`（env `OIDC_TENANT_CLIENT_SECRET`, required, confidential
       client + `client_secret_basic` 認証用 / design.md Req 6.2 と確認事項 6 で確定）
     - `OIDCAdminClientSecret string`（env `OIDC_ADMIN_CLIENT_SECRET`, required, 同上）
+  - **2 console の独立性 fail-fast validation**（Req 6.1 / 6.4 の物理分離強制）: A2 で既に
+    導入済みの `OIDCTenantClientID` / `OIDCAdminClientID` / `OIDCTenantRedirectURL` /
+    `OIDCAdminRedirectURL` について、起動時に以下を Config 確定直後に検査して不一致を強制する
+    （いずれか違反で `*errors.Error{Code: config_invalid}` で reject）:
+    - **`OIDCTenantClientID != OIDCAdminClientID`**（同値だと OIDC Verifier の aud 排他一致
+      検証が tenant / admin を区別できず、Req 1.4 / 1.5 / 6.1 が無効化される）
+    - **`OIDCTenantClientSecret != OIDCAdminClientSecret`**（同値だと一方の漏洩が他方の信頼を
+      自動的に毀損するため）
+    - **`OIDCTenantRedirectURL != OIDCAdminRedirectURL`**（同値だと callback path-based 分離
+      （Req 6.2 / `Handler.Mount` の closure 固定）が成立せず、`Auth Service` の console 引数
+      が UI 側で誤決定された場合に検出できない）
   - `backend/internal/config/env.go` の既存パーサパターンに合わせて `duration` パーサ
     helper（または既存があれば再利用）と string（min length / required）バリデーションを追加。
-    client secret は **空文字を許可しない**（required string）
+    client secret は **空文字を許可しない**（required string）。上記 3 不一致は Config 確定後の
+    helper 関数（例: `validateOIDCConsoleSeparation(cfg Config) error`）として実装し、`Load()`
+    最終段で呼ぶ
   - `backend/internal/config/config_test.go` に以下を追加:
     - (a) default 値適用（3 つの duration が既定値）
     - (b) `STATE_MAC_SECRET` 未設定 / 32 文字未満で `*errors.Error{Code: config_invalid}`
@@ -34,6 +61,19 @@
       `STATE_COOKIE_TTL=11m` のいずれも `*errors.Error{Code: config_invalid}`（境界値:
       `STATE_COOKIE_TTL=1s` / `STATE_COOKIE_TTL=10m` は受理 / `STATE_COOKIE_TTL=999ms` /
       `STATE_COOKIE_TTL=10m1s` は reject）
+    - (g) `SESSION_IDLE_TIMEOUT=0s` / `=-1m` / `=500ms` / `=25h` のいずれも `*errors.Error{Code:
+      config_invalid}`（境界値: `=1s` / `=24h` は受理 / `=999ms` / `=24h1s` は reject）
+    - (h) `SESSION_ABSOLUTE_TIMEOUT=0s` / `=-1m` / `=500ms` / `=25h` のいずれも
+      `*errors.Error{Code: config_invalid}`（境界値: `=1s` / `=24h` は受理）
+    - (i) **`SESSION_IDLE_TIMEOUT > SESSION_ABSOLUTE_TIMEOUT`**（例: `IDLE=2h` / `ABS=1h`）で
+      `*errors.Error{Code: config_invalid}`（idle が absolute を超える設定は Req 4.4 / 4.5 の
+      階層的失効判定を破壊するため reject）。境界 `IDLE == ABS` は受理
+    - (j) **`OIDC_TENANT_CLIENT_ID == OIDC_ADMIN_CLIENT_ID`** で `*errors.Error{Code:
+      config_invalid}`（Req 6.1 / 6.4 / 1.4 / 1.5 の aud 排他一致が無効化される）
+    - (k) **`OIDC_TENANT_CLIENT_SECRET == OIDC_ADMIN_CLIENT_SECRET`** で `*errors.Error{Code:
+      config_invalid}`（一方の漏洩が他方を毀損する構造を防ぐ）
+    - (l) **`OIDC_TENANT_REDIRECT_URL == OIDC_ADMIN_REDIRECT_URL`** で `*errors.Error{Code:
+      config_invalid}`（Req 6.2 の path-based 分離が成立しない）
   - `.env.example` に以下 6 行を追加（管理者セッション暗号化用秘密鍵セクション直下）:
     - `SESSION_IDLE_TIMEOUT=30m`
     - `SESSION_ABSOLUTE_TIMEOUT=8h`
@@ -223,7 +263,7 @@
       `SameSite == http.SameSiteLaxMode`
   - `backend/internal/auth/doc.go` を新規追加。`internal/auth` の依存方向ルール（platform/oidc
     と platform/db / platform/httpserver / logger / errors / config のみ import 可）を記載
-  - _Requirements: 2.1, 2.2, 2.3, 2.4, 2.5, 2.6, 2.7, 2.9, NFR 4.1_
+  - _Requirements: 2.1, 2.2, 2.3, 2.4, 2.5, 2.6, 2.7, 2.8, 2.9, NFR 4.1_
   - _Boundary: AuthTypes, StateCookie, AuthClock_
   - _Depends: 1.1_
 - [ ] 3.2 auth.session helper + 単体テスト (P)
@@ -444,7 +484,14 @@
     が成立しないため、必ず `r.Route(consolePrefix, ...)` 経由で sub-router を作る）
   - login ハンドラ: `return_to` クエリ取得 → `service.BeginLogin(ctx, console, returnTo)` →
     `Set-Cookie: state_cookie` + `302 Found` `Location: redirectURL`。エラー時 `errors.WriteHTTP`
-  - callback ハンドラ: `code` / `state` クエリ取得 → cookie から state cookie 取得 →
+  - callback ハンドラ: `code` / `state` クエリ取得 → **両クエリの欠落判定**（`code == ""` ||
+    `queryState == ""` のいずれかが成立すれば、Service 呼び出し前に **400 `invalid_request`**
+    `*errors.Error{Code: CodeBadRequest, failure_kind: invalid_request}` で即時 reject + state
+    cookie 削除（`state.ExpireCookieAttributes()`）/ design.md「Error Categories and Responses」
+    400 行および API Contract `/api/auth/callback` の Errors 列「400（return_to が不正 URL /
+    `code` 欠落 / `state` 欠落）」と整合 / 欠落判定を Service 内 state 検証や token 交換に流すと
+    Verify 経路で `state_invalid`（401）や oauth2 token endpoint の 502 に化けて契約と矛盾する
+    ため、必ず Handler 入口で判定する） → cookie から state cookie 取得 →
     `rawSessionToken, sessionCookie, returnTo, err := service.HandleCallback(ctx, console,
     code, queryState, rawStateCookie)` → 成功時は **`Set-Cookie: session_cookie`**（生値が
     Value）+ **`Set-Cookie: state.ExpireCookieAttributes()`**（`__Host-ae_mdm_state` を削除する
@@ -465,6 +512,10 @@
     - (b) `/api/auth/callback`: 302 + session cookie + state cookie 削除 + Location が fake
       Service の戻す `returnTo` 値と一致
     - (c) `/api/auth/callback`: state mismatch で 401 + cookie 削除
+    - (c2) **`/api/auth/callback`: `code` クエリ欠落で 400 `invalid_request` + state cookie
+      削除**（fake Service が呼ばれないことを assert / Handler 入口判定の経路）
+    - (c3) **`/api/auth/callback`: `state` クエリ欠落で 400 `invalid_request` + state cookie
+      削除**（fake Service が呼ばれないことを assert）
     - (d) `/api/auth/logout`: 204 + session cookie 削除、cookie 不在で 401
   - _Requirements: 2.1, 2.2, 2.5, 2.8, 3.1, 5.2, 6.2_
   - _Boundary: AuthHandler_
@@ -550,8 +601,15 @@
     verifier.TenantEndpoint() }, oidc.ConsoleAdmin: { ClientID: cfg.OIDCAdminClientID,
     **ClientSecret: cfg.OIDCAdminClientSecret**, RedirectURL: cfg.OIDCAdminRedirectURL,
     Endpoint: verifier.AdminEndpoint() } }` のように構築
-    （Endpoint 取得は task 2.1 で `Verifier` interface に追加する helper を使う / Endpoint の
-    auth style は default の `client_secret_basic`）
+    （Endpoint 取得は task 2.1 で `Verifier` interface に追加する helper を使う。**helper 側で
+    返却する `oauth2.Endpoint` の `AuthStyle` フィールドに `oauth2.AuthStyleInHeader` を必ず
+    明示セット**することで `client_secret_basic` 固定を契約として強制する / `golang.org/x/oauth2`
+    の default `AuthStyleAutoDetect` は初回 token endpoint reject を見て `client_secret_post`
+    へフォールバックする非決定的挙動を取るため、Basic 固定を意図する場合は明示が必須 /
+    design.md Technology Stack および確認事項 6 と整合）
+  - `cmd/api/main_test.go`（または task 2.1 の `verifier_test.go`）に、`TenantEndpoint()` /
+    `AdminEndpoint()` の戻り値 `oauth2.Endpoint` について **`AuthStyle == oauth2.AuthStyleInHeader`**
+    を assert するユニットテストを追加する（Basic 固定の契約を回帰的に守るため）
   - bootstrap 失敗時の exit ハンドリング（既存 A2 パターンに揃える: ERROR ログ + os.Exit(1)）
   - `backend/cmd/api/main_test.go` に bootstrap smoke test がある場合は更新（auth 配線が
     増えても起動可能であること）。実 IdP 到達は test しない（mock 不要 / 本 task では bootstrap
