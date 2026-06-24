@@ -370,10 +370,83 @@ learning を `### Task <id>` 単位で追記する。`docs/specs/33--a3a-oidc-ve
     payload.OIDCNonce))` の呼び出しで OAuth `state` と OIDC `nonce` を別パラメータとして
     IdP に渡す前提（OIDC Core 1.0 §3.1.2.1）に本 task の型設計が直接対応している。
 
+### Task 3.2
+
+- **採用方針**: `backend/internal/auth/{session.go, session_test.go}` の 2 ファイル新規追加 +
+  `doc.go` 構成リスト 1 行更新。`New()` は `crypto/rand.Read` で 32 byte を読み出し
+  `base64.RawURLEncoding`（no-padding）で 43 文字の文字列に整形、`HashToken` は SHA-256 hex
+  64 文字を返す。cookie 属性 helper は state.go の同名関数（`CookieAttributes` /
+  `ExpireCookieAttributes`）と Go の同 package 内 redeclaration エラーを起こすため
+  **`SessionCookieAttributes` / `SessionExpireCookieAttributes`** に rename して衝突回避した
+  （契約・属性値は tasks.md / design.md の指示通り維持）。
+- **重要な判断**:
+  - **命名衝突回避の選択**: design.md / tasks.md の散文は `state.ExpireCookieAttributes()` /
+    `session.ExpireCookieAttributes()` のように sub-package 風名前空間を想定するが、task 3.1
+    で auth を **フラット package** として確定済み（state.go / types.go / clock.go / doc.go が
+    `package auth` 直下）。retroactive な refactor 禁止規約に従い、session 側を Session
+    プレフィックスで disambiguate する選択を採用した。`New` / `HashToken` / `HashPrefix` は
+    state.go と衝突しないためそのままの名前を維持する。後続 task 5.1 / 5.2 / 6.1 の Service /
+    Handler / Middleware は、state cookie 削除には `auth.ExpireCookieAttributes()`、session
+    cookie 削除には `auth.SessionExpireCookieAttributes()` を呼び分ける必要がある（**確認事項**
+    に明示）。
+  - **`MaxAge = -1` の選択理由**: Go の `http.Cookie` 規約では `MaxAge < 0` のみが削除 cookie
+    として `Set-Cookie` ヘッダに `Max-Age=0` 属性 + 過去日付 `Expires` 属性を出力する。
+    `MaxAge = 0` だと Max-Age 属性が省略されて session cookie 化（ブラウザを閉じるまで保持）
+    して即時削除が成立しない。state.go と同じ規約を踏襲し、テスト (f) で `MaxAge < 0` と
+    `MaxAge == -1` の両方を assert して回帰耐性を確保した。
+  - **`base64.RawURLEncoding` 採用理由**: Cookie value の文字種制約（[A-Za-z0-9-_]+）と
+    URL-safe（`+` / `/` の禁止）+ no-padding（`=` の禁止）を両立できる encoding は
+    base64url の no-padding 表記のみ。state.go の MAC encoding でも同 encoding を使っており、
+    auth package 全体で base64url no-padding に統一する。
+  - **`crypto/rand.Read` err の fail-closed**: design.md NFR 3.1 / Req 3.5 の指示通り、
+    `rand.Read` 失敗時は `*errors.Error{Code: CodeInternal}` を返し fixed message のみで
+    wrap する（partial buffer 内容を補間しない / NFR 1.1 / NFR 4.2）。呼び出し側（後続 task
+    5.1 `auth.Service`）は 5xx に倒すことで session 発行不能を明示する責務を持つ。
+  - **`HashPrefix` の defensive 境界**: 8 文字未満の入力（空文字 / 短い hash）が誤って渡された
+    場合は丸ごと返す設計とした（slice out-of-range panic を起こさない）。本来 `HashToken` の
+    戻り値（64 文字）が前提だが、テスト用 fixture や bug 経路で短い値が渡る可能性を考慮した
+    defensive 実装。テスト (g2) / (g3) で空文字 / 7 文字入力の挙動を回帰耐性で固定。
+  - **Red→Green の踏み方**: session.go 追加前に session_test.go を先に書いて compile error
+    （`undefined: New` 等）で fail を観測してから session.go 実装で全 PASS に到達する手順を
+    取った（一発で書き上げて green で始まるテストは観点不備を疑う原則 / CLAUDE.md「テスト
+    規約 / 共通」節）。
+- **残存課題**:
+  - 後続 task 4.1 `Repository.Create` / `Repository.Get` / `Repository.Touch` /
+    `Repository.Revoke` で本 task の `HashToken(rawToken)` を呼んで `Session.TokenHash`
+    field（task 3.1 で定義済み）に格納する経路で利用される。生 token は永続ストアに
+    記録しない（Req 3.6 / 3.7 / NFR 1.2）。
+  - 後続 task 5.1 `auth.Service.HandleCallback` で `auth.New()` → cookie value 設定 →
+    `auth.SessionCookieAttributes(cfg.SessionAbsoluteTimeout)` → `Repository.Create` の経路
+    を組み立てる。`SessionCookieAttributes` の `ttl` 引数には `cfg.SessionAbsoluteTimeout`
+    （task 1.1 で `Config` に追加済み）を渡す契約。
+  - 後続 task 5.2 / 6.1 Handler / Middleware の logout / 失効検出パスで
+    `auth.SessionExpireCookieAttributes()` を呼ぶ。**state cookie 削除には `auth.
+    ExpireCookieAttributes()`、session cookie 削除には `auth.SessionExpireCookieAttributes()`
+    を使う**点を本 task で確立した命名規約として後続 task で守る必要がある（state cookie /
+    session cookie の cleanup 経路で取り違えないこと）。
+  - 後続 task 4.1 / 5.1 の structured log では `HashPrefix(session.TokenHash)` の戻り値を
+    `session_hash_prefix` field key で出力する（Req 3.8）。生 token / 全 hash は出力しない
+    （task 1.4 で `state_cookie` / `session_cookie` の redaction allowlist 追加済みだが、
+    一次防御として実装側で fixed field key + prefix のみを出力する責務が残る）。
+
 ## 確認事項
 
 本セクションは `requirements.md` / `design.md` / `tasks.md` 本文の書き換えを伴わずに、実装フェーズ
 で気付いた spec との矛盾点・人間判断が必要なポイントを集約する場である。
 
+- **task 3.2: cookie 属性 helper の命名衝突と rename 採用**: design.md L588 / L595 と tasks.md
+  L318 / L321〜L324 は session cookie 属性 helper の名前を `CookieAttributes(ttl)` /
+  `ExpireCookieAttributes()` と指示しているが、task 3.1 で同名の top-level 関数が
+  `backend/internal/auth/state.go` に既に実装されており（state.go L151 / L170）、Go 同
+  package 内 redeclaration エラーが発生する。design.md / tasks.md の散文では
+  `state.ExpireCookieAttributes()` / `session.ExpireCookieAttributes()` のような sub-package
+  風名前空間を想定していると読めるが、task 3.1 で auth を **フラット package** として確定
+  しており retroactive な refactor は per-task ループ規約で禁止されている。本 task では
+  session 側の cookie 属性 helper を **`SessionCookieAttributes` /
+  `SessionExpireCookieAttributes`** に rename して disambiguate する判断を採用した（関数の
+  責務・属性値・契約は spec 通り維持 / 他 helper `New` / `HashToken` / `HashPrefix` は state.go
+  と衝突しないためそのまま）。後続 task 5.1 / 5.2 / 6.1 の Service / Handler / Middleware は、
+  state cookie 削除 = `auth.ExpireCookieAttributes()` / session cookie 削除 =
+  `auth.SessionExpireCookieAttributes()` を **明示的に呼び分ける**必要がある。
 - なし（task 1.2 では tasks.md L99〜L173 の指示通りに migration / test fixture を更新でき、
   design 本文との矛盾点は発生していない）。
