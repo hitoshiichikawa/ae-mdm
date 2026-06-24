@@ -15,7 +15,7 @@
   - `backend/internal/config/config.go` に以下を追加:
     - `SessionIdleTimeout time.Duration`（env `SESSION_IDLE_TIMEOUT`, default `30m`）
     - `SessionAbsoluteTimeout time.Duration`（env `SESSION_ABSOLUTE_TIMEOUT`, default `8h`）
-    - `StateCookieTTL time.Duration`（env `STATE_COOKIE_TTL`, default `10m`）
+    - `StateCookieTTL time.Duration`（env `STATE_COOKIE_TTL`, default `10m`, **validation: `0 < ttl <= 10m`**。Req 2.4「10 分以内に有効期限が切れる」を上限制約として満たすため、設定値が `0` / 負の duration / `10m` を超える値のいずれかなら起動時 `*errors.Error{Code: config_invalid}` で reject する）
     - `StateMACSecret string`（env `STATE_MAC_SECRET`, required, len >= 32 bytes）
     - `OIDCTenantClientSecret string`（env `OIDC_TENANT_CLIENT_SECRET`, required, confidential
       client + `client_secret_basic` 認証用 / design.md Req 6.2 と確認事項 6 で確定）
@@ -30,6 +30,9 @@
       `*errors.Error{Code: config_invalid}`
     - (d) duration 不正フォーマットで `*errors.Error{Code: config_invalid}`
     - (e) 正常系で全 6 値が読み込まれること
+    - (f) `STATE_COOKIE_TTL=0s` / `STATE_COOKIE_TTL=-1m` / `STATE_COOKIE_TTL=11m` のいずれも
+      `*errors.Error{Code: config_invalid}`（境界値: `STATE_COOKIE_TTL=10m` は受理 /
+      `STATE_COOKIE_TTL=10m1s` は reject）
   - `.env.example` に以下 6 行を追加（管理者セッション暗号化用秘密鍵セクション直下）:
     - `SESSION_IDLE_TIMEOUT=30m`
     - `SESSION_ABSOLUTE_TIMEOUT=8h`
@@ -39,7 +42,7 @@
     - `OIDC_ADMIN_CLIENT_SECRET=<REPLACE_ME_FROM_KEYCLOAK_ADMIN_CLIENT>`
   - _Requirements: 6.1, 6.2, 6.4, NFR 1.1, NFR 2.1, NFR 2.2_
   - _Boundary: Config_
-- [ ] 1.2 sessions テーブル拡張マイグレーション (P)
+- [ ] 1.2 sessions / admin_users テーブル拡張マイグレーション (P)
   - `backend/db/migrations/0013_extend_sessions.up.sql` を新規追加。`ALTER TABLE sessions ADD
     COLUMN last_seen_at timestamptz NOT NULL DEFAULT now()` → `UPDATE sessions SET last_seen_at
     = idle_at` → `ALTER TABLE sessions DROP COLUMN idle_at` → `ALTER TABLE sessions ADD
@@ -49,6 +52,18 @@
   - `backend/db/migrations/0013_extend_sessions.down.sql` を新規追加。対称な DROP / ADD
     （`idle_at` 復元、`revoked_at` / `console` DROP）。`idle_at` の値復元は `last_seen_at`
     からの UPDATE で対応
+  - **`backend/db/migrations/0014_admin_users_add_oidc_issuer.up.sql` を新規追加**:
+    `ALTER TABLE admin_users ADD COLUMN oidc_issuer text NOT NULL DEFAULT ''` →
+    `UPDATE admin_users SET oidc_issuer = '<TENANT_ISSUER_URL_PLACEHOLDER>'`（既存行は A2 時点で
+    空のはずだが念のため backfill）→ `ALTER TABLE admin_users ALTER COLUMN oidc_issuer DROP
+    DEFAULT` → `ALTER TABLE admin_users DROP CONSTRAINT admin_users_oidc_subject_key`（既存の
+    `oidc_subject UNIQUE` を解除）→ `ALTER TABLE admin_users ADD CONSTRAINT
+    admin_users_oidc_issuer_subject_key UNIQUE (oidc_issuer, oidc_subject)`。**理由**: OIDC `sub`
+    は issuer スコープでのみ一意のため、tenant / admin issuer を分けられる本設計では
+    `(oidc_issuer, oidc_subject)` の組で admin_users を解決する必要がある（`sub` 単独の
+    UNIQUE 制約は別 issuer の同 sub と衝突する偽陽性を生む）
+  - 対応 down: `0014_admin_users_add_oidc_issuer.down.sql` で対称の DROP CONSTRAINT + ADD
+    CONSTRAINT（`oidc_subject UNIQUE` 復元）+ `DROP COLUMN oidc_issuer`
   - 既存 RLS ポリシー（`tenant_isolation_sessions`）は本マイグレーションで再定義しない
     （A2 で配置済みのまま、列追加のみ）
   - **既存コード / fixture / test の `sessions.idle_at` 参照を確認・置換**:
@@ -174,7 +189,7 @@
 
 - [ ] 4. auth.Repository（sessions / admin_users CRUD）
 - [ ] 4.1 Repository 実装 + integration テスト
-  - `backend/internal/auth/repository.go` を新規追加。`Repository` interface（**`ResolveAdminUser`**
+  - `backend/internal/auth/repository.go` を新規追加。`Repository` interface（**`ResolveAdminUser(ctx, issuer, subject, email, console)`**
     / `Create` / `Get` / `Touch` / `Revoke`）と `pgxpool.Pool` ベースの実装を提供
   - すべての CRUD は `db.BeginTxFunc` 経由で実行する。`Get` / `Touch` / `Revoke` /
     `ResolveAdminUser` は **`SuperAdmin context`**（`db.WithTenantContext(ctx,
@@ -188,13 +203,19 @@
     Req 4.8）
   - `Revoke` は `UPDATE sessions SET revoked_at = $1 WHERE token_hash = $2 AND revoked_at
     IS NULL`（冪等性 / Req 5.1）
-  - **`ResolveAdminUser(ctx, sub, email, console)`** は事前 provisioning **必須** の
+  - **`ResolveAdminUser(ctx, issuer, sub, email, console)`** は事前 provisioning **必須** の
     read-modify-write を以下の手順で実行する（**新規 INSERT は行わない** / design.md と整合）:
-    1. SuperAdmin context で `SELECT id, tenant_id FROM admin_users WHERE oidc_subject = $1 FOR UPDATE`
+    1. SuperAdmin context で `SELECT id, tenant_id FROM admin_users WHERE oidc_issuer = $1 AND oidc_subject = $2 FOR UPDATE`
+       （OIDC の `sub` は **issuer スコープ**でのみ一意のため、tenant / admin issuer を
+       分けられる本設計では `(issuer, subject)` の組で一意解決する。`subject` 単独で解決すると
+       別 issuer のユーザーへ誤解決する。`admin_users` テーブルに `oidc_issuer text NOT NULL`
+       カラムが存在しない場合は A2 既存スキーマを拡張する migration（後述 task 1.2 / 1.2a の
+       いずれかに統合）が必要 — 詳細は impl-notes.md「OIDC issuer 識別子の永続化方針」節で
+       PM 確認）
     2. 0 行なら `*errors.Error{Code: CodeForbidden, failure_kind:
        admin_user_not_provisioned}` を返す（HTTP 403 に Service が マッピング）
-    3. 1 行なら `UPDATE admin_users SET email = $2 WHERE id = $3`（IdP 側で email が変わった
-       場合に追従。`admin_users.id` / `tenant_id` は不変）
+    3. 1 行なら `UPDATE admin_users SET email = $1 WHERE id = $2`（IdP 側で email が変わった
+       場合に追従。`admin_users.id` / `tenant_id` / `oidc_issuer` / `oidc_subject` は不変）
     4. `admin_role_assignments` を join して `Identity.Roles` / `IsSuperAdmin` を集約し、
        `Identity{AdminUserID, OIDCSubject:sub, Email, TenantID, Roles, IsSuperAdmin}` を返す
   - `backend/test/integration/auth_repository_test.go` を新規追加。`docker compose up -d
@@ -218,7 +239,9 @@
   - `backend/internal/auth/service.go` を新規追加。`Service` interface（`BeginLogin` /
     `HandleCallback` / `LookupAndRefresh` / `Logout`）を提供
   - `BeginLogin(ctx, console, returnTo) (redirectURL string, stateCookie http.Cookie, err error)` —
-    `returnTo` 検証（同一オリジン内相対 URL のみ許容 / 確認事項 3）→ `StatePayload{Nonce,
+    `returnTo` 正規化と検証（**空文字の場合は default `/` を採用**して callback 成功時に空の
+    `Location` ヘッダが出ないようにする / Req 2.5。空でない場合は同一オリジン内相対 URL のみ
+    許容、`http://` `https://` `//` を含む host 指定は 400 / 確認事項 3）→ `StatePayload{Nonce,
     Console: console, ReturnTo: returnTo, IssuedAt: clock.Now()}` 構築 → `state.Sign` で
     cookie 値生成 → `state.CookieAttributes(cfg.StateCookieTTL)` に cookie 値をセット →
     IdP 認可エンドポイント URL を `oauth2.Config.AuthCodeURL(payload.Nonce)` で構築
@@ -230,12 +253,27 @@
        clock.Now())` → 成功時に `StatePayload` を取り出して `returnTo := payload.ReturnTo`。
        失敗時は対応する `failure_kind`（`state_invalid` / `state_expired` /
        `state_mismatch` / `state_replay`）で 401
+    1a. **`payload.Console == console` 検証**: state cookie 内の `StatePayload.Console` が
+       当該 callback の console（引数 `console`）と一致しない場合は `failure_kind:
+       state_console_mismatch` で 401 + 即時 state cookie 削除（Max-Age=0）。tenant login で
+       発行した state を admin callback に提示する cross-console state 混同を拒否する
+       （Req 2.9 / 6.2 の物理分離強制）。本検証は state.Verify の MAC / TTL 検証を通過した
+       直後に Service 層で行う（state.go の `Verify` 戻り値 `StatePayload.Console` を Service が
+       明示的に照合する）
     2. `oauth2.Config.Exchange(ctx, code)` で token 取得（5xx は `*errors.Error{Code:
        CodeUpstream, failure_kind: upstream_oidc_token}`）
-    3. `verifier.VerifyIDToken(ctx, token.Extra("id_token").(string))` → `Claims.MatchedConsole !=
-       console` なら `failure_kind: invalid_aud` で拒否（Req 6.2 のクライアント分離強制）
-    4. `repo.ResolveAdminUser(ctx, claims.Subject, claims.Email, console)` →
-       `admin_user_not_provisioned` で 403 を伝播
+    3. **token endpoint レスポンスから `id_token` を安全に取り出す**:
+       `rawIDToken, ok := token.Extra("id_token").(string)` で取り出し、`!ok || rawIDToken == ""`
+       なら `*errors.Error{Code: CodeUpstream, failure_kind: upstream_oidc_token}` で 502 を返す
+       （直接 type assertion `token.Extra("id_token").(string)` は token endpoint が `id_token` を
+       返さない / 文字列でない場合に panic するため禁止 / NFR 3.1 の fail-closed と整合）。
+       `verifier.VerifyIDToken(ctx, rawIDToken)` → `Claims.MatchedConsole != console` なら
+       `failure_kind: invalid_aud` で拒否（Req 6.2 のクライアント分離強制）
+    4. `repo.ResolveAdminUser(ctx, claims.Issuer, claims.Subject, claims.Email, console)` →
+       `admin_user_not_provisioned` で 403 を伝播（OIDC の `sub` は issuer スコープで一意のため、
+       tenant / admin で issuer を分けられる本設計では **`issuer` + `subject` の組**で
+       admin_users を解決する必要がある。`subject` 単独で解決すると別 issuer のユーザーへ誤解決
+       するリスクがある / 後述 task 4.1 の Repository signature 変更と整合）
     5. `rawSessionToken, _ := session.New()`、`tokenHash := session.HashToken(rawSessionToken)`
     6. `now := clock.Now()` を 1 度取得し、`repo.Create(ctx, Session{TokenHash: tokenHash,
        AdminUserID: identity.AdminUserID, Console: console, IssuedAt: now, LastSeenAt: now,
@@ -256,12 +294,14 @@
     `repo.Touch(ctx, hash, now)` + `(Identity, Session, nil)`
   - `Logout(ctx, rawSessionToken)` — `HashToken` → `repo.Revoke`（既に revoked でも no-op）
   - **`failure_kind` ログ field 出力の実装責務**: `BeginLogin` / `HandleCallback` /
-    `LookupAndRefresh` の各失敗パスで `log.Warn("auth failure",
-    logger.String("failure_kind", kind), logger.String("console", string(console)),
-    logger.String("session_hash_prefix", session.HashPrefix(hash)))` の形式で **明示的に**
-    field を出すこと（NFR 4.1 を実装で満たす / cause チェーンに乗せるだけでは観測性 AC を
-    満たせない）。`session_hash_prefix` は session lookup 経路でのみ追加（state / OIDC 検証
-    経路では unset）
+    `LookupAndRefresh` の各失敗パスで `log.Warn("auth failure", "failure_kind", kind,
+    "console", string(console), "session_hash_prefix", session.HashPrefix(hash))` の形式で
+    **明示的に** field を出すこと（NFR 4.1 を実装で満たす / cause チェーンに乗せるだけでは
+    観測性 AC を満たせない）。A2 `internal/logger` の `Logger.Warn(msg string, fields ...any)`
+    は `"key", value` 可変長ペア形式を受け付ける（`logger.String` のような helper は存在
+    しない / `logger.TenantID` / `RequestID` / `MessageID` / `ActorID` / `Err` のみが
+    field helper / 詳細は `backend/internal/logger/logger.go` の `toZapFields`）。
+    `session_hash_prefix` は session lookup 経路でのみ追加（state / OIDC 検証経路では unset）
   - `Service` 構築 helper `NewService(cfg, verifier, repo, oauth2Configs map[oidc.Console]
     *oauth2.Config, clock, log)`。`oauth2Configs` は tenant / admin 別 `ClientID` /
     `ClientSecret`（`cfg.OIDCTenantClientSecret` / `cfg.OIDCAdminClientSecret` を **必ず**
@@ -272,6 +312,9 @@
     - (b) `HandleCallback` 正常系で Session 作成 + cookie 返却 + `returnTo` が
       `StatePayload.ReturnTo` 由来
     - (c) state mismatch / state expired / state invalid / 各 OIDC 失敗種別の伝播
+    - (c2) **`StatePayload.Console` と handler の console 不一致で `state_console_mismatch`**
+      （tenant login で発行した state を admin callback に提示する経路 / Req 2.9 / 6.2 の
+      cross-console state 混同 reject）
     - (d) **`Claims.MatchedConsole` と handler の expected console 不一致で `invalid_aud`**
       （Req 6.2 のテスト）
     - (e) `ResolveAdminUser` が `admin_user_not_provisioned` を返したら Service が 403 で
@@ -413,9 +456,11 @@
       NFR 1.2）+ Location が `return_to=/dashboard` 由来
     - (c) state cookie 改竄で 401 + `failure_kind=state_invalid` ログ
     - (d) ID トークン aud 不一致で 401 + `failure_kind=invalid_aud` ログ
-    - (e) **未 provisioning な OIDC subject** で callback → 403 +
-      `failure_kind=admin_user_not_provisioned`（Req 4.1 の事前 provisioning 必須経路 /
-      新規 INSERT されないこと）
+    - (e) **未 provisioning な OIDC (issuer, subject) 組** で callback → 403 +
+      `failure_kind=admin_user_not_provisioned`（admin_users の事前 provisioning 必須経路 /
+      新規 INSERT されないことを assert。本ケースは requirements.md の特定 AC ではなく、
+      design.md「Auth Repository」節の `ResolveAdminUser` 仕様および「確認事項 8 admin_users /
+      admin_role_assignments の事前 provisioning」由来）
   - `backend/test/integration/auth_session_lookup_test.go` を新規追加。Create Session 後に
     test 用 stub handler を `/api/devices` 相当に mount し:
     - (a) cookie 提示で 200 + AuthClaims が ctx に到達

@@ -259,11 +259,16 @@ docs/specs/33--a3a-oidc-verifier-session/impl-notes.md  # 本 Issue 新規追加
   rename（フィールド構成は不変: `TenantID` / `AdminUserID` / `Roles` / `IsSuperAdmin`）、
   `withAuthClaims` / `authClaimsFromContext` を `WithAuthClaims` / `AuthClaimsFromContext` へ
   rename。本 rename によって A2 既存テストの呼び出し箇所（同 package 内 test）も合わせて修正
-- `backend/internal/platform/httpserver/server.go` — `NewServer` に `authMW` 引数（型は
-  `func(http.Handler) http.Handler`）を追加し、`/api` と `/api/admin` の各サブルータで
-  `apiRouter.Use(authMW)` を `TenantContextMiddleware` より前段に挿入。auth エンドポイント群
-  `/api/auth/login` / `/api/auth/callback` / `/api/auth/logout` は **TenantContextMiddleware の
-  外側**（認証が未確立の段階で到達するため）に新規 router group として登録
+- `backend/internal/platform/httpserver/server.go` — `NewServer` に **`authMWTenant` /
+  `authMWAdmin` の 2 引数**（いずれも型 `func(http.Handler) http.Handler`）と `authMount`
+  引数（auth.Handler の mount 関数）を追加する。`/api` サブルータには `authMWTenant`
+  （`expectedConsole=ConsoleTenant` で構築）を、`/api/admin` サブルータには `authMWAdmin`
+  （`expectedConsole=ConsoleAdmin` で構築）を、それぞれ `TenantContextMiddleware` より前段に
+  挿入する（**単一 `authMW` を両サブルータに使い回すと Req 6.2 / 6.3 の console 分離が
+  middleware 内で強制できないため、必ず別インスタンスを別々に注入する**）。auth エンドポイント群
+  `/api/auth/{login,callback,logout}` と `/api/admin/auth/{login,callback,logout}` は
+  **TenantContextMiddleware の外側**（認証が未確立の段階で到達するため）に新規 router group
+  として `authMount` で 2 回（tenant prefix / admin prefix）登録する
 - `backend/internal/config/config.go` + `env.go` — 以下を追加（すべて env 経由読込）。`duration` パーサは `env.go` の既存パターンに揃える:
   - `SessionIdleTimeout time.Duration`（env: `SESSION_IDLE_TIMEOUT`, default `30m`）
   - `SessionAbsoluteTimeout time.Duration`（env: `SESSION_ABSOLUTE_TIMEOUT`, default `8h`）
@@ -308,7 +313,7 @@ docs/specs/33--a3a-oidc-verifier-session/impl-notes.md  # 本 Issue 新規追加
 | 2.6 | state cookie 不在 / 期限切れ / MAC 失敗で失敗 | Auth Service | `Verify` 戻り値 → `errors.CodeUnauthenticated` | error: state_invalid |
 | 2.7 | クエリ state と cookie state 不一致で失敗 | Auth Service | `Verify` 内 `subtle.ConstantTimeCompare` | error: state_mismatch |
 | 2.8 | state cookie を callback で即時無効化 | Auth Service, Handler | `Set-Cookie: max-age=0` で削除 | callback flow |
-| 2.9 | 別ブラウザ / 別 redirect への state 流用拒否 | Auth Service, State Cookie | MAC 付き cookie の物理保護（HttpOnly/Secure/SameSite=Lax + `__Host-` prefix で sub-domain 跨ぎ禁止）+ TTL 10 分 + cookie 値と query state の constant-time 一致。**stateless 設計のため「同一ブラウザ内で cookie 値と query state の組ごとコピーされた場合」の検出はできない**点はリスク・トレードオフ表「state replay 防止の stateless 限界」節および「確認事項 7」を参照 | error: state_replay |
+| 2.9 | 別ブラウザ / 別 redirect への state 流用拒否 | Auth Service, State Cookie | (a) MAC 付き cookie の物理保護（HttpOnly/Secure/SameSite=Lax + `__Host-` prefix で sub-domain 跨ぎ禁止 / 別ブラウザへの自動転送阻害）+ TTL 10 分、(b) cookie 値と query state の constant-time 一致、(c) **`StatePayload.Console == handler の expected console` を Service 層で明示照合**（tenant login で発行した state を admin callback に提示する cross-console state 混同を `state_console_mismatch` で拒否 / 「別 redirect」ケースのうち別 console への流用を物理的に拒否）。**stateless 設計のため「同一ブラウザ内で cookie 値と query state の組ごとコピー + 同 console へ再提示された場合」の検出はできない**点はリスク・トレードオフ表「state replay 防止の stateless 限界」節および「確認事項 7」を参照 | error: state_replay / state_console_mismatch |
 | 3.1 | OIDC 成功でセッション識別子を発行・cookie 返却 | Session Manager, Auth Handler | `auth/session.go` の `New` + `Set-Cookie` | callback flow |
 | 3.2 | session cookie HttpOnly | Session Cookie | `session.go` の `CookieAttributes` | NFR 1.1 と連動 |
 | 3.3 | session cookie Secure | Session Cookie | 同上 | NFR 1.1 と連動 |
@@ -550,9 +555,11 @@ func HashPrefix(hash string) string
 **Responsibilities & Constraints**
 - 主責務: `Create(ctx, session) error` / `Get(ctx, tokenHash) (Session, Identity, error)` /
   `Touch(ctx, tokenHash, now) error` / `Revoke(ctx, tokenHash, now) error` /
-  **`ResolveAdminUser(ctx, sub, email, console) (Identity, error)`**（事前 provisioning 必須。
-  名前は read-modify-write の意図を反映して `Resolve` とした。本 Issue では新規 admin_users
-  の自動 INSERT は **行わない**）
+  **`ResolveAdminUser(ctx, issuer, sub, email, console) (Identity, error)`**（事前 provisioning
+  必須。**`(issuer, sub)` の組で一意解決**する — OIDC `sub` は issuer スコープでのみ一意のため、
+  tenant / admin issuer を分けられる本設計では `sub` 単独で解決すると別 issuer のユーザーへ
+  誤解決する。名前は read-modify-write の意図を反映して `Resolve` とした。本 Issue では新規
+  admin_users の自動 INSERT は **行わない**）
 - ドメイン境界: `auth` package 内のみ呼び出し可。外部 domain からは Service 経由
 - データ所有権: `sessions`, `admin_users`, `admin_role_assignments`（後 2 者は本 Issue で
   **read-only**。書込みは admin-seed CLI / 後続 Issue）
@@ -563,16 +570,21 @@ func HashPrefix(hash string) string
   - `Revoke` は `revoked_at = now` をセットし、既に revoked の行への 2 度目の Revoke は no-op
     （冪等性）
   - 生 token はカラムに記録せず、`token_hash` のみ保存（Req 3.6 / 3.7 / NFR 1.2）
-  - **`ResolveAdminUser`** は `admin_users` を `oidc_subject` で SELECT し、`email` のみ
-    `UPDATE` する read-modify-write を行う。0 行（未 provisioning）の場合は
-    `*errors.Error{Code: CodeForbidden, failure_kind: admin_user_not_provisioned}` を返す
-    （Service が 403 にマッピング）。`admin_role_assignments` を join して `Identity.Roles`
+  - **`ResolveAdminUser`** は `admin_users` を **`(oidc_issuer, oidc_subject)` 複合キー**で
+    SELECT し、`email` のみ `UPDATE` する read-modify-write を行う。0 行（未 provisioning）の
+    場合は `*errors.Error{Code: CodeForbidden, failure_kind: admin_user_not_provisioned}` を
+    返す（Service が 403 にマッピング）。`admin_role_assignments` を join して `Identity.Roles`
     と `IsSuperAdmin` を構築する。**新規 INSERT は行わない**（admin_users.id / tenant_id /
-    role assignment の根拠は admin-seed CLI が事前配置する責務 / 後続 Issue で UI 化）
+    `oidc_issuer` / `oidc_subject` / role assignment の根拠は admin-seed CLI が事前配置する
+    責務 / 後続 Issue で UI 化）。`admin_users` テーブルに `oidc_issuer text NOT NULL` 列が
+    存在しない場合は A2 既存スキーマを拡張する migration が本 Issue で必要（task 1.2 に統合
+    するか別 migration として切り出すかは impl-notes.md で記録）
 
 ```go
 type Repository interface {
-    ResolveAdminUser(ctx context.Context, sub, email string, console oidc.Console) (Identity, error)
+    // ResolveAdminUser は (issuer, sub) 複合キーで admin_users を解決する。
+    // sub 単独では別 issuer のユーザーへ誤解決するリスクがあるため、issuer も必須引数とする。
+    ResolveAdminUser(ctx context.Context, issuer, sub, email string, console oidc.Console) (Identity, error)
     Create(ctx context.Context, s Session) error
     Get(ctx context.Context, tokenHash string) (Session, Identity, error) // 0 行は errors.CodeUnauthenticated
     Touch(ctx context.Context, tokenHash string, now time.Time) error
@@ -596,10 +608,15 @@ func NewRepository(pool *pgxpool.Pool) Repository
   - `BeginLogin(ctx, console, returnTo) (redirectURL, stateCookie, error)` — state 生成 + IdP
     認可エンドポイント URL 組み立て
   - `HandleCallback(ctx, console, code, queryState, rawStateCookie) (sessionToken, sessionCookie, returnTo, error)` —
-    state 検証（成功時に `StatePayload.ReturnTo` を取り出す）→ code → token 交換 → ID トークン
-    検証 → `ResolveAdminUser`（未 provisioning は 403）→ session create（`IssuedAt = now` /
-    `LastSeenAt = now` / `ExpiresAt = now + cfg.SessionAbsoluteTimeout`）。`returnTo` は Handler が
-    `Location` ヘッダで使用
+    state 検証（成功時に `StatePayload.ReturnTo` を取り出す）→ **`StatePayload.Console == console`
+    照合**（不一致は `state_console_mismatch` で 401 / Req 2.9 / 6.2）→ code → token 交換 →
+    **token endpoint レスポンスから `id_token` を安全に取り出す**（`token.Extra("id_token").(string)`
+    の直接 type assertion は panic するため、`rawIDToken, ok := ...(string)` で取り出し、
+    `!ok || rawIDToken == ""` なら `*errors.Error{Code: CodeUpstream, failure_kind:
+    upstream_oidc_token}` で 502 / NFR 3.1 の fail-closed）→ ID トークン検証 →
+    `ResolveAdminUser(ctx, claims.Issuer, claims.Subject, claims.Email, console)`（未 provisioning
+    は 403）→ session create（`IssuedAt = now` / `LastSeenAt = now` / `ExpiresAt = now +
+    cfg.SessionAbsoluteTimeout`）。`returnTo` は Handler が `Location` ヘッダで使用
   - `LookupAndRefresh(ctx, rawSessionToken, expectedConsole, now) (Identity, Session, error)` —
     cookie 提示時の検証 + `Session.Console` と `expectedConsole` の一致確認 + absolute /
     revoked / idle 判定（この順）+ last_seen_at 更新
@@ -656,7 +673,7 @@ func NewService(
 
 | Method | Endpoint | Request | Response | Errors |
 |---|---|---|---|---|
-| GET | `/api/auth/login` | query: `return_to`（optional, 戻り先 URL） | 302 Found, `Location: <IdP>/authorize?...`, `Set-Cookie: __Host-ae_mdm_state=...` | 400（return_to が不正 URL）/ 503（IdP discovery 未完了） |
+| GET | `/api/auth/login` | query: `return_to`（optional, 戻り先 URL。**省略 / 空文字の場合は default `/` を採用**して callback 成功時に空 `Location` ヘッダにならないようにする） | 302 Found, `Location: <IdP>/authorize?...`, `Set-Cookie: __Host-ae_mdm_state=...` | 400（return_to が不正 URL / host 指定あり）/ 503（IdP discovery 未完了） |
 | GET | `/api/admin/auth/login` | 同上 | 同上（admin client_id 経由） | 同上 |
 | GET | `/api/auth/callback` | query: `code`, `state` / cookie: `__Host-ae_mdm_state` | 302 Found, `Location: <return_to>`, `Set-Cookie: __Host-ae_mdm_session=...; Max-Age=...`, `Set-Cookie: __Host-ae_mdm_state=; Max-Age=0` | 401（state mismatch / sig / iss / aud / exp / kid）/ 502（IdP token endpoint 失敗） |
 | GET | `/api/admin/auth/callback` | 同上 | 同上（admin client） | 同上 |
@@ -727,11 +744,14 @@ func NewMiddleware(svc Service, expectedConsole oidc.Console, log logger.Logger,
 
 ### Domain Model
 
-- **Identity Aggregate**: `admin_users` + `admin_role_assignments`（A2 で作成済み）— OIDC
-  subject → 内部 admin_user_id のマッピング、ロール割当。本 Issue では `ResolveAdminUser` の
-  read-modify-write のみ（事前 provisioning 必須 / 0 行は 403 `admin_user_not_provisioned`）。
-  `admin_users.id` / `tenant_id` / `admin_role_assignments` の生成は admin-seed CLI / 後続
-  Issue が担当（本 Issue では read-only）
+- **Identity Aggregate**: `admin_users` + `admin_role_assignments`（A2 で作成済み）— **OIDC
+  `(issuer, subject)` → 内部 admin_user_id** のマッピング、ロール割当。本 Issue では
+  `ResolveAdminUser` の read-modify-write のみ（事前 provisioning 必須 / 0 行は 403
+  `admin_user_not_provisioned`）。`admin_users.id` / `tenant_id` / `oidc_issuer` /
+  `oidc_subject` / `admin_role_assignments` の生成は admin-seed CLI / 後続 Issue が担当
+  （本 Issue では read-only）。A2 既存 schema には `oidc_subject UNIQUE` 単独制約しか無いため、
+  本 Issue で `oidc_issuer` 列を追加 + UNIQUE 制約を `(oidc_issuer, oidc_subject)` 複合キーに
+  差し替える migration を `0014_admin_users_add_oidc_issuer.up.sql` で実施（tasks.md task 1.2）
 - **Session Aggregate**: `sessions`（A2 で作成済み、本 Issue で列追加 / rename）— `token_hash`
   を root とし、`last_seen_at` / `expires_at` / `revoked_at` / `console` の状態を持つ。状態
   遷移は Auth Service と Auth Middleware のみが行う
@@ -821,7 +841,7 @@ sequenceDiagram
     S->>S: oauth2.Exchange(ctx, code) → token
     S->>V: VerifyIDToken(ctx, token.IDToken)
     V-->>S: Claims{Subject, MatchedConsole, ...}
-    S->>R: ResolveAdminUser(ctx, sub, email, ConsoleTenant)
+    S->>R: ResolveAdminUser(ctx, issuer, sub, email, ConsoleTenant)
     R-->>S: Identity (未 provisioning なら 403 admin_user_not_provisioned)
     S->>S: session.New() + session.HashToken()
     S->>R: Create(ctx, Session{tokenHash, adminUserID, issuedAt=now, lastSeenAt=now, expiresAt=now+cfg.SessionAbsoluteTimeout, console, revokedAt=nil})
@@ -952,9 +972,11 @@ A2 既存の allowlist（`session_secret` / `id_token` / `access_token` / `refre
 
 - **User Errors (4xx)**:
   - 400 `invalid_request`(`return_to` が open redirect 候補 / `code` 欠落 / `state` 欠落)
-  - 401 `unauthenticated`（state mismatch / sig / iss / aud / exp / kid / session expired /
-    session revoked / session tamper）
-  - 403 `forbidden`（本 Issue では発生しない。後続 RBAC で使用）
+  - 401 `unauthenticated`（state mismatch / state console mismatch / sig / iss / aud / exp /
+    kid / session expired / session revoked / session tamper / console mismatch）
+  - 403 `forbidden`（**本 Issue では `admin_user_not_provisioned` のみ発生** / 後述
+    `failure_kind` 一覧および「Auth Repository」節の `ResolveAdminUser` 仕様参照。RBAC 由来の
+    403 は後続 Issue で追加される）
 - **System Errors (5xx)**:
   - 500 `internal_error`（panic 復旧、独自 Error 型でない error）
   - 502 `amapi_upstream_error`（OIDC token endpoint の 5xx）— code は流用（本 Issue では
@@ -974,7 +996,8 @@ A2 既存の allowlist（`session_secret` / `id_token` / `access_token` / `refre
 | `state_invalid` | State Cookie MAC 失敗 / cookie 不在（Req 2.6） | 401 |
 | `state_expired` | State Cookie TTL 超過（Req 2.6） | 401 |
 | `state_mismatch` | query state と cookie state 不一致（Req 2.7） | 401 |
-| `state_replay` | cookie 値の payload 内 Nonce と query `state` の不一致（Req 2.9。**ただし「同一ブラウザで cookie + query state を組ごと提示」のケースは検出不能 / stateless 設計の限界**） | 401 |
+| `state_replay` | cookie 値の payload 内 Nonce と query `state` の不一致（Req 2.9。**ただし「同一ブラウザで cookie + query state を組ごと提示」かつ同 console への提示ケースは検出不能 / stateless 設計の限界**） | 401 |
+| `state_console_mismatch` | `StatePayload.Console` が callback の console（URL パス由来）と不一致（Req 2.9 / 6.2 の cross-console state 混同 reject） | 401 |
 | `session_expired` | absolute 超過（Req 4.5） | 401 |
 | `session_idle` | idle 超過（Req 4.4） | 401 |
 | `session_revoked` | revoked_at != nil（Req 5.3） | 401 |
