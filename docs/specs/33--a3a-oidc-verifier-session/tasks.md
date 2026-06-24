@@ -15,7 +15,7 @@
   - `backend/internal/config/config.go` に以下を追加:
     - `SessionIdleTimeout time.Duration`（env `SESSION_IDLE_TIMEOUT`, default `30m`）
     - `SessionAbsoluteTimeout time.Duration`（env `SESSION_ABSOLUTE_TIMEOUT`, default `8h`）
-    - `StateCookieTTL time.Duration`（env `STATE_COOKIE_TTL`, default `10m`, **validation: `1s <= ttl <= 10m`**。Req 2.4「10 分以内に有効期限が切れる」を上限制約として満たすため、設定値が `0` / 負の duration / **1 秒未満（例: `500ms`）** / `10m` を超える値のいずれかなら起動時 `*errors.Error{Code: config_invalid}` で reject する。下限 1 秒は `CookieAttributes(ttl)` が `MaxAge = int(ttl / time.Second)` で導出するため、1 秒未満を許容すると MaxAge=0（= 即時削除 cookie）が発行され login flow が成立しなくなる事を防ぐ）
+    - `StateCookieTTL time.Duration`（env `STATE_COOKIE_TTL`, default `10m`, **validation: `1s <= ttl <= 10m`**。Req 2.4「10 分以内に有効期限が切れる」を上限制約として満たすため、設定値が `0` / 負の duration / **1 秒未満（例: `500ms`）** / `10m` を超える値のいずれかなら起動時 `*errors.Error{Code: config_invalid}` で reject する。下限 1 秒は `CookieAttributes(ttl)` が `MaxAge = int(ttl / time.Second)` で導出するため、1 秒未満を許容すると Go の `http.Cookie.MaxAge == 0`（= Max-Age 属性を Set-Cookie ヘッダに **出力しない** / browser session cookie 化して TTL 制御が効かない）になり、Req 2.4 の「短寿命の有効期限」が成立しなくなる事を防ぐ）
     - `StateMACSecret string`（env `STATE_MAC_SECRET`, required, len >= 32 bytes）
     - `OIDCTenantClientSecret string`（env `OIDC_TENANT_CLIENT_SECRET`, required, confidential
       client + `client_secret_basic` 認証用 / design.md Req 6.2 と確認事項 6 で確定）
@@ -80,11 +80,23 @@
       expires_at timestamptz NOT NULL
     );
     CREATE INDEX idx_state_nonces_expires_at ON state_nonces(expires_at);
+
+    -- defense in depth: app DB role からの直接 DML を物理的に拒否し、SuperAdmin context
+    -- 経由（callback handler / Repository.ConsumeStateNonce）でのみ INSERT を許可する。
+    -- tenant_id を持たない infra テーブルだが、A2 の既存方針（tenant_id を持たない infra
+    -- テーブルも SuperAdmin-only RLS に寄せる）に従う。万一 app role の SQL injection 等で
+    -- 当該テーブルに到達しても、`app.is_superadmin = 'true'` 設定が無い限り DML がすべて
+    -- 0 行 / reject に倒れる（replay 防止の二次防御）。
+    ALTER TABLE state_nonces ENABLE ROW LEVEL SECURITY;
+    CREATE POLICY state_nonces_superadmin_only ON state_nonces
+      USING (current_setting('app.is_superadmin', true) = 'true')
+      WITH CHECK (current_setting('app.is_superadmin', true) = 'true');
     ```
-    RLS ポリシーは設定しない（tenant_id を持たない / SuperAdmin context で INSERT のみ）。
-    GC（`WHERE expires_at < now()` での DELETE）は後続 sweeper task の責務で本 Issue 範囲外。
-    対応 down: `0015_create_state_nonces.down.sql` で `DROP INDEX idx_state_nonces_expires_at;
-    DROP TABLE state_nonces;`
+    GC（`WHERE expires_at < now()` での DELETE）は後続 sweeper task の責務で本 Issue 範囲外
+    （sweeper も同 SuperAdmin context で動作する前提）。
+    対応 down: `0015_create_state_nonces.down.sql` で `DROP POLICY state_nonces_superadmin_only
+    ON state_nonces;` → `ALTER TABLE state_nonces DISABLE ROW LEVEL SECURITY;` →
+    `DROP INDEX idx_state_nonces_expires_at;` → `DROP TABLE state_nonces;`
   - **既存 admin_users INSERT fixture / test を `oidc_issuer` 列対応に更新**: `grep -rn
     "INSERT INTO admin_users" backend/test/ backend/internal/` で本 migration の影響箇所を全件
     列挙する。A2 既存実装の典型例は `backend/test/integration/helpers_test.go:245` 付近で、
@@ -185,11 +197,14 @@
     MAC は HMAC-SHA256、cookie 値フォーマットは `base64url(json(payload)) + "." + base64url(MAC)`、
     比較は `subtle.ConstantTimeCompare`。cookie 名は **`__Host-ae_mdm_state`** 固定
     （design.md と整合）。`ExpireCookieAttributes()` は **state cookie 専用の削除 helper**
-    で、Name=`__Host-ae_mdm_state` / Value="" / Max-Age=0 / Path=/ / HttpOnly / Secure /
-    SameSite=Lax を返す（session cookie 用の `session.ExpireCookieAttributes()` とは Name が
-    異なるため、Handler / Service は state cookie 削除に **必ず本 helper を使用する** /
-    `session.ExpireCookieAttributes()` を流用すると `__Host-ae_mdm_state` 削除が成立せず
-    Req 2.8 違反になる）
+    で、Name=`__Host-ae_mdm_state` / Value="" / **`MaxAge = -1`** / Path=/ / HttpOnly / Secure /
+    SameSite=Lax を返す（Go の `http.Cookie` では **`MaxAge < 0` が「削除 cookie 発行」を
+    意味し**、`Set-Cookie` ヘッダに `Max-Age=0` 属性 + 過去日付の `Expires` 属性を出力する。
+    `MaxAge = 0` だと Max-Age 属性自体が Set-Cookie ヘッダに **含まれず** session cookie 化
+    して削除が成立しないため、必ず負値を返す）。session cookie 用の
+    `session.ExpireCookieAttributes()` とは Name が異なるため、Handler / Service は state
+    cookie 削除に **必ず本 helper を使用する** / `session.ExpireCookieAttributes()` を流用
+    すると `__Host-ae_mdm_state` 削除が成立せず Req 2.8 違反になる）
   - `backend/internal/auth/state_test.go` を新規追加。
     - (a) Sign → Verify 往復で `StatePayload.ReturnTo` が cookie 経由で復元される
     - (b) MAC tamper で `*errors.Error{Code: CodeUnauthenticated, failure_kind: state_invalid}`
@@ -202,8 +217,10 @@
       `SameSite == http.SameSiteLaxMode` / `Path == "/"` / `MaxAge == int(ttl/time.Second)`
       （`cfg.StateCookieTTL` から導出 / 10 分以下）
     - **(h) `ExpireCookieAttributes()` の属性検証**（Req 2.8 削除 cookie の helper）:
-      `Name == "__Host-ae_mdm_state"` / `Value == ""` / `MaxAge == 0` / `Path == "/"` /
-      `HttpOnly == true` / `Secure == true` / `SameSite == http.SameSiteLaxMode`
+      `Name == "__Host-ae_mdm_state"` / `Value == ""` / **`MaxAge < 0`**（具体値 `-1` /
+      Go の `http.Cookie` の削除 cookie 規約 / `MaxAge == 0` だと Max-Age 属性が Set-Cookie に
+      出力されず削除が成立しない）/ `Path == "/"` / `HttpOnly == true` / `Secure == true` /
+      `SameSite == http.SameSiteLaxMode`
   - `backend/internal/auth/doc.go` を新規追加。`internal/auth` の依存方向ルール（platform/oidc
     と platform/db / platform/httpserver / logger / errors / config のみ import 可）を記載
   - _Requirements: 2.1, 2.2, 2.3, 2.4, 2.5, 2.6, 2.7, 2.9, NFR 4.1_
@@ -217,15 +234,17 @@
     HttpOnly / Secure / SameSite=Lax / Path=/ / `MaxAge = int(ttl/time.Second)` /
     呼び出し側が `cfg.SessionAbsoluteTimeout` を渡し、cookie の MaxAge を永続ストア側 absolute
     timeout と一致させる）、`ExpireCookieAttributes() http.Cookie`（失効・logout 時の削除
-    cookie / Max-Age=0 / **session cookie 専用** であり、state cookie 削除には
-    `state.ExpireCookieAttributes()` を使うこと）、`HashPrefix(hash) string`（先頭 8 文字 /
-    Req 3.8）を実装
+    cookie / **`MaxAge = -1`** / Go の `http.Cookie` では `MaxAge < 0` のみが削除 cookie として
+    `Set-Cookie` ヘッダに `Max-Age=0` 属性を出力する規約のため、struct field には負値を設定する
+    / **session cookie 専用** であり、state cookie 削除には `state.ExpireCookieAttributes()` を
+    使うこと）、`HashPrefix(hash) string`（先頭 8 文字 / Req 3.8）を実装
   - `backend/internal/auth/session_test.go` を新規追加。(a) `New()` が 32 byte 相当の
     base64url 文字列を返す（長さ・文字種）、(b) `New()` を 100 回呼んで重複なし
     （乱数性）、(c) `HashToken` が SHA-256 hex（64 文字）を返す、(d) `HashToken` の冪等性、
     (e) **`CookieAttributes(ttl)` の Name / Secure / HttpOnly / SameSite / Path 値 +
     `MaxAge == int(ttl/time.Second)` 検証**（`ttl = 8h` で `MaxAge == 28800` 等）、(f)
-    `ExpireCookieAttributes` の Max-Age=0 確認、(g) `HashPrefix` が 8 文字
+    `ExpireCookieAttributes` の **`MaxAge < 0`** 確認（Go の `http.Cookie` 削除規約 / 具体値 `-1`）、
+    (g) `HashPrefix` が 8 文字
   - _Requirements: 3.2, 3.3, 3.4, 3.5, 3.7, 3.8, 4.7, NFR 1.2_
   - _Boundary: SessionCookie_
   - _Depends: 1.1_
@@ -399,8 +418,12 @@
     - (e) `ResolveAdminUser` が `admin_user_not_provisioned` を返したら Service が 403 で
       伝播し、session 作成に到達しないこと
     - (f) `LookupAndRefresh` の境界値（idle 29:59 / 30:00 / 30:01、absolute 7:59:59 /
-      8:00:00 / 8:00:01、revoked_at != nil → session_revoked、Console mismatch →
-      console_mismatch（Req 6.2 / 6.3 の Middleware 側分離強制テスト））
+      8:00:00 / 8:00:01、revoked_at != nil → session_revoked、`Session.Console !=
+      expectedConsole` → **`*errors.Error{Code: CodeUnauthenticated, failure_kind:
+      console_mismatch}` で 401**（Req 6.2 / 6.3 の Middleware 側分離強制テスト /
+      design.md `failure_kind` 一覧表および tasks.md 5.1 / 5.2 / 6.2 と同じ 401 を期待 /
+      403 ではない — 403 は本 Issue では `admin_user_not_provisioned` 限定）。失効パスは
+      いずれも `repo.Revoke(ctx, hash, now)` を冪等に呼ぶこと（Req 4.6）
     - (g) `Logout` で Revoke 1 回呼ばれる、2 回目 Logout は no-op
     - (h) 各失敗パスで `log.Warn` に `failure_kind` field が **明示的に**渡されている
       （fake logger で field を assert）
@@ -409,16 +432,25 @@
   - _Depends: 2.1, 3.1, 3.2, 4.1_
 - [ ] 5.2 Handler 実装 + httptest 単体テスト
   - `backend/internal/auth/handler.go` を新規追加。`Handler` struct と `Mount(r chi.Router,
-    consolePrefix string, console oidc.Console)` を提供。`/login`（GET）/ `/callback`（GET）/
-    `/logout`（POST）の 3 ルートを `r.Get("/login", h.login(console))` のように console を
-    closure で固定して登録
+    consolePrefix string, console oidc.Console)` を提供。`Mount` は **内部で
+    `r.Route(consolePrefix, func(sub chi.Router) { sub.Get("/login", h.login(console));
+    sub.Get("/callback", h.callback(console)); sub.Post("/logout", h.logout(console)) })`** の形で
+    sub-router を構築し、3 ルート（`/login` GET / `/callback` GET / `/logout` POST）を console を
+    closure で固定して `consolePrefix` 配下に登録する（呼び出し側が `authMount(r, "/api/auth",
+    ConsoleTenant)` を渡すと最終的に `/api/auth/login` / `/api/auth/callback` / `/api/auth/logout`
+    が登録される。後段 task 6.2 の `authMount(r, "/api/auth", ...)` / `authMount(r, "/api/admin/auth",
+    ...)` 2 度呼びと整合する設計 / Mount 内で `r.Get("/login", ...)` を root 相対で登録する誤実装を
+    すると `/api/auth/login` ではなく `/login` に登録されて Req 6.2 の path-based クライアント分離
+    が成立しないため、必ず `r.Route(consolePrefix, ...)` 経由で sub-router を作る）
   - login ハンドラ: `return_to` クエリ取得 → `service.BeginLogin(ctx, console, returnTo)` →
     `Set-Cookie: state_cookie` + `302 Found` `Location: redirectURL`。エラー時 `errors.WriteHTTP`
   - callback ハンドラ: `code` / `state` クエリ取得 → cookie から state cookie 取得 →
     `rawSessionToken, sessionCookie, returnTo, err := service.HandleCallback(ctx, console,
     code, queryState, rawStateCookie)` → 成功時は **`Set-Cookie: session_cookie`**（生値が
-    Value）+ **`Set-Cookie: state.ExpireCookieAttributes()`**（`__Host-ae_mdm_state` を Max-Age=0
-    で削除 / **`session.ExpireCookieAttributes()` を使わない** — 削除対象が
+    Value）+ **`Set-Cookie: state.ExpireCookieAttributes()`**（`__Host-ae_mdm_state` を削除する
+    cookie / `state.ExpireCookieAttributes()` は内部で `MaxAge = -1` の `http.Cookie` を返し、
+    Go の net/http は wire 上の `Set-Cookie` ヘッダに `Max-Age=0` 属性 + 過去日付の `Expires`
+    属性を出力する / **`session.ExpireCookieAttributes()` を使わない** — 削除対象が
     `__Host-ae_mdm_session` になり state cookie が残置されて Req 2.8 違反になるため）+
     `302 Found` `Location: returnTo`（**Service が戻す `returnTo` は `StatePayload.ReturnTo`
     由来 / MAC 保護されているので tamper されない / それでも Handler は念のため Location

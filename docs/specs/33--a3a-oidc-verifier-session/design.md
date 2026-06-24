@@ -103,7 +103,7 @@ A2（Issue #2）で以下が完成済み（本 Issue の前提）:
 
 ```mermaid
 flowchart LR
-    Browser[Browser<br/>tenant-console or admin-console] -->|GET /api/auth/login?console=tenant| Handler
+    Browser[Browser<br/>tenant-console or admin-console] -->|GET /api/auth/login<br/>or /api/admin/auth/login<br/>path-based に console を固定| Handler
     Handler[auth.Handler] -->|state cookie 発行<br/>+ IdP redirect URL 構築| Service
     Service[auth.Service] -->|client_id / redirect_uri lookup| Cfg[(config.Config<br/>OIDC × 2)]
     Browser -->|GET /api/auth/callback?code=...&state=...| Handler
@@ -519,8 +519,11 @@ func Verify(cookieValue, queryState string, secret []byte, ttl time.Duration, no
 func CookieAttributes(ttl time.Duration) http.Cookie
 
 // ExpireCookieAttributes は state cookie の **削除用** Set-Cookie 属性を返す
-// （Name=`__Host-ae_mdm_state` / Value="" / Max-Age=0 / Path=/ / HttpOnly / Secure /
-// SameSite=Lax）。callback 成功時 / state 検証失敗時 / state replay 検出時に Handler が
+// （Name=`__Host-ae_mdm_state` / Value="" / **`MaxAge = -1`** / Path=/ / HttpOnly / Secure /
+// SameSite=Lax）。Go の `http.Cookie` では `MaxAge < 0` のみが削除 cookie として
+// `Set-Cookie` ヘッダに `Max-Age=0` 属性 + 過去日付の `Expires` 属性を出力する規約
+// （`MaxAge = 0` は Max-Age 属性自体を出力せず session cookie 化するため、削除には必ず負値を
+// 設定する）。callback 成功時 / state 検証失敗時 / state replay 検出時に Handler が
 // `Set-Cookie` ヘッダで返却して state cookie を即時無効化する（Req 2.8 の再利用防止 /
 // session.ExpireCookieAttributes() は session cookie 用で名前が異なるため、state cookie 削除には
 // 必ず本 helper を使用する）。
@@ -563,8 +566,11 @@ func HashToken(rawToken string) string
 func CookieAttributes(ttl time.Duration) http.Cookie
 
 // ExpireCookieAttributes は session cookie の **削除用** Set-Cookie 属性を返す
-// （Name=`__Host-ae_mdm_session` / Value="" / Max-Age=0 / Path=/ / HttpOnly / Secure /
-// SameSite=Lax）。Logout / 失効検出時に Handler / Middleware が発行する。state cookie 用の
+// （Name=`__Host-ae_mdm_session` / Value="" / **`MaxAge = -1`** / Path=/ / HttpOnly / Secure /
+// SameSite=Lax）。Go の `http.Cookie` の削除規約に従い `MaxAge < 0` を設定し、wire 上の
+// `Set-Cookie` ヘッダには `Max-Age=0` 属性 + 過去日付の `Expires` 属性が出力される
+// （`MaxAge = 0` だと Max-Age 属性が省略され session cookie 化して削除が成立しない）。
+// Logout / 失効検出時に Handler / Middleware が発行する。state cookie 用の
 // `state.ExpireCookieAttributes()` とは Name が異なるため、両者を取り違えない。
 func ExpireCookieAttributes() http.Cookie
 
@@ -726,7 +732,7 @@ func NewService(
 |---|---|---|---|---|
 | GET | `/api/auth/login` | query: `return_to`（optional, 戻り先 URL。**省略 / 空文字の場合は default `/` を採用**して callback 成功時に空 `Location` ヘッダにならないようにする） | 302 Found, `Location: <IdP>/authorize?...`, `Set-Cookie: __Host-ae_mdm_state=...` | 400（return_to が不正 URL / host 指定あり）/ 503（IdP discovery 未完了） |
 | GET | `/api/admin/auth/login` | 同上 | 同上（admin client_id 経由） | 同上 |
-| GET | `/api/auth/callback` | query: `code`, `state` / cookie: `__Host-ae_mdm_state` | 302 Found, `Location: <return_to>`, `Set-Cookie: __Host-ae_mdm_session=...; Max-Age=...`, `Set-Cookie: __Host-ae_mdm_state=; Max-Age=0` | 401（state mismatch / sig / iss / aud / exp / kid）/ 502（IdP token endpoint 失敗） |
+| GET | `/api/auth/callback` | query: `code`, `state` / cookie: `__Host-ae_mdm_state` | 302 Found, `Location: <return_to>`, `Set-Cookie: __Host-ae_mdm_session=...; Max-Age=...`, `Set-Cookie: __Host-ae_mdm_state=; Max-Age=0` | 401（state mismatch / state_console_mismatch / state_replay / sig / iss / aud / exp / kid）/ **403（admin_user_not_provisioned / 後述 `failure_kind` 一覧および「Auth Repository」節の `ResolveAdminUser` 仕様参照）** / 500（csprng_failure）/ 502（upstream_oidc_token / IdP token endpoint 失敗） |
 | GET | `/api/admin/auth/callback` | 同上 | 同上（admin client） | 同上 |
 | POST | `/api/auth/logout` | cookie: `__Host-ae_mdm_session` | 204 No Content, `Set-Cookie: __Host-ae_mdm_session=; Max-Age=0` | 401（cookie 不在）/ 500 |
 | POST | `/api/admin/auth/logout` | 同上 | 同上 | 同上 |
@@ -858,9 +864,14 @@ state nonce の一度限り消費を強制する補助テーブル（Req 2.9）�
 idx_state_nonces_expires_at ON state_nonces(expires_at)`。down は対称の `DROP INDEX` +
 `DROP TABLE`。
 
-**RLS**: `state_nonces` は tenant_id を持たない（callback は TenantContext 未確立で動作するため）。
-RLS ポリシーは設定せず、Repository は SuperAdmin context（`app.is_superadmin=true`）で
-INSERT する。本テーブルは「短寿命の nonce 消費記録」専用で、tenant 跨ぎの参照は発生しない。
+**RLS**: `state_nonces` は tenant_id を持たない（callback は TenantContext 未確立で動作するため）が、
+A2 の既存方針（**tenant_id を持たない infra テーブルも SuperAdmin-only RLS に寄せる**）に従って
+**SuperAdmin context（`app.is_superadmin=true`）必須の RLS ポリシーを設定する** — 万一 app DB
+role に SQL injection 等で当該テーブルに到達されても DML がすべて 0 行 / reject に倒れる
+（replay 防止の二次防御）。Repository は callback 経路で必ず SuperAdmin context を確立してから
+INSERT する。本テーブルは「短寿命の nonce 消費記録」専用で、tenant 跨ぎの参照は発生しないため
+ポリシーは「`app.is_superadmin = 'true'` のときに USING / WITH CHECK を通す」単一ルールで十分
+（具体 SQL は task 1.2 の migration `0015_create_state_nonces.up.sql` に記載）。
 
 **GC**: 本 Issue 範囲外。後続 sweeper task が `WHERE expires_at < now()` で定期 DELETE する想定
 （cookie TTL = 10 分のため、`expires_at` 経過行はもはや検証に使われない）。本 Issue では
