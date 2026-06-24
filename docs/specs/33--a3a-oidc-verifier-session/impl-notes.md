@@ -149,6 +149,50 @@ learning を `### Task <id>` 単位で追記する。`docs/specs/33--a3a-oidc-ve
     通すテストになるため、責務が変質する。本 task では責務 1 件のテスト構造を維持する
     判断を採用した。
 
+### Task 1.4
+
+- **採用方針**: `backend/internal/logger/redact.go` の `redactKeySubstrings` slice に
+  `state_mac_secret` / `client_secret` / `state_cookie` / `session_cookie` の 4 件を追加し、
+  既存意味カテゴリ（cookie 系の隣接 / generic secret 系）に従って配置。test は
+  `TestRedactFields_RedactsSecretsBySubstring` の case 表に追加 4 件の完全一致行を追加 +
+  新規 `TestRedactFields_AuthAllowlistAdditions` で prefix / suffix / 中央埋込 /
+  case-insensitive / cookie 重複カバレッジの substring 一致観点を独立 allowlist として明示。
+- **重要な判断**:
+  - **独立 allowlist 化の動機**: `cookie` substring が既に `session_cookie` /
+    `state_cookie` を substring 一致でカバーするが、tasks.md L189〜L194 の指示通り 4 件を
+    独立 allowlist として明示することで「auth ドメインの cookie 名を意味的に
+    明示」する責務を可視化した。これは将来 `cookie` substring が縮小される場合の
+    回帰耐性（auth cookie の redaction が確実に残る）も兼ねる。
+  - **変更影響範囲は 1 箇所に閉じる**: 既存 redaction 経路（`redactZapField` /
+    `redactFields` / `redactCauseString`）はすべて `redactKeySubstrings` を
+    `shouldRedact()` 経由で参照するため、allowlist 列挙 1 箇所の追加で全経路に波及する。
+    `freeTextRedactKeys` / `causePatternReplacers` は本 task の責務外（cause 文字列の
+    部分置換は別系統 / `client_secret` 文字列補間禁止は実装契約側の責務）。
+  - **red→green 手順を確実に踏んだ**: 先に test を追加して `go test ./internal/logger/...`
+    で 8 ケース fail を確認（`state_mac_secret` / `client_secret` 系のみ fail し、
+    `state_cookie` / `session_cookie` 系は既存 `cookie` substring でカバー済みのため
+    PASS）。その後 redact.go の allowlist 拡張で全 PASS に到達。観点不備（盲目的に
+    green で始まるテスト）を避けた。
+  - **HTTP header 風 hyphen キー（`X-State-MAC-Secret` 等）は substring 一致しない
+    境界を観察**: `cookie` のような単一 word は `set-cookie` 等のハイフン区切りでも
+    一致するが、`state_mac_secret` は snake_case の compound key のため
+    `x-state-mac-secret`（lowercased）にマッチしない。auth 領域の構造化ログ field 名は
+    snake_case で field 化される前提（A2 既存 logger / zap field の慣習）のため、
+    test も snake_case の prefix / 中央埋込で独立 allowlist の発火を確認する形に整えた。
+- **残存課題**:
+  - 後続 task 2.1 / 5.1 / 5.2 / 6.1: 本 task の field 名 redaction は二次防御で、
+    各失敗パスの error wrap 文言に機密値（`cfg.StateMACSecret` /
+    `cfg.OIDCTenantClientSecret` / `cfg.OIDCAdminClientSecret` / state cookie 生値 /
+    session cookie 生値 / id_token raw JWT）を文字列補間しない一次防御は実装側の
+    責務として残る（tasks.md L201〜L210 の design.md「機密値を Cause メッセージ本文に
+    埋め込まない実装契約」と整合）。本 redaction は zap field key の substring 一致でのみ
+    値を置換する設計のため、`fmt.Errorf("... client_secret=%s ...", ...)` のような
+    メッセージ補間経路は redaction を bypass する点に注意。
+  - 後続 task 4.1 / 5.1: auth.Repository / auth.Service が `failure_kind` ログを出す
+    時、`session_hash_prefix` / `state_mac_prefix` 等の hash prefix を field 化する一次
+    防御を守りつつ、誤って `session_cookie` field 名で生値を渡してしまった場合の二次
+    防御として本 allowlist が効く（NFR 1.1 / NFR 4.2 / Req 1.11 / Req 3.6）。
+
 ## 確認事項
 
 本セクションは `requirements.md` / `design.md` / `tasks.md` 本文の書き換えを伴わずに、実装フェーズ
