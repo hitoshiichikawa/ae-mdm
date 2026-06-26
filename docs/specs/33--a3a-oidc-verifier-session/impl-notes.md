@@ -1200,6 +1200,38 @@ learning を `### Task <id>` 単位で追記する。`docs/specs/33--a3a-oidc-ve
     削除 / session cookie 削除 / cross-console reject / revoked_at セット の全観点を e2e で網羅）
 - 実行日時: 2026-06-26
 
+### Task 7
+
+- **採用方針**: タスク `7` は umbrella header（`_Requirements:_` / `_Boundary:_` を持たない親 task）
+  であり、本起動では直接の実装は無く、子 task 7.1（runbook + impl-notes 認証配線手順の追記）が
+  後続 fresh iteration で実装される前提として `### Task 7` learning スロットのみ整備する
+  （先行する `### Task 1` / `### Task 2` / `### Task 3` / `### Task 4` / `### Task 5` /
+  `### Task 6` の umbrella 処理パターンを踏襲）。
+- **重要な判断**:
+  - 親 task は `tasks.md` 上で `### Task 7` の learning スロットを成立させるためのプレースホルダ
+    に留め、`docs/runbook/local-dev.md` への「OIDC 認証フロー検証手順」節追加・本 impl-notes.md
+    の `## Implementation Notes` セクション外への (a)〜(e) 5 項目箇条書きの新規節追加・
+    `backend/internal/depspin/depspin.go` の `coreos-go-oidc` blank import 削除等は本 iteration
+    では行わない（実装本体は 7.1 の fresh iteration が担当する設計 / `### Task 1` /
+    `### Task 2` / `### Task 3` / `### Task 4` / `### Task 5` / `### Task 6` と同パターン）。
+  - per-task ループ規約「1 commit = 1 task ID」に従い、本 iteration の marker commit は
+    `docs(tasks): mark 7 as done` 単一の subject で `tasks.md` のみを含める。impl-notes.md への
+    `### Task 7` 追加は marker commit と分離した別 commit に積む（task ID 連記表記
+    `mark 7 / 7.1 as done` は per-task Reviewer の diff range 解決を不安定化させるため禁止）。
+- **残存課題**: 子 task 7.1（`docs/runbook/local-dev.md` への「OIDC 認証フロー検証手順」節
+  追加、Keycloak realm export `infra/keycloak/realm-export.json` の tenant-console /
+  admin-console 2 client が必要であることの明記、未配置時は IdP mock を使うか umbrella task
+  1.2 完了を待つ旨の記載、`STATE_MAC_SECRET` の生成手順 `openssl rand -hex 32` および
+  `.env.example` 置換手順の記載、`impl-notes.md` への (a) `coreos/go-oidc` を indirect →
+  direct 依存に昇格する `go.mod` / `go.sum` 更新が必要 / (b) Keycloak realm export の 2 client
+  定義への依存 / (c) 確認事項 1〜6 のうち本 Issue 実装時点で未解消のもの / (d)
+  `internal/depspin/depspin.go` 内 `coreos-go-oidc` の blank import を本 Issue で削除（A2
+  task 5.2 で残置されていれば）/ (e) 「DB-backed verify 実行結果」節を必ず追加し、Developer
+  がローカル or CI のいずれの経路で `make migrate-up && go test ./test/integration/...` を
+  実行したか・pass / skip 件数・実行コマンドのスニペット・実行日時を記録する、の 5 項目
+  箇条書き追加）は後続 fresh iteration で消化する。子 task 全完了時の親 task `7` の昇格は
+  本 iteration で完了済みのため、auto-promotion 規約は no-op として扱う。
+
 ## 確認事項
 
 本セクションは `requirements.md` / `design.md` / `tasks.md` 本文の書き換えを伴わずに、実装フェーズ
