@@ -1232,6 +1232,208 @@ learning を `### Task <id>` 単位で追記する。`docs/specs/33--a3a-oidc-ve
   箇条書き追加）は後続 fresh iteration で消化する。子 task 全完了時の親 task `7` の昇格は
   本 iteration で完了済みのため、auto-promotion 規約は no-op として扱う。
 
+### Task 7.1
+
+- **採用方針**: `docs/runbook/local-dev.md` に新規節「6. OIDC 認証フロー検証手順」を追加
+  （旧「6. 終了」は「7. 終了」へ rename）し、Keycloak realm export 2 client 依存 /
+  `STATE_MAC_SECRET` 生成手順 + `.env.example` 置換手順 / 認証フロー手動検証手順 /
+  DB-backed integration test 経路の 5 サブ節（6.1〜6.5）に再分割した。
+  `backend/internal/depspin/depspin.go` の `coreos/go-oidc/v3` blank import は本 task で
+  削除し、godoc コメントも task 2.1 で direct dependency 化済みの実態を反映する形に更新した。
+  本 impl-notes.md には `## Implementation Notes` セクション **外**に新規節
+  「## 認証配線実装ノート（task 7.1）」を追加し、tasks.md L761〜L769 の指示通り (a)〜(e) の
+  5 項目箇条書きを集約した。
+- **重要な判断**:
+  - **`### 6. 終了` を `### 7. 終了` に rename した理由**: runbook 既存節 6 と新規節
+    「OIDC 認証フロー検証手順」の **見出し番号衝突**を避けるための機械的 rename。「終了」は
+    最後段の wrap-up 節で、内容（`make down` / `docker compose down -v`）は不変。番号衝突を
+    放置すると目次・節間参照（既存 cross-link は無いが将来追加時の混乱）が壊れるため、本 task
+    範囲で対応した。
+  - **realm export 未配置時の代替経路として「httptest OIDC IdP mock を経由した integration
+    test」を明示**: tasks.md L755〜L758「未配置の場合は本 Issue 範囲では IdP mock を使うか、
+    umbrella task 1.2 完了を待つ旨を記載」の指示に対応。本 Issue は task 6.4 で
+    `auth_e2e_helpers_test.go` の mock IdP を経由した end-to-end test を **既に確立済み**
+    （impl-notes Task 6.4 / DB-backed verify 経路で PASS 確認済み）であり、Keycloak 経由の
+    手動検証が umbrella task 1.2 完了まで不可能な場合の **同等の検証手段**として runbook
+    6.1 / 6.5 節で参照可能にした。
+  - **`STATE_MAC_SECRET` 生成手順は `openssl rand -hex 32` 固定**: design.md 確認事項 1 と
+    tasks.md L759 の指示通り。32 byte（256 bit）= hex 64 文字を生成する canonical な手段で、
+    macOS / Linux 標準環境で追加 dependency なしに利用可能。`/dev/urandom` から `head -c 32 |
+    xxd -p` 等の代替手段もあるが、`openssl rand` の方が一行で完結し既存 runbook の
+    `SESSION_SECRET=$(openssl rand -hex 32)` 慣習とも整合する。
+  - **runbook 6.4「トラブルシューティング」を独立サブ節として切り出した理由**: 既存「###
+    トラブルシューティング」節（runbook 末尾）は docker compose 全体の起動失敗を扱う一般的
+    トラブル集で、OIDC 認証フロー特有の failure_kind（state_mac mismatch / aud mismatch /
+    console_mismatch 等）を混入させると責務が膨らむ。OIDC 固有の failure path 解説は
+    新規節 6.4 に集約し、`failure_kind` field と Service 側の design 一貫性を runbook 上で
+    可視化した（observability 改善 / NFR 4.1 と整合）。
+  - **`depspin.go` blank import 削除は本 task で実施**: task 2.1 で `internal/platform/oidc`
+    から `github.com/coreos/go-oidc/v3/oidc` を **direct import** に移行済み（go.mod 上でも
+    direct dependency に昇格済み）で、`depspin.go` の blank import の役目（go.mod から
+    `require` が `go mod tidy` で削除されることを防ぐ）は既に果たされた。tasks.md L764〜L766
+    の指示通り本 task で削除し、godoc コメントから「coreos-go-oidc」の言及も整合的に削除した
+    （`Issue #33` 言及 1 行は **記録**として残し、削除実施の根拠が将来 readers から追跡できる
+    ようにした）。
+  - **5 項目箇条書きの配置**: tasks.md L761〜L770 の指示通り、本 impl-notes.md の
+    `## Implementation Notes` セクション **外**に新規節「## 認証配線実装ノート（task 7.1）」
+    を追加し、5 項目を箇条書きで集約した。`## Implementation Notes` 配下の `### Task N`
+    learning は per-task ループ規約により改変禁止（前方伝播の規律）であり、本 task の 5 項目
+    箇条書きは Issue #33 全体に対する横断的サマリ（個別 task の learning ではなく Issue 全体
+    の implementation の俯瞰）として独立節に配置するのが構造的に妥当（per-task 規約と非干渉）。
+  - **`## 確認事項` 節の改変はしない**: 既存 `## 確認事項` 節（task 3.2 の cookie 属性 helper
+    rename / task 1.2 の「なし」記述）は per-task 規約の「`## Implementation Notes` セクション
+    **外** の既存記述には触れない」契約により保持する。本 task の確認事項は新規 5 項目箇条書き
+    節の (c) で言及する形に集約し、`## 確認事項` 節への追記は行わない（責務分離 / 既存記述は
+    そのまま）。
+- **残存課題**:
+  - umbrella task 1.2（Keycloak realm export 配置）は既に完了済み（`infra/keycloak/realm-export.json`
+    に 2 client 定義済み）であり、本 runbook 6.1 / 6.3 節の手動検証手順は即時実施可能。
+    本 Issue では task 6.4 の DB-backed integration test（mock IdP 経由）で同等の挙動を担保しており、
+    Keycloak 経由の手動検証は本 Issue 範囲外の運用検証としてのみ実施する（必須ではない）。
+  - 確認事項 8（admin_users / admin_role_assignments の事前 provisioning フロー / admin-seed
+    CLI を誰がいつ実行するか）は umbrella task 14.2 / 後続 Issue で扱う。本 task 範囲では
+    runbook 5 節「初期 SuperAdmin の seed」が暫定手動手順を案内する状態を維持する（再記載
+    せず、既存節をそのまま参照する形）。
+  - 確認事項: runbook 節番号の連続性（6 → 7）を保つため「終了」節を rename した。将来
+    OIDC 認証フローに更なる手順（例: token refresh / RP-initiated logout 等の追加 Issue）が
+    入る場合、本節を 6.6 / 6.7 と分割追加可能な構造に整理してある（節 6 配下のサブ番号体系
+    が 6.1〜6.5 で空きがあるため）。
+
+### Task 7.1 — Verify 実行結果
+
+- `cd backend && go build ./...`: PASS
+- `cd backend && go vet ./...`: PASS
+- `cd backend && go test ./... -count=1`: 全 package PASS（`internal/depspin` の blank
+  import 削除に対する regression なし / 既存 OIDC Verifier / Service / Middleware の
+  direct import が独立に成立しており depspin に依存しないため安全）
+- DB-backed verify: 本 task は docs 編集 + depspin.go の blank import 削除のみで完結し、
+  DB を要求しない。Issue #33 全体の最終 DB-backed verify 結果は本 impl-notes.md の
+  **「## 認証配線実装ノート（task 7.1）」節の (e)** に集約済み（task 4.1 / task 6.4 の
+  既存 verify 結果を参照する形）。
+- 実行日時: 2026-06-26
+
+## 認証配線実装ノート（task 7.1）
+
+本節は Issue #33（A3a: OIDC Verifier + Session 管理）全体に対する横断的サマリとして、
+tasks.md L761〜L770 の指示に従い (a)〜(e) の 5 項目を箇条書きで集約する。`## Implementation
+Notes` セクション **外**に配置することで、各 task の `### Task <id>` learning（前方伝播の
+規律により改変禁止）と責務分離している。
+
+- **(a) `coreos/go-oidc` を indirect → direct 依存に昇格する `go.mod` / `go.sum` 更新（完了済み）**
+  - 状態: **完了済み**（task 2.1 で実施）。
+  - 詳細: task 2.1 で `backend/internal/platform/oidc/{doc.go, verifier.go, verifier_test.go}` を
+    新規追加し、`github.com/coreos/go-oidc/v3/oidc` を **direct import** に移行した。
+    あわせて `go mod tidy` を実行して `backend/go.mod` の `require ( ... )` ブロックを
+    `github.com/coreos/go-oidc/v3 v3.10.0` の direct 宣言に昇格させ、`go.sum` も整合させた。
+    task 5.1 / 6.3 で `goidc.ScopeOpenID` を bootstrap (`cmd/api/main.go`) からも直接参照する
+    形が確立しており、direct dependency としての利用は複数経路で固定済み。
+  - task 7.1 での追加作業: なし（既に完了済みの状態を記録するのみ）。
+
+- **(b) Keycloak realm export の 2 client 定義への依存**
+  - 状態: **依存あり / `infra/keycloak/realm-export.json` に既に配置済み**（umbrella task 1.2
+    完了済み）。本 Issue #33 で `tenant-console` / `admin-console` の 2 client が realm export
+    に登録されていることが OIDC 認証フロー全体の前提条件となる。
+  - 詳細: `infra/keycloak/realm-export.json` の `clients[]` に `clientId: "tenant-console"`
+    （`redirectUris` に `http://localhost:8080/api/auth/callback` を含む）と
+    `clientId: "admin-console"`（`redirectUris` に `http://localhost:8080/api/admin/auth/callback`
+    を含む）が定義されている。これにより backend の `OIDC_TENANT_REDIRECT_URL` /
+    `OIDC_ADMIN_REDIRECT_URL`（`.env.example` 既定値）と realm export 側 `redirectUris` が
+    一致する状態が成立している。
+  - 各 client の `secret` は `.env` の `OIDC_TENANT_CLIENT_SECRET` / `OIDC_ADMIN_CLIENT_SECRET`
+    と一致させる必要があり、ローカル開発時は Keycloak admin console（`http://localhost:8081/`）の
+    `Clients → <client> → Credentials` から取得・置換する手順を `docs/runbook/local-dev.md` 6.2 節
+    で明文化した。
+  - 未配置時の代替経路: 本 Issue 範囲では `backend/test/integration/auth_*_test.go` の **httptest
+    ベース OIDC IdP mock**（`auth_e2e_helpers_test.go` で discovery / JWKS / token endpoint を提供）
+    経由で end-to-end 検証が可能。task 6.4 の DB-backed verify で全 12 関数 PASS 済み。
+
+- **(c) 確認事項 1〜6 のうち本 Issue 実装時点で未解消のもの**
+  - 確認事項 1（`STATE_MAC_SECRET` env 名）: **resolved**（task 1.1 で `STATE_MAC_SECRET` を採用 +
+    `.env.example` に placeholder 配置 + runbook 6.2 節で `openssl rand -hex 32` 生成手順を明文化）
+  - 確認事項 2（タイムアウト値の env 単位）: **resolved**（task 1.1 で `time.ParseDuration` 経由の
+    `30m` / `8h` / `10m` 形式を採用、`.env.example` に既定値配置）
+  - 確認事項 3（`return_to` の検証規則）: **resolved**（task 5.1 で「同一オリジン内の相対 URL のみ」
+    を採用、`url.Parse` で `u.Host != "" || u.Scheme != ""` の二段防御実装、test
+    `TestBeginLogin_ReturnTo_*` で回帰耐性確保）
+  - 確認事項 4（session cookie の Domain / Path / オリジン前提）: **resolved**（task 3.1 / 3.2 で
+    `__Host-ae_mdm_state` / `__Host-ae_mdm_session` の `__Host-` prefix 採用、Domain 属性なし /
+    Path=`/` 固定 / Secure + HttpOnly + SameSite=Lax 固定）
+  - 確認事項 5（logout エンドポイントの method）: **resolved**（task 5.2 で `POST /api/auth/logout`
+    を採用、handler test で 6 endpoints の method assertion で回帰耐性確保）
+  - 確認事項 6（OIDC token endpoint の認証方式）: **resolved**（task 2.1 / 6.3 で
+    `oauth2.AuthStyleInHeader` を明示固定、`TestVerifier_EndpointAuthStyle_IsInHeader` /
+    `TestBuildOAuth2Configs` で回帰耐性確保）
+  - 補足 / 確認事項 7（state replay 防止の方式）: design.md round 3 / 5 で **resolved** 済み
+    （state_nonces テーブル + OIDC nonce binding の組合せ、task 1.2 / 4.1 / 5.1 で実装済み）
+  - 補足 / 確認事項 8（admin_users / admin_role_assignments の事前 provisioning）: **未解消 /
+    後続 Issue 扱い**。本 Issue では Repository.ResolveAdminUser が `(oidc_issuer, oidc_subject)`
+    複合 UNIQUE で lookup し、未 provisioning なら 403 `admin_user_not_provisioned` を返す経路
+    までを実装。admin-seed CLI（umbrella task 14.2）の実装 + 「誰がいつ admin-seed CLI を実行
+    するか」の運用フロー確定は **本 Issue 範囲外**で、後続 Issue で扱う。
+  - 加えて、impl-notes 末尾「## 確認事項」節（task 3.2 由来）で記録した
+    `session.SessionCookieAttributes` / `session.SessionExpireCookieAttributes` への rename
+    （`state.CookieAttributes` / `state.ExpireCookieAttributes` との命名衝突回避）は、本 Issue で
+    確定した design 補正であり、後続 Issue で `state.go` / `session.go` のフラット package 維持を
+    継承する旨を申し送る（task 5.1 / 5.2 / 6.1 の commit / test で本契約が固定済み）。
+  - **本 Issue 実装時点で未解消なもの**: 確認事項 1〜6 はすべて resolved。残るのは確認事項 8
+    （admin-seed CLI 運用フロー / 後続 Issue 扱い）のみ。
+
+- **(d) `internal/depspin/depspin.go` 内 `coreos-go-oidc` の blank import を本 Issue で削除**
+  - 状態: **task 7.1 で削除完了**。
+  - 詳細: task 2.1 で `internal/platform/oidc` から `github.com/coreos/go-oidc/v3/oidc` を direct
+    import に移行済み（go.mod 上でも direct dependency に昇格済み）で、`depspin.go` の blank
+    import が果たしていた「go.mod の `require` が `go mod tidy` で削除されることを防ぐ」役目は
+    既に複数の direct import 経路（`internal/platform/oidc/verifier.go` 等）で代替されている。
+    本 task で `backend/internal/depspin/depspin.go` から `_ "github.com/coreos/go-oidc/v3/oidc"`
+    の blank import 行と、対応する `package depspin` godoc の `coreos/go-oidc/v3` 言及を削除した
+    （A2 task 5.2 で残置されていた状態を整理）。
+  - 残置依存: `cloud.google.com/go/pubsub`（umbrella task 6.x）/ `google.golang.org/api/androidmanagement/v1`
+    （umbrella task 4.1）の 2 件は引き続き blank import として残置（後続 Issue で順次削除）。
+
+- **(e) DB-backed verify 実行結果（Issue #33 全体）**
+  - 本 Issue で **DB-backed verify は 2 段階で実施**した。詳細結果は impl-notes 内の以下節を
+    参照（task 4.1 / task 6.4 の暫定記録を本節で集約 → Issue #33 全体としての最終結果として記録）:
+    - `### Task 4.1 — Verify 実行結果`（impl-notes L534〜L551 / migration 0013〜0015 / Repository
+      `ConsumeStateNonce` / `ResolveAdminUser` / `Create` / `Get` / `Touch` / `Revoke` の 8 テスト
+      関数 + 既存 integration test 全 PASS / 実行日時 2026-06-26）
+    - `### Task 6.4 — Verify 実行結果`（impl-notes L1178〜L1201 / e2e callback フロー / state cookie
+      / session cookie / cross-console reject / idle / absolute / revoked_at の 12 関数 + 既存
+      integration test 全 PASS / 実行日時 2026-06-26）
+  - **実施経路**: ローカル `docker run -d` / `docker compose up -d postgres` 経由の Postgres 16-alpine
+    + 手動 psql で `0001_create_app_and_migration_roles.sql` 適用 +
+    `INTEGRATION_TEST_DATABASE_URL` / `INTEGRATION_TEST_MIGRATE_URL` 指定で
+    `go test ./test/integration/... -count=1` を実行（task 4.1 / task 6.4 で別個に実施）。
+  - **集約 pass / skip 件数**:
+    - task 4.1: auth_repository_test.go の 8 関数 + 既存 integration test 全件 PASS / 約 2.8s /
+      `t.Skip` 0 件（DB 接続環境）
+    - task 6.4: auth_login_callback_test.go 6 関数 + auth_session_lookup_test.go 4 関数 +
+      auth_logout_revoke_test.go 2 関数 = 計 12 関数 PASS + 既存 integration test 全件 PASS /
+      約 7.5s / `t.Skip` 0 件（DB 接続環境）
+    - 合計: **20 関数 PASS + 既存 integration test 全件 PASS**（DB 接続経路）
+  - **実行コマンド（再現用 / task 6.4 経路の最小手順）**:
+    ```bash
+    # 1. postgres 起動 + role 初期化
+    docker run --rm -d --name ae-mdm-postgres-issue-33 \
+      -e POSTGRES_USER=ae_mdm -e POSTGRES_PASSWORD=test_issue_33 -e POSTGRES_DB=ae_mdm \
+      -p 15434:5432 postgres:16-alpine
+    cat backend/db/roles/0001_create_app_and_migration_roles.sql | \
+      sed 's/<REPLACE_ME_MIGRATION_PASSWORD>/migration_pass/; s/<REPLACE_ME_APP_PASSWORD>/app_pass/' | \
+      docker exec -i ae-mdm-postgres-issue-33 \
+        psql -U ae_mdm -d ae_mdm -v ON_ERROR_STOP=1
+
+    # 2. integration test を実行
+    cd backend && \
+      INTEGRATION_TEST_DATABASE_URL="postgres://app_user:app_pass@localhost:15434/ae_mdm?sslmode=disable" \
+      INTEGRATION_TEST_MIGRATE_URL="postgres://migration_user:migration_pass@localhost:15434/ae_mdm?sslmode=disable" \
+      go test ./test/integration/... -count=1
+    ```
+  - **DB 不在環境での挙動**: `INTEGRATION_TEST_*_URL` 未設定 / DB 接続失敗時は各 test が `t.Skip`
+    する設計（A2 既存パターンを踏襲）。watcher の stage-a-verify gate（`cd backend && go build
+    ./... && go vet ./... && go test ./...`）は DB 不在環境で `t.Skip` 経路により false-fail せず
+    PASS する（NFR 3.1 fail-closed と watcher 独立性は別レイヤ）。
+  - **実行日時**: 2026-06-26（task 4.1 / task 6.4 双方）。本 Issue #33 全体の DB-backed verify
+    は当該日時で完了済みと記録する。
+
 ## 確認事項
 
 本セクションは `requirements.md` / `design.md` / `tasks.md` 本文の書き換えを伴わずに、実装フェーズ
