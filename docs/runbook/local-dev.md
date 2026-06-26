@@ -222,7 +222,123 @@ make migrate-down
 OIDC ログインフロー（umbrella task 3.1）が実装されると、`http://localhost:5174/`
 （admin-console）からこのユーザーでログインして SuperAdmin 操作が可能になります。
 
-### 6. 終了
+### 6. OIDC 認証フロー検証手順
+
+Issue #33（A3a: OIDC Verifier + Session 管理）で実装された `/api/auth/login` /
+`/api/auth/callback` / `/api/auth/me` / `POST /api/auth/logout`（および `/api/admin/auth/*`
+の admin 系 4 endpoint）を、ローカルで end-to-end に検証する手順です。
+
+#### 6.1 前提: Keycloak realm export の 2 client 定義
+
+OIDC フローを通すためには、Keycloak realm に **tenant-console** / **admin-console** の
+2 client が登録されている必要があります（design.md L195 / requirements.md 8.4）。
+
+| 項目 | 配置先 | 内容 |
+|---|---|---|
+| realm export | `infra/keycloak/realm-export.json` | `clients[].clientId` に `tenant-console` / `admin-console` の 2 件が定義済み（umbrella task 1.2 で配置済み） |
+| 各 client の `redirectUris` | 上記 JSON の `clients[].redirectUris` | tenant: `http://localhost:8080/api/auth/callback`、admin: `http://localhost:8080/api/admin/auth/callback` を含むこと |
+| 各 client の `secret` | 上記 JSON の `clients[].secret`（または Keycloak admin console の Credentials タブ） | `.env` の `OIDC_TENANT_CLIENT_SECRET` / `OIDC_ADMIN_CLIENT_SECRET` と一致させる |
+
+> **realm export が未配置の場合 / umbrella task 1.2 を待てない場合**: 本 Issue 範囲では
+> `backend/test/integration/auth_*_test.go` に組み込まれている **httptest ベースの OIDC IdP mock**
+> （`auth_e2e_helpers_test.go` で discovery / JWKS / token endpoint を提供）を経由して、
+> 同等のフローを `go test ./test/integration/...` の DB-backed 経路で検証可能です（task 6.4
+> の verify 結果を参照）。Keycloak 経由の手動検証は umbrella task 1.2 完了後に本節の
+> 手順で再度確認してください。
+
+#### 6.2 `STATE_MAC_SECRET` の生成と `.env.example` の置換
+
+state cookie の MAC 鍵 `STATE_MAC_SECRET` は 32 byte 以上のランダム hex を要求します
+（design.md / 確認事項 1）。生成と `.env` への反映手順:
+
+```bash
+# 1. 32 byte (256 bit) のランダム hex を生成
+openssl rand -hex 32
+
+# 2. 出力された 64 文字の hex 文字列を .env の STATE_MAC_SECRET に貼り付ける
+#    (.env.example 側の placeholder は <REPLACE_ME_GENERATE_32_BYTES_OF_RANDOM_HEX>）
+#
+# .env.example の対応行:
+#   STATE_MAC_SECRET=<REPLACE_ME_GENERATE_32_BYTES_OF_RANDOM_HEX>
+# ↓ .env では実値に置換:
+#   STATE_MAC_SECRET=<生成した 64 文字の hex>
+```
+
+同時に置換が必須な OIDC 関連 env（`.env.example` 参照）:
+
+- `OIDC_TENANT_CLIENT_SECRET` — Keycloak admin console（`http://localhost:8081/`）の
+  `Clients → tenant-console → Credentials` から取得した client secret
+- `OIDC_ADMIN_CLIENT_SECRET` — 同じく `Clients → admin-console → Credentials` から取得
+- `OIDC_TENANT_ISSUER_URL` / `OIDC_ADMIN_ISSUER_URL` — 既定の `http://keycloak:8080/realms/ae-mdm`
+  をそのまま使う（docker compose 内部 hostname を指す）
+- `OIDC_TENANT_REDIRECT_URL` / `OIDC_ADMIN_REDIRECT_URL` — 既定の
+  `http://localhost:8080/api/auth/callback` / `http://localhost:8080/api/admin/auth/callback`
+  をそのまま使う（Keycloak の `redirectUris` 登録値と一致する必要あり）
+
+> **機密値の取り扱い**: `STATE_MAC_SECRET` / `OIDC_*_CLIENT_SECRET` はいずれも機密値であり、
+> NFR 1.1 によりログ・エラーメッセージ・PR / commit / Issue 等に平文で残さないでください。
+> `.env` は `.gitignore` で除外されています。
+
+#### 6.3 認証フロー検証手順
+
+1. `make up` 完了後、ブラウザで `http://localhost:5173/`（tenant-console）または
+   `http://localhost:5174/`（admin-console）にアクセス
+2. SPA からログインボタンを押す（または直接 `http://localhost:8080/api/auth/login` / `http://localhost:8080/api/admin/auth/login` に GET）
+3. backend が Keycloak `/realms/ae-mdm/protocol/openid-connect/auth` に 302 リダイレクト
+   （`state` / `nonce` クエリ + `__Host-ae_mdm_state` cookie が同時に発行される）
+4. Keycloak のログイン画面で、節 5「初期 SuperAdmin の seed」で作成したユーザー（および
+   tenant 用ユーザー）の credentials を入力
+5. Keycloak が `http://localhost:8080/api/auth/callback?code=...&state=...` /
+   `http://localhost:8080/api/admin/auth/callback?code=...&state=...` に 302
+6. backend が以下を順に実行（详細は design.md「Auth Service」節）:
+   - state cookie MAC 検証 / 期限検証 / query state 一致確認（失敗時 401 `state_*`）
+   - `state_nonces` UNIQUE 制約での replay 防止（2 回目以降は 401 `state_replay`）
+   - IdP token endpoint への code 交換（`client_secret_basic` / `AuthStyleInHeader`）
+   - ID トークン署名 / iss / aud / nonce / exp 検証（失敗時 401 / 502）
+   - `(oidc_issuer, oidc_subject)` 複合キーで `admin_users` を lookup（未 provisioning なら
+     403 `admin_user_not_provisioned`）
+   - `__Host-ae_mdm_session` cookie 発行 + sessions テーブルに `(token_hash, console, ...)`
+     を INSERT + state cookie 削除
+7. SPA が `return_to` で指定された相対パス（既定 `/`）に 302 リダイレクトされ、以降は
+   session cookie でリクエストが認可される（`GET /api/auth/me` で identity 情報を確認可）
+8. `POST /api/auth/logout` で session cookie が revoke される（DB 上の `sessions.revoked_at`
+   セット + cookie 削除 / 再提示は 401 `session_revoked`）
+
+#### 6.4 トラブルシューティング
+
+- **`STATE_MAC_SECRET` が未設定 / 短すぎる**: backend 起動時に `*errors.Error{Code:
+  CodeConfigInvalid}` で fail-closed bootstrap（NFR 3.1 / 3.2）。`.env` の値を確認
+- **Keycloak の `redirectUris` 登録値と env の `OIDC_*_REDIRECT_URL` が不一致**: Keycloak が
+  callback で `invalid_redirect_uri` を返す。realm export 側 client の `redirectUris` 配列に
+  env 値が含まれていることを確認
+- **callback で `failure_kind=invalid_aud`**: ID トークン aud と env の `OIDC_*_CLIENT_ID` が
+  不一致。tenant 用 cookie で `/api/admin` を踏むと `failure_kind=console_mismatch` 経路に倒れる
+  （Req 6.2 / 6.3 の物理分離強制）。意図した挙動か確認
+
+#### 6.5 DB-backed integration test（CI / 自動化経路）
+
+Keycloak 経由の手動検証に代わる **自動化経路**として、`backend/test/integration/auth_*_test.go`
+を実 Postgres + httptest OIDC IdP mock で実行できます（task 6.4 で確立）。再現手順:
+
+```bash
+# 1. postgres を起動 + role 初期化 + migration 適用（既存節 4 と同じ）
+docker compose up -d postgres
+make db-init-roles
+make migrate-up
+
+# 2. INTEGRATION_TEST_*_URL を指定して integration test を実行
+INTEGRATION_TEST_DATABASE_URL="<app_user DSN>" \
+INTEGRATION_TEST_MIGRATE_URL="<migration_user DSN>" \
+  ( cd backend && go test ./test/integration/... -count=1 )
+```
+
+`auth_login_callback_test.go` / `auth_session_lookup_test.go` / `auth_logout_revoke_test.go`
+の 3 ファイルで end-to-end 経路（`/api/auth/login` → 302 / `/api/auth/callback` → 302 +
+session cookie 発行 + state cookie 削除 / state replay → 401 / aud 不一致 → 401 /
+未 provisioning → 403 / idle / absolute 失効 / cross-console reject / logout 後再提示）が
+全件 PASS することを確認できます。
+
+### 7. 終了
 
 ```bash
 make down
