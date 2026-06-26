@@ -455,6 +455,101 @@ learning を `### Task <id>` 単位で追記する。`docs/specs/33--a3a-oidc-ve
   整備）は後続 fresh iteration で消化する。子 task 全完了時の親 task `4` の昇格は本
   iteration で完了済みのため、auto-promotion 規約は no-op として扱う。
 
+### Task 4.1
+
+- **採用方針**: `backend/internal/auth/{repository.go, repository_failure_kinds.go}` の
+  2 ファイル + `backend/test/integration/auth_repository_test.go` を新規追加し、`doc.go` 構成
+  リストを task 4.1 時点に更新。Repository interface（`ConsumeStateNonce` / `ResolveAdminUser` /
+  `Create` / `Get` / `Touch` / `Revoke`）の **全メソッド** で `superAdminContext(ctx)` →
+  `db.BeginTxFunc` の 2 段 wrap を共通化し、callback handler / middleware が
+  `TenantContextMiddleware` の外側で動作するという A2 制約を Repository 内に閉じ込めた。
+  failure_kind sentinel（`state_replay` / `admin_user_not_provisioned` / `session_tamper`）は
+  state.go の `failureKind` 型を再利用しつつ、責務分離のため別ファイル化した。
+- **重要な判断**:
+  - **`pgerrcode` を direct dependency に昇格**: A2 では indirect 依存だった
+    `github.com/jackc/pgerrcode` を `repository.go` で直接 import し、`pgerrcode.UniqueViolation`
+    （`"23505"`）と `*pgconn.PgError.Code` の照合で UNIQUE 違反を分類する経路を確立した
+    （Req 2.9 の state_replay マッピング）。`go mod tidy` で indirect → direct への昇格を
+    確定。SQLState 文字列リテラルを直接埋め込む案も検討したが、pgerrcode は constants
+    package で typo を回避でき、A2 design.md 確認事項とも整合するため採用した。
+  - **failure_kind sentinel を別ファイル化した理由**: state.go は state cookie helper
+    （Sign / Verify / CookieAttributes / ExpireCookieAttributes）の責務に閉じる必要があり、
+    Repository 固有の sentinel（state_replay / admin_user_not_provisioned / session_tamper）を
+    state.go に追記すると state cookie helper の責務境界がぼやける。`failureKind` 型本体
+    （`type failureKind string` + `Error() string`）は state.go から再利用するため
+    `package auth` 内に閉じ、定数のみを `repository_failure_kinds.go` に配置する分割を採用した
+    （doc.go の構成リストも task 4.1 時点に更新）。
+  - **`ResolveAdminUser` の `FOR UPDATE` 行ロック採用**: read-modify-write の競合経路
+    （同一 OIDC subject が並行 callback で 2 回 ResolveAdminUser を呼ぶケース）で email
+    UPDATE のロストアップデートを防ぐため、`SELECT ... FOR UPDATE` で行ロックを取得してから
+    email UPDATE する設計を採用した（design.md L646〜L664 の Repository interface 散文と
+    tasks.md L365 の指示の両方を満たす）。
+  - **`Identity.TenantID == uuid.Nil` の表現**: `admin_users.tenant_id` は nullable
+    （SuperAdmin の場合 NULL / A2 既存スキーマ）のため、Scan 先は `*uuid.UUID` で受け、nil なら
+    `Identity.TenantID` を `uuid.Nil` のままにする実装にした（types.go の godoc「SuperAdmin の
+    場合は uuid.Nil」と整合）。これにより Service 層は `identity.TenantID == uuid.Nil` で
+    SuperAdmin を判定できる（A2 の TenantContext 規約と一貫）。
+  - **`admin_role_assignments` の role 集約クエリは `role::text` 経由**: `admin_role` 型は
+    `CREATE TYPE admin_role AS ENUM (...)`（0002_create_admin_users_and_roles.up.sql L16）で
+    定義された PostgreSQL ENUM 型。pgx の `Scan(&string)` で ENUM を string に取り出すには
+    明示的に `::text` キャストする必要がある（直接 binary decoding は CodecDB の type 登録が
+    必要で、本 task ではキャスト経路の方が簡潔で安全）。
+  - **`Get` 0 行と `ResolveAdminUser` 0 行で Code が異なる**: 前者は `CodeUnauthenticated`
+    （cookie 改竄 = 認証経路の失敗 / Req 5.4 → 401）、後者は `CodeForbidden`
+    （事前 provisioning が無い管理者の login = 認可経路の失敗 / 403）。design.md
+    L646〜L664 と整合。Service 層は両者の Code をそのまま HTTP status にマッピングする。
+  - **integration test の SuperAdmin GUC 設定**: 既存 `helpers_test.go.seedDummyData` は
+    `app.is_superadmin=true` のみを set するが、本 task で追加した read 系 helper
+    （`fetchSession` / `fetchAdminUserEmail`）は事前に Repository が `db.BeginTxFunc` を
+    使った tx に続いて呼ばれるパターンで、connection 上で `app.tenant_id` が空文字のまま
+    cast `''::uuid` で reject される事故が再現した。本 task の helper では
+    `set_config('app.tenant_id', uuid.Nil.String(), true)` + `set_config('app.is_superadmin',
+    'true', true)` の 2 段 set を採用した（RLS policy の OR 右辺 `is_superadmin` だけでは
+    短絡評価が保証されないため、`app.tenant_id` の有効値 set が必須）。既存 `seedDummyData`
+    の現状は INSERT のみで動作するため変更しない（影響範囲外）。
+  - **DB-backed verify を実施**: 本 task は migration 0013〜0015 / RLS / SuperAdmin context /
+    UNIQUE 違反マッピングの全経路を DB 接続経由でしか検証できないため、本 iteration 内で
+    docker compose 経由の Postgres 16 + migrate up + integration test 全件 pass を確認した
+    （詳細は `### Task 4.1 — Verify 実行結果` 節）。
+- **残存課題**:
+  - 後続 task 5.1 `auth.Service.HandleCallback` で本 task の `Repository` 各メソッドを
+    DI 注入する。`ConsumeStateNonce` は state.Verify 直後 + token 交換より **前** に呼ぶ
+    （tasks.md L430〜L436 / replay 攻撃が IdP token endpoint に到達する前に弾く / attack
+    surface 最小化）。`ResolveAdminUser` の 403 は Service が `errors.As` で
+    `FailureKindAdminUserNotProvisioned` を識別して 403 を return する経路を組む。
+  - 後続 task 6.1 `auth.Middleware` で `Repository.Get` の 0 行 → `FailureKindSessionTamper`
+    → 401 + cookie 削除の経路を組む。本 task の Get は `Session` + `Identity` を **同一 tx 内で**
+    join 取得しており、Service / Middleware 側の追加 lookup は不要（NFR 3.1 の fail-closed
+    と整合）。
+  - 後続 task 6.4 の integration test（auth_login_callback_test.go 等）では本 task で確立した
+    Repository 経路に対し HTTP 経路を被せた e2e 検証を行う前提。本 task の repository test は
+    Repository 単体（Service / Handler を介さない）の境界網羅に閉じる。
+  - 後続 task 7.1 で `impl-notes.md` の「DB-backed verify 実行結果」節を最終確定する
+    （本 task の `### Task 4.1 — Verify 実行結果` 節は本 task scope の暫定記録）。
+  - `admin_role_assignments` の RLS は `tenant_isolation_admin_role_assignments` で
+    tenant 分離されており、SuperAdmin context では全行可視（A2 0011_enable_rls.up.sql L48〜L58）。
+    本 task の `ResolveAdminUser` / `Get` は SuperAdmin context 配下なので全行を取得でき、
+    RBAC の解釈は後続 Issue で実装する責務（本 task は集約のみ）。
+
+### Task 4.1 — Verify 実行結果
+
+- `cd backend && go build ./...`: PASS
+- `cd backend && go vet ./...`: PASS
+- `cd backend && go test ./... -count=1`: 全 package PASS（`internal/auth` 含む。
+  `test/integration` は DATABASE_URL 未設定経路で skip 動作を確認）
+- DB-backed verify（docker compose postgres + migrate up + integration test）:
+  - 環境: `docker compose up -d postgres`（POSTGRES_HOST_PORT=15433 / POSTGRES_PASSWORD=test_repo_4_1
+    / Postgres 16-alpine）+ `db-init-roles` 適用（migration_user / app_user 作成）+
+    migrate up 0001〜0015（全 15 migration 適用 / state_nonces まで含む）
+  - コマンド: `INTEGRATION_TEST_DATABASE_URL="postgres://app_user:app_pass@localhost:15433/ae_mdm?sslmode=disable"
+    INTEGRATION_TEST_MIGRATE_URL="postgres://migration_user:migration_pass@localhost:15433/ae_mdm?sslmode=disable"
+    go test ./test/integration/... -count=1`
+  - 実行結果: **PASS**（`auth_repository_test.go` 8 テスト関数すべて pass / 既存 integration
+    test も全 pass / 合計 約 2.8s）。シナリオ (a)〜(k) の 11 シナリオを 8 テスト関数で網羅
+    （ResolveAdminUser 3 関数 / Create_Get_Touch_Revoke 1 関数で d/f/g/h を統合 /
+    Get_HashMismatch_SessionTamper 1 関数 / ConsumeStateNonce 3 関数）
+  - 実行日時: 2026-06-26
+
 ## 確認事項
 
 本セクションは `requirements.md` / `design.md` / `tasks.md` 本文の書き換えを伴わずに、実装フェーズ
