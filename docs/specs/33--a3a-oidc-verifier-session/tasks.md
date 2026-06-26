@@ -646,7 +646,7 @@
   - _Requirements: 3.7, 4.3, 4.4, 4.5, 4.6, 4.7, 5.3, 5.4, 6.2, 6.3, NFR 3.1, NFR 4.1_
   - _Boundary: AuthMiddleware_
   - _Depends: 5.1, 1.3_
-- [ ] 6.2 httpserver.NewServer に auth middleware + auth エンドポイントを配線
+- [x] 6.2 httpserver.NewServer に auth middleware + auth エンドポイントを配線
   - `backend/internal/platform/httpserver/server.go` の `NewServer` シグネチャを変更。以下の
     追加引数を受け取る:
     - **`authMWTenant func(http.Handler) http.Handler`**（`expectedConsole=ConsoleTenant`
