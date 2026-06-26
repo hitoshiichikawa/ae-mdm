@@ -696,6 +696,95 @@ learning を `### Task <id>` 単位で追記する。`docs/specs/33--a3a-oidc-ve
   の DB-backed verify 義務）。
 - 実行日時: 2026-06-26
 
+### Task 5.2
+
+- **採用方針**: `backend/internal/auth/{handler.go, handler_test.go}` の 2 ファイルを新規追加し、
+  `service_failure_kinds.go` に Handler 入口判定用の `FailureKindInvalidRequest` を 1 件追加、
+  `doc.go` の構成リストを task 5.2 時点に更新。`Handler` struct は `Service` interface を DI で
+  受け取り、`Mount(r chi.Router, consolePrefix string, console oidc.Console)` で sub-router
+  経由（`r.Route(consolePrefix, func(sub chi.Router){...})`）に `/login` GET / `/callback` GET /
+  `/logout` POST の 3 route を登録する。`console` は Mount 時点で closure に固定し HTTP
+  request からは読み取らない（Req 6.2 / 6.4 の path-based クライアント分離強制）。
+- **重要な判断**:
+  - **`r.Route` 経由 sub-router 構築の必須**: tasks.md L556〜L566 / L566「**`r.Route(consolePrefix,
+    ...)` 経由で sub-router を作る**」の指示通り、Mount 内で `r.Get("/login", ...)` を root 相対
+    で登録すると `/api/auth/login` ではなく `/login` に登録されて Req 6.2 path-based 分離が成立
+    しなくなる。`r.Route(consolePrefix, func(sub chi.Router){...})` で sub-router を構築し、
+    その中で `sub.Get("/login", ...)` のように相対 path で登録する形を採用した。テスト
+    `TestMount_RegistersAllSixEndpoints` が tenant + admin の 6 endpoint に到達できる
+    ことを assertion して回帰を防ぐ。
+  - **callback 入口での欠落判定を Handler 側に置く**: tasks.md L574〜L580 / design.md API
+    Contract `/api/auth/callback` Errors 列「400（return_to が不正 URL / `code` 欠落 / `state`
+    欠落）」の指示通り、`code` / `state` のいずれか欠落で 400 `invalid_request` を Service
+    呼び出し前に返す（fake Service が呼ばれないことを assert）。Service 内に流すと
+    `state.Verify` で `state_invalid` (401) や `oauth2.Exchange` で 502 に化けて契約と矛盾
+    するため、必ず Handler 入口で判定する。`FailureKindInvalidRequest` を新規 sentinel として
+    `service_failure_kinds.go` に追加し、`errors.Is` で識別可能にした（Service 側の sentinel と
+    並列に配置 / responsibility separation）。
+  - **state cookie 削除 helper の使い分け契約継承**: task 3.2 の確認事項で確立した
+    「state cookie 削除 = `auth.ExpireCookieAttributes()`、session cookie 削除 =
+    `auth.SessionExpireCookieAttributes()`」を Handler 経路でも厳格に守る。callback 成功時
+    （session 発行 + state cookie 削除）/ callback エラー時（state cookie 即時削除）/
+    callback 入口欠落判定（state cookie 即時削除）の **3 経路すべて**で `ExpireCookieAttributes()`
+    を呼ぶ（state.go の helper）。logout 成功時のみ `SessionExpireCookieAttributes()` を呼ぶ
+    （session.go の helper）。誤って取り違えると Req 2.8（state cookie 即時無効化）/ Req 5.1
+    （logout 時 session cookie 削除）の片方が壊れるため、コメントに helper 名と削除対象を
+    明示して維持容易性を確保した。
+  - **logout cookie 不在で 401**: tasks.md L606「cookie 不在で 401」の指示通り、cookie 不在 /
+    cookie value 空文字 のいずれも `FailureKindSessionTamper` で 401 を返す。`Service.Logout` は
+    呼ばない（cookie 不在の場合は logout する対象が無いため）。tasks.md / requirements.md 上で
+    Req 5.2 の応答コードは「401」と確定（test (d) の assertion と整合）。
+  - **`console` 引数の `logout` 経路での扱い**: tasks.md は `h.logout(console)` シグネチャを
+    指示しているが、現状の logout 経路では console を使う場面が無い（session token は console を
+    持ち越さない opaque 値、`Service.Logout` も console を要求しない signature）。closure 引数
+    として保持しつつ `_ = console` で意図的に未使用化し、`unused parameter` を vet で検出しない
+    形にした。将来 logout 経路に console-aware なログ field（`console=tenant-console` 等）を
+    追加する余地は残してある。
+  - **httptest 単体テスト構造**: `fakeService` で Service interface 4 メソッドを mock し、
+    `chi.NewRouter()` + `Handler.Mount` を tenant / admin の 2 度呼び出して 6 endpoint を
+    同一 router 上に配線した。`httptest.NewRecorder()` で各 endpoint への request を実行し、
+    `rec.Result().Cookies()` で Set-Cookie ヘッダ列を取り出して name / Value / MaxAge を
+    assert する流儀を採用（既存 service_test.go の fake パターンと一貫）。callback 入口
+    欠落判定では `fake.calls.handleCallback != 0` で Service が呼ばれていないことを直接
+    assert している。
+  - **機密値非埋込契約**: tasks.md L567〜L571 の指示通り、error wrap / `errors.WriteHTTP`
+    経由の JSON body / response header に state cookie 生値・session cookie 生値・id_token
+    raw JWT・OIDC client secret を文字列補間しない。テスト
+    `TestCallback_ErrorResponse_DoesNotLeakSensitiveValues` で response body / header に
+    state cookie 生値が含まれないことを assert（一次防御の回帰耐性 / NFR 1.1 / NFR 4.2）。
+- **残存課題**:
+  - 後続 task 6.1 `auth.Middleware` で `Service.LookupAndRefresh` を呼び出して
+    `httpserver.AuthClaims` を ctx に注入する。本 Handler の `/api/auth/*` / `/api/admin/auth/*`
+    は **TenantContextMiddleware の外側**で動作するため、後続 task 6.2 の `NewServer` 配線で
+    `authMount(r, "/api/auth", ConsoleTenant)` / `authMount(r, "/api/admin/auth", ConsoleAdmin)`
+    を root router 直下（TenantContextMiddleware より前）に Mount する責務がある。
+  - 後続 task 6.4 の integration test（`auth_login_callback_test.go`）で実 IdP mock 経由の
+    `/api/auth/login` → 302 / `/api/auth/callback` → 302 + session cookie 発行 + state cookie
+    削除 / state replay → 401 + state cookie 削除 等を end-to-end で検証する。本 task の
+    httptest 単体テストは fake Service 経由の Handler 境界網羅に閉じる（Service との結合は
+    本 task のスコープ外）。
+  - **logout 経路の console-aware ログ field 追加**: 現状の `logout` handler は `_ = console`
+    で console 引数を意図的に未使用としているが、将来 `log.Info("logout", "console", string(console))`
+    のような observability 改善を入れる余地がある（本 task 範囲外、後続 Issue で扱う）。
+  - 確認事項: tasks.md L606 は logout cookie 不在の応答コードを「401」と明示しているが、
+    一般的な REST API design では「204 No Content / 既に logout 済み扱い」「200 OK / no-op」
+    にする選択肢もある。本 Issue では明示的に「401」を採用（攻撃検出可能性 + Req 5.2 の
+    fail-closed 解釈と整合）。
+
+### Task 5.2 — Verify 実行結果
+
+- `cd backend && go build ./...`: PASS
+- `cd backend && go vet ./...`: PASS
+- `cd backend && go test ./... -count=1`: 全 package PASS。`internal/auth` の Handler 関連
+  テスト 19 ケース（login 3 / callback 7 / logout 5 / Mount sweep 1 / 機密値非埋込 1 +
+  TestMount 内 sub-test 6）+ 既存テスト全件 / 約 3 秒。`internal/platform/oidc` 等
+  影響範囲全件で regression なし。
+- DB-backed verify: 本 task は Handler 単体（fake Service / chi router / httptest.NewRecorder）
+  で完結し、DB を要求しない。HTTP 経路を実 Service + DB に被せた e2e 検証は後続 task 6.4 の
+  `auth_login_callback_test.go` 等の integration test で実施される予定（tasks.md L716〜L750
+  の DB-backed verify 義務）。
+- 実行日時: 2026-06-26
+
 ## 確認事項
 
 本セクションは `requirements.md` / `design.md` / `tasks.md` 本文の書き換えを伴わずに、実装フェーズ
