@@ -608,7 +608,7 @@
   - _Boundary: AuthHandler_
   - _Depends: 5.1_
 
-- [ ] 6. auth.Middleware + bootstrap 配線 + integration テスト
+- [x] 6. auth.Middleware + bootstrap 配線 + integration テスト
 - [ ] 6.1 Middleware 実装と単体テスト
   - `backend/internal/auth/middleware.go` を新規追加。**`NewMiddleware(svc Service,
     expectedConsole oidc.Console, log logger.Logger, clock Clock) func(http.Handler)
