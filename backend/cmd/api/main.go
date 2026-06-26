@@ -121,7 +121,12 @@ func runBootstrap(ctx context.Context) int {
 	defer pool.Close()
 
 	// (4) http server
-	srv, _, err := httpserver.NewServer(cfg, log, pool)
+	//
+	// 追加引数 authMWTenant / authMWAdmin / authMount（task 6.2 / Req 6.2 / 6.3）は
+	// task 6.3 で実 OIDC Verifier / auth.Service / auth.NewMiddleware / auth.Handler.Mount
+	// を構築して注入する。本 task では nil を渡すことで、A2 既存挙動（auth 未配線時の
+	// default deny 401）を維持する。
+	srv, _, err := httpserver.NewServer(cfg, log, pool, nil, nil, nil)
 	if err != nil {
 		log.Error("ae-mdm api: httpserver.NewServer failed",
 			logger.Err(err),

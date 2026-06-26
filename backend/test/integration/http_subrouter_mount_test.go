@@ -30,6 +30,9 @@ func newIntegrationHTTPServer(t *testing.T) (handler http.Handler) {
 		config.Config{HTTPListenAddr: ":0"},
 		log,
 		nil, // pool は本テストでは未使用（/healthz は外側、/api/* は 401 で閉じる）
+		nil, // authMWTenant: 本テストでは未配線（既存 default deny 401 を確認するため）
+		nil, // authMWAdmin: 同上
+		nil, // authMount: 本テストでは /api/auth を Mount しない（既存 404 経路を確認）
 	)
 	if err != nil {
 		t.Fatalf("httpserver.NewServer: %v", err)
