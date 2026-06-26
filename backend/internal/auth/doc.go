@@ -16,18 +16,25 @@
 //   - 許可: github.com/hitoshiichikawa/ae-mdm/internal/config
 //   - 禁止: 上位 application / cmd / 他 domain への直接 import
 //
-// # 構成（task 3.2 時点）
+// # 構成（task 4.1 時点）
 //
-//   - types.go       : Identity / Session のドメイン型
-//   - clock.go       : Clock interface と SystemClock 実装（DI 境界）
-//   - state.go       : state cookie の Sign / Verify / CookieAttributes /
+//   - types.go                       : Identity / Session のドメイン型
+//   - clock.go                       : Clock interface と SystemClock 実装（DI 境界）
+//   - state.go                       : state cookie の Sign / Verify / CookieAttributes /
 //     ExpireCookieAttributes / StatePayload / failureKind sentinel
-//   - state_test.go  : state cookie の単体テスト
-//   - session.go     : session helper（New / HashToken / SessionCookieAttributes /
+//   - state_test.go                  : state cookie の単体テスト
+//   - session.go                     : session helper（New / HashToken / SessionCookieAttributes /
 //     SessionExpireCookieAttributes / HashPrefix）。cookie 属性 helper は state.go の
 //     同名関数と衝突するため Session プレフィックス付きで命名（auth package を
 //     フラット配置する task 3.1 の判断と整合）
-//   - session_test.go: session helper の単体テスト
+//   - session_test.go                : session helper の単体テスト
+//   - repository.go                  : Repository interface + pgxpool ベース実装。
+//     sessions / admin_users / state_nonces への CRUD を SuperAdmin context 配下で集約。
+//     callback handler / middleware が TenantContextMiddleware の外側で動作するため、
+//     Repository が自身で SuperAdmin context を確立して db.BeginTxFunc を経由する。
+//   - repository_failure_kinds.go    : Repository が返す failureKind sentinel 追加定数
+//     （state_replay / admin_user_not_provisioned / session_tamper）。
+//     state.go の failureKind 型本体を再利用しつつ、責務分離のため別ファイル化。
 //
 // # 機密値の非埋込契約
 //
