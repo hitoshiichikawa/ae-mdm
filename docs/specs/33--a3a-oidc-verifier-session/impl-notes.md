@@ -785,6 +785,66 @@ learning を `### Task <id>` 単位で追記する。`docs/specs/33--a3a-oidc-ve
   の DB-backed verify 義務）。
 - 実行日時: 2026-06-26
 
+### Task 6
+
+- **採用方針**: タスク `6` は umbrella header（`_Requirements:_` / `_Boundary:_` を持たない親 task）
+  であり、本起動では直接の実装は無く、子 task 6.1（auth.Middleware 実装 + 単体テスト）/
+  6.2（`httpserver.NewServer` に auth middleware + auth エンドポイント配線）/ 6.3
+  （`cmd/api` bootstrap に OIDC Verifier / Auth 配線追加）/ 6.4（結合テスト auth 全フロー）が
+  後続 fresh iteration で順次実装される前提として `### Task 6` learning スロットのみ整備する
+  （先行する `### Task 1` / `### Task 2` / `### Task 3` / `### Task 4` / `### Task 5` の
+  umbrella 処理パターンを踏襲）。
+- **重要な判断**:
+  - 親 task は `tasks.md` 上で `### Task 6` の learning スロットを成立させるためのプレースホルダ
+    に留め、`backend/internal/auth/middleware.go` / `backend/internal/platform/httpserver/server.go` /
+    `backend/cmd/api/main.go` / `backend/test/integration/auth_*_test.go` 等のコード追加・テスト
+    追加は本 iteration では行わない（実装本体は 6.1 / 6.2 / 6.3 / 6.4 の fresh iteration が
+    担当する設計 / `### Task 1` / `### Task 2` / `### Task 3` / `### Task 4` / `### Task 5` と
+    同パターン）。
+  - per-task ループ規約「1 commit = 1 task ID」に従い、本 iteration の marker commit は
+    `docs(tasks): mark 6 as done` 単一の subject で `tasks.md` のみを含める。impl-notes.md への
+    `### Task 6` 追加は marker commit と分離した別 commit に積む。
+- **残存課題**: 子 task 6.1（`backend/internal/auth/middleware.go` + `middleware_test.go` の
+  新規追加、`NewMiddleware(svc Service, expectedConsole oidc.Console, log logger.Logger,
+  clock Clock) func(http.Handler) http.Handler` を tenant / admin 別インスタンスで構築可能に
+  する構造、`__Host-ae_mdm_session` cookie 不在 → 401 + cookie 削除 + `failure_kind:
+  session_tamper` ログ経路、`service.LookupAndRefresh(ctx, raw, expectedConsole, clock.Now())`
+  呼び出しで console 照合 → absolute → revoked → idle の順で失効判定、`console_mismatch` 経路
+  で tenant 系 cookie が admin route に提示された場合に 401 + cookie 削除 + `failure_kind:
+  console_mismatch` ログ field 出力、成功時に `httpserver.AuthClaims{TenantID, AdminUserID,
+  Roles, IsSuperAdmin}` を `httpserver.WithAuthClaims(ctx, ...)` で ctx 注入、機密値非埋込
+  契約で `session_hash_prefix` / `failure_kind` / `console` のみを field 化）/ 6.2
+  （`backend/internal/platform/httpserver/server.go` の `NewServer` シグネチャ拡張で `authMWTenant
+  func(http.Handler) http.Handler` / `authMWAdmin func(http.Handler) http.Handler` / `authMount
+  func(r chi.Router, consolePrefix string, console oidc.Console)` 3 引数を追加、`/api/auth` を
+  root router 直下に `authMount(r, "/api/auth", ConsoleTenant)` で Mount + `/api/admin/auth` を
+  `authMount(r, "/api/admin/auth", ConsoleAdmin)` で Mount、`apiRouter` の `Use(...)` に
+  `authMWTenant` / `adminRouter` の `Use(...)` に `authMWAdmin` を `TenantContextMiddleware` の
+  前段として挿入、nil 許容 fallback で既存 server_test.go の 401 default deny 経路を維持、
+  cross-console reject 経路の server_test.go 追加）/ 6.3（`backend/cmd/api/main.go` bootstrap
+  に `oidc.NewVerifier(ctx, cfg)` → 失敗時 exit 1 (NFR 3.2) → `auth.NewRepository(pool)` →
+  `auth.NewService(cfg, verifier, repo, oauth2Configs, clock, auth.TokenGenerator(session.New),
+  log)` → `authMWTenant := auth.NewMiddleware(svc, oidc.ConsoleTenant, log, clock)` /
+  `authMWAdmin := auth.NewMiddleware(svc, oidc.ConsoleAdmin, log, clock)` 構築 →
+  `httpserver.NewServer(cfg, log, pool, authMWTenant, authMWAdmin, authMount)` 注入、
+  `oauth2Configs` は `map[oidc.Console]*oauth2.Config` で tenant / admin 各 `ClientID` /
+  `ClientSecret` / `RedirectURL` / `Scopes: []string{goidc.ScopeOpenID, "email", "profile"}` /
+  `Endpoint: verifier.TenantEndpoint()` で構築、`AuthStyle == oauth2.AuthStyleInHeader` の
+  契約をユニットテストで回帰的に守る、`cmd/api/main_test.go` の bootstrap smoke test 更新）/
+  6.4（`backend/test/integration/auth_login_callback_test.go` / `auth_session_lookup_test.go` /
+  `auth_logout_revoke_test.go` の 3 ファイル新規追加、`docker compose up -d postgres` + test
+  用 RSA private key + `httptest.NewServer` 経由の OIDC IdP mock で discovery / JWKS / token
+  endpoint を提供、login → 302、callback → 302 + sessions テーブル 1 行 + cookie 生値 / DB
+  hash + state cookie 削除、state cookie 改竄 → 401 + `failure_kind=state_invalid`、ID トークン
+  aud 不一致 → 401 + `failure_kind=invalid_aud`、未 provisioning な (oidc_issuer, oidc_subject)
+  → 403 + `failure_kind=admin_user_not_provisioned`、state replay → 401 +
+  `failure_kind=state_replay` + state cookie 削除、idle 31 分後 → 401 + revoked_at 更新、
+  absolute 8h+1s 後 → 401、tenant 用 session を `/api/admin/...` に提示 → 401 +
+  `failure_kind=console_mismatch` + cookie 削除、logout 後の cookie 再提示 → 401、改竄 cookie
+  → 401、DATABASE_URL 未設定時の `t.Skip` 経路）は後続 fresh iteration で消化する。子 task
+  全完了時の親 task `6` の昇格は本 iteration で完了済みのため、auto-promotion 規約は no-op
+  として扱う。
+
 ## 確認事項
 
 本セクションは `requirements.md` / `design.md` / `tasks.md` 本文の書き換えを伴わずに、実装フェーズ
