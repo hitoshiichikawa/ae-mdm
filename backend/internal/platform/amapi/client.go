@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"strings"
 	"time"
 
 	androidmanagement "google.golang.org/api/androidmanagement/v1"
@@ -123,6 +124,10 @@ func NewClient(ctx context.Context, cfg config.Config, log logger.Logger, opts *
 			"failed to construct AMAPI service", err)
 	}
 
+	if log == nil {
+		// DI 未配線でも構造化ログ呼び出しで panic させない（NFR 1.1 の出力先が無いだけ）。
+		log = logger.Default()
+	}
 	c := &realClient{
 		svc:         svc,
 		log:         log,
@@ -149,9 +154,9 @@ func NewClient(ctx context.Context, cfg config.Config, log logger.Logger, opts *
 }
 
 // requireEnterpriseName は enterpriseName を必須化する操作の先頭で空値検査を行う（Req 2.3）。
-// 空文字 / 全角空白等を含む whitespace のみのケースは CodeInvalidRequest として弾く。
+// 空文字および全角空白等を含む whitespace のみのケースは CodeInvalidRequest として弾く。
 func requireEnterpriseName(enterpriseName string) error {
-	if enterpriseName == "" {
+	if strings.TrimSpace(enterpriseName) == "" {
 		return pkgerrors.New(pkgerrors.CodeInvalidRequest, "enterpriseName is required")
 	}
 	return nil
@@ -172,11 +177,14 @@ func (c *realClient) doWithRetry(ctx context.Context, operationName, enterpriseN
 	var lastErr error
 
 	for attempt := 0; attempt < maxAttempts; attempt++ {
-		// context cancel チェック（試行前）
+		// context cancel チェック（試行前）。timeout / cancel は mapAMAPIError の
+		// context 経路と同じく一時障害として通知する（Req 5.4）。
 		if ctxErr := ctx.Err(); ctxErr != nil {
 			c.logOutcome(operationName, enterpriseName, "ctx_canceled", attempt, start, ctxErr)
-			return pkgerrors.Wrap(pkgerrors.CodeUnavailable,
+			out := pkgerrors.Wrap(pkgerrors.CodeUnavailable,
 				fmt.Sprintf("amapi %s canceled by context", operationName), ctxErr)
+			out.IsTransient = true
+			return out
 		}
 
 		err := op()
@@ -213,10 +221,13 @@ func (c *realClient) doWithRetry(ctx context.Context, operationName, enterpriseN
 		// exponential backoff: base << attempt（attempt=0 → base、attempt=1 → 2*base、attempt=2 → 4*base）
 		delay := c.baseBackoff << attempt
 		if err := c.sleep(ctx, delay); err != nil {
-			// context cancel: cancel 理由を保持して返す（Req 5.4）
+			// context cancel: cancel 理由を保持して返す（Req 5.4）。一時障害として
+			// 通知することで mapAMAPIError の context 経路と契約を揃える。
 			c.logOutcome(operationName, enterpriseName, "ctx_canceled_in_backoff", attempt, start, err)
-			return pkgerrors.Wrap(pkgerrors.CodeUnavailable,
+			out := pkgerrors.Wrap(pkgerrors.CodeUnavailable,
 				fmt.Sprintf("amapi %s canceled during backoff", operationName), err)
+			out.IsTransient = true
+			return out
 		}
 	}
 
@@ -337,10 +348,15 @@ func mapGoogleAPIError(gerr *googleapi.Error) *pkgerrors.Error {
 		code = pkgerrors.CodeUpstream
 		transient = true
 	default:
-		// その他 4xx は CodeUpstream + 非 transient、その他 5xx は CodeUpstream + transient。
-		code = pkgerrors.CodeUpstream
+		// その他 4xx は「呼び出し側に起因するドメインエラー」として CodeInvalidRequest + 非
+		// transient へ正規化する（Req 4.1）。CodeUpstream は HTTP 502 相当の外部上流エラー枠
+		// であり、呼び出し側に再試行可能と誤読されるため使わない。
+		// その他 5xx は CodeUpstream + transient（Req 4.2 / 5.1）。
 		if gerr.Code >= 500 && gerr.Code < 600 {
+			code = pkgerrors.CodeUpstream
 			transient = true
+		} else {
+			code = pkgerrors.CodeInvalidRequest
 		}
 	}
 

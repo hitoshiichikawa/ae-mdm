@@ -112,6 +112,66 @@ func TestGetPolicy_OK_NormalizesResponse(t *testing.T) {
 	}
 }
 
+func TestUpsertPolicy_ZeroValueFieldsAreSent(t *testing.T) {
+	// Arrange: raw map に false / 空配列 / 0 等の zero value を含めても AMAPI patch 本文に
+	// 必ず出ることを確認する（Google API Go client の omitempty を ForceSendFields で打ち消す）。
+	srv, _, got := recordingServer(t, http.StatusOK, func(req receivedRequest) string {
+		return `{"name":"enterprises/X/policies/default","version":"1"}`
+	})
+	c, _ := newTestClient(t, srv, time.Microsecond)
+
+	// Act
+	err := c.UpsertPolicy(context.Background(), "enterprises/X", "default", PolicyBody{
+		Raw: map[string]any{
+			"cameraDisabled":      false,
+			"installAppsDisabled": false,
+			"applications":        []any{},
+		},
+	})
+
+	// Assert
+	if err != nil {
+		t.Fatalf("UpsertPolicy = %v", err)
+	}
+	body := (*got)[0].Body
+	if !strings.Contains(body, `"cameraDisabled":false`) {
+		t.Fatalf("body must include cameraDisabled=false: %q", body)
+	}
+	if !strings.Contains(body, `"installAppsDisabled":false`) {
+		t.Fatalf("body must include installAppsDisabled=false: %q", body)
+	}
+	if !strings.Contains(body, `"applications":[]`) {
+		t.Fatalf("body must include empty applications array: %q", body)
+	}
+}
+
+func TestUpsertPolicy_NestedZeroValueFieldsAreSent(t *testing.T) {
+	// Arrange: 入れ子の zero value も ForceSendFields の再帰伝搬で送信される
+	// （AMAPI Policy の入れ子: passwordRequirements 等）。
+	srv, _, got := recordingServer(t, http.StatusOK, func(req receivedRequest) string {
+		return `{"name":"enterprises/X/policies/default","version":"1"}`
+	})
+	c, _ := newTestClient(t, srv, time.Microsecond)
+
+	// Act
+	err := c.UpsertPolicy(context.Background(), "enterprises/X", "default", PolicyBody{
+		Raw: map[string]any{
+			"passwordRequirements": map[string]any{
+				"passwordMinimumLength": float64(0),
+			},
+		},
+	})
+
+	// Assert
+	if err != nil {
+		t.Fatalf("UpsertPolicy = %v", err)
+	}
+	body := (*got)[0].Body
+	if !strings.Contains(body, `"passwordMinimumLength":0`) {
+		t.Fatalf("body must include nested zero-value field: %q", body)
+	}
+}
+
 func TestGetPolicy_503_RetriedAndExhausted(t *testing.T) {
 	// Arrange
 	srv, calls := retryServer(t, 100, http.StatusServiceUnavailable, `{}`)

@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"reflect"
+	"strings"
 
 	androidmanagement "google.golang.org/api/androidmanagement/v1"
 
@@ -68,8 +70,10 @@ func (c *realClient) GetPolicy(ctx context.Context, enterpriseName, policyName s
 }
 
 // convertRawToPolicy は本ラッパの raw map を AMAPI SDK の Policy 型へ変換する。
-// MVP では JSON marshal / unmarshal を経由することで、AMAPI Policy の任意フィールドを
-// pass-through できるシンプルな方針を採る。
+// JSON marshal / unmarshal を経由することで AMAPI Policy の任意フィールドを pass-through し、
+// 続いて raw map に含まれる全フィールドを `ForceSendFields` へ登録することで Google API Go
+// client の `omitempty` 既定を打ち消し、`cameraDisabled:false` や空配列等の zero value も
+// AMAPI patch（全フィールド更新）で確実に送信させる。
 func convertRawToPolicy(raw map[string]any) (*androidmanagement.Policy, error) {
 	if raw == nil {
 		return &androidmanagement.Policy{}, nil
@@ -84,7 +88,63 @@ func convertRawToPolicy(raw map[string]any) (*androidmanagement.Policy, error) {
 		return nil, pkgerrors.Wrap(pkgerrors.CodeInvalidRequest,
 			"failed to unmarshal PolicyBody.Raw into Policy", err)
 	}
+	populateForceSendFields(reflect.ValueOf(p).Elem(), raw)
 	return p, nil
+}
+
+// populateForceSendFields は raw map に出現したフィールドを SDK 構造体の `ForceSendFields`
+// に再帰的に登録し、Google API Go client の `omitempty` 既定で zero value（false / 0 /
+// 空配列）が落ちる挙動を打ち消す。patch（全フィールド更新）で raw の意図通りに送信させる
+// ために必要（umbrella #24 design.md「AMAPI Client」節 / Req 1.3 の policy upsert 仕様）。
+//
+//nolint:gocyclo // reflect.Kind 分岐は table 風に並べた方が読みやすい
+func populateForceSendFields(structVal reflect.Value, raw map[string]any) {
+	if structVal.Kind() != reflect.Struct {
+		return
+	}
+	structType := structVal.Type()
+	var force []string
+	for i := 0; i < structType.NumField(); i++ {
+		field := structType.Field(i)
+		if !field.IsExported() {
+			continue
+		}
+		if field.Name == "ForceSendFields" || field.Name == "NullFields" {
+			continue
+		}
+		jsonName := strings.Split(field.Tag.Get("json"), ",")[0]
+		if jsonName == "" || jsonName == "-" {
+			continue
+		}
+		rawVal, ok := raw[jsonName]
+		if !ok {
+			continue
+		}
+		force = append(force, field.Name)
+		// nested struct / *struct への再帰: raw の同位置の map を辿って ForceSendFields を伝搬。
+		fv := structVal.Field(i)
+		nestedRaw, isMap := rawVal.(map[string]any)
+		if !isMap {
+			continue
+		}
+		switch fv.Kind() {
+		case reflect.Struct:
+			populateForceSendFields(fv, nestedRaw)
+		case reflect.Ptr:
+			if !fv.IsNil() && fv.Elem().Kind() == reflect.Struct {
+				populateForceSendFields(fv.Elem(), nestedRaw)
+			}
+		}
+	}
+	if len(force) == 0 {
+		return
+	}
+	fsf := structVal.FieldByName("ForceSendFields")
+	if !fsf.IsValid() || !fsf.CanSet() || fsf.Kind() != reflect.Slice {
+		return
+	}
+	existing, _ := fsf.Interface().([]string)
+	fsf.Set(reflect.ValueOf(append(existing, force...)))
 }
 
 // convertPolicyToRaw は AMAPI SDK の Policy 型を本ラッパの raw map に変換する。

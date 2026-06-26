@@ -99,6 +99,51 @@ func TestStubClient_HookReturnsErrorPropagates(t *testing.T) {
 	}
 }
 
+func TestStubClient_EnforcesPerMethodGuards(t *testing.T) {
+	// stub も real client と同じ contract を守る（domain Service テストで本番との挙動差を出さない）。
+	cases := []struct {
+		name string
+		call func(s *StubClient) error
+	}{
+		{"UpsertPolicy_emptyPolicyName", func(s *StubClient) error {
+			return s.UpsertPolicy(context.Background(), "enterprises/X", "", PolicyBody{})
+		}},
+		{"GetPolicy_emptyPolicyName", func(s *StubClient) error {
+			_, err := s.GetPolicy(context.Background(), "enterprises/X", "")
+			return err
+		}},
+		{"GetDevice_emptyDeviceID", func(s *StubClient) error {
+			_, err := s.GetDevice(context.Background(), "enterprises/X", "")
+			return err
+		}},
+		{"IssueCommand_emptyDeviceID", func(s *StubClient) error {
+			_, err := s.IssueCommand(context.Background(), "enterprises/X", "", CommandRequest{Type: "LOCK"})
+			return err
+		}},
+		{"IssueCommand_emptyType", func(s *StubClient) error {
+			_, err := s.IssueCommand(context.Background(), "enterprises/X", "D1", CommandRequest{Type: ""})
+			return err
+		}},
+		{"CreateWebToken_emptyParentFrameURL", func(s *StubClient) error {
+			_, err := s.CreateWebToken(context.Background(), "enterprises/X", "")
+			return err
+		}},
+	}
+	for _, c := range cases {
+		c := c
+		t.Run(c.name, func(t *testing.T) {
+			err := c.call(&StubClient{})
+			if err == nil {
+				t.Fatalf("expected CodeInvalidRequest, got nil")
+			}
+			var de *pkgerrors.Error
+			if !stdErrors.As(err, &de) || de.Code != pkgerrors.CodeInvalidRequest {
+				t.Fatalf("want CodeInvalidRequest, got %v", err)
+			}
+		})
+	}
+}
+
 func TestStubClient_RecordsAllMethods(t *testing.T) {
 	// Arrange
 	s := &StubClient{}

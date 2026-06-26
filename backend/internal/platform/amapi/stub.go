@@ -3,6 +3,8 @@ package amapi
 import (
 	"context"
 	"sync"
+
+	pkgerrors "github.com/hitoshiichikawa/ae-mdm/internal/errors"
 )
 
 // StubClient は domain Service の単体テスト用に Client interface を満たす in-memory 実装。
@@ -92,11 +94,15 @@ func (s *StubClient) GetEnterprise(ctx context.Context, enterpriseName string) (
 	return Enterprise{}, nil
 }
 
-// UpsertPolicy は Client interface を満たす。
+// UpsertPolicy は Client interface を満たす。realClient と同じ contract で policyName 空値を
+// 拒否する（domain Service テストで stub と real の挙動差を出さないため）。
 func (s *StubClient) UpsertPolicy(ctx context.Context, enterpriseName, policyName string, body PolicyBody) error {
 	s.recordCall("UpsertPolicy", enterpriseName, policyName, body)
 	if err := requireEnterpriseName(enterpriseName); err != nil {
 		return err
+	}
+	if policyName == "" {
+		return pkgerrors.New(pkgerrors.CodeInvalidRequest, "policyName is required")
 	}
 	if s.OnUpsertPolicy != nil {
 		return s.OnUpsertPolicy(ctx, enterpriseName, policyName, body)
@@ -104,11 +110,14 @@ func (s *StubClient) UpsertPolicy(ctx context.Context, enterpriseName, policyNam
 	return nil
 }
 
-// GetPolicy は Client interface を満たす。
+// GetPolicy は Client interface を満たす。realClient と同じ contract で policyName 空値を拒否する。
 func (s *StubClient) GetPolicy(ctx context.Context, enterpriseName, policyName string) (PolicyBody, error) {
 	s.recordCall("GetPolicy", enterpriseName, policyName)
 	if err := requireEnterpriseName(enterpriseName); err != nil {
 		return PolicyBody{}, err
+	}
+	if policyName == "" {
+		return PolicyBody{}, pkgerrors.New(pkgerrors.CodeInvalidRequest, "policyName is required")
 	}
 	if s.OnGetPolicy != nil {
 		return s.OnGetPolicy(ctx, enterpriseName, policyName)
@@ -128,11 +137,14 @@ func (s *StubClient) ListDevices(ctx context.Context, enterpriseName string) ([]
 	return nil, nil
 }
 
-// GetDevice は Client interface を満たす。
+// GetDevice は Client interface を満たす。realClient と同じ contract で deviceID 空値を拒否する。
 func (s *StubClient) GetDevice(ctx context.Context, enterpriseName, deviceID string) (Device, error) {
 	s.recordCall("GetDevice", enterpriseName, deviceID)
 	if err := requireEnterpriseName(enterpriseName); err != nil {
 		return Device{}, err
+	}
+	if deviceID == "" {
+		return Device{}, pkgerrors.New(pkgerrors.CodeInvalidRequest, "deviceID is required")
 	}
 	if s.OnGetDevice != nil {
 		return s.OnGetDevice(ctx, enterpriseName, deviceID)
@@ -140,11 +152,18 @@ func (s *StubClient) GetDevice(ctx context.Context, enterpriseName, deviceID str
 	return Device{}, nil
 }
 
-// IssueCommand は Client interface を満たす。
+// IssueCommand は Client interface を満たす。realClient と同じ contract で deviceID と
+// CommandRequest.Type の空値を拒否する。
 func (s *StubClient) IssueCommand(ctx context.Context, enterpriseName, deviceID string, cmd CommandRequest) (string, error) {
 	s.recordCall("IssueCommand", enterpriseName, deviceID, cmd)
 	if err := requireEnterpriseName(enterpriseName); err != nil {
 		return "", err
+	}
+	if deviceID == "" {
+		return "", pkgerrors.New(pkgerrors.CodeInvalidRequest, "deviceID is required")
+	}
+	if cmd.Type == "" {
+		return "", pkgerrors.New(pkgerrors.CodeInvalidRequest, "CommandRequest.Type is required")
 	}
 	if s.OnIssueCommand != nil {
 		return s.OnIssueCommand(ctx, enterpriseName, deviceID, cmd)
@@ -164,11 +183,15 @@ func (s *StubClient) CreateEnrollmentToken(ctx context.Context, enterpriseName s
 	return EnrollmentToken{}, nil
 }
 
-// CreateWebToken は Client interface を満たす。
+// CreateWebToken は Client interface を満たす。realClient と同じ contract で parentFrameURL の
+// 空値を拒否する。
 func (s *StubClient) CreateWebToken(ctx context.Context, enterpriseName string, parentFrameURL string) (WebToken, error) {
 	s.recordCall("CreateWebToken", enterpriseName, parentFrameURL)
 	if err := requireEnterpriseName(enterpriseName); err != nil {
 		return WebToken{}, err
+	}
+	if parentFrameURL == "" {
+		return WebToken{}, pkgerrors.New(pkgerrors.CodeInvalidRequest, "parentFrameURL is required")
 	}
 	if s.OnCreateWebToken != nil {
 		return s.OnCreateWebToken(ctx, enterpriseName, parentFrameURL)

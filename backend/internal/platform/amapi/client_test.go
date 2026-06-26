@@ -29,10 +29,10 @@ type fakeLogger struct {
 	errorCalls atomic.Int64
 }
 
-func (l *fakeLogger) Debug(msg string, fields ...any) { l.debugCalls.Add(1) }
-func (l *fakeLogger) Info(msg string, fields ...any)  { l.infoCalls.Add(1) }
-func (l *fakeLogger) Warn(msg string, fields ...any)  { l.warnCalls.Add(1) }
-func (l *fakeLogger) Error(msg string, fields ...any) { l.errorCalls.Add(1) }
+func (l *fakeLogger) Debug(msg string, fields ...any)  { l.debugCalls.Add(1) }
+func (l *fakeLogger) Info(msg string, fields ...any)   { l.infoCalls.Add(1) }
+func (l *fakeLogger) Warn(msg string, fields ...any)   { l.warnCalls.Add(1) }
+func (l *fakeLogger) Error(msg string, fields ...any)  { l.errorCalls.Add(1) }
 func (l *fakeLogger) With(fields ...any) logger.Logger { return l }
 func (l *fakeLogger) Sync() error                      { return nil }
 
@@ -156,6 +156,121 @@ func TestRequireEnterpriseName_NonEmptyReturnsNil(t *testing.T) {
 	}
 }
 
+func TestRequireEnterpriseName_WhitespaceOnlyReturnsInvalidRequest(t *testing.T) {
+	cases := []string{" ", "\t", "\n", "  \t  ", "　"}
+	for _, in := range cases {
+		in := in
+		t.Run(fmt.Sprintf("input=%q", in), func(t *testing.T) {
+			err := requireEnterpriseName(in)
+			if err == nil {
+				t.Fatalf("requireEnterpriseName(%q) = nil, want CodeInvalidRequest", in)
+			}
+			var de *pkgerrors.Error
+			if !stdErrors.As(err, &de) || de.Code != pkgerrors.CodeInvalidRequest {
+				t.Fatalf("want CodeInvalidRequest, got %v", err)
+			}
+		})
+	}
+}
+
+func TestNewClient_NilLog_UsesDefaultLogger(t *testing.T) {
+	// Arrange: log を nil で渡しても OK 応答経路で panic しないこと（c.log.Info の nil パニック防止）
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"url":"https://signup","name":"signupUrls/abc"}`))
+	}))
+	defer srv.Close()
+	httpClient := &http.Client{Transport: &endpointRewriter{base: srv.URL, wrapped: srv.Client().Transport}}
+	cfg := config.Config{GoogleApplicationCredentials: "x.json"}
+	cli, err := NewClient(context.Background(), cfg, nil, &Options{
+		HTTPClient:  httpClient,
+		MaxRetries:  1,
+		BaseBackoff: time.Microsecond,
+		Sleep: func(ctx context.Context, d time.Duration) error {
+			return nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("NewClient(nil log) = %v", err)
+	}
+
+	// Act: 構造化ログ呼び出し経路（success）を実走させる
+	_, _, err = cli.CreateSignupURL(context.Background())
+
+	// Assert: panic 無く成功すれば OK（nil logger に対する Info / Warn 呼び出しがガードされている）
+	if err != nil {
+		t.Fatalf("CreateSignupURL = %v, want nil", err)
+	}
+}
+
+func TestDoWithRetry_PreCanceledContext_ReturnsTransient(t *testing.T) {
+	// Arrange: 事前 cancel 済み context で呼ぶ → 試行前 ctx.Err() で即時抜け
+	srv, _, _ := recordingServer(t, http.StatusOK, func(req receivedRequest) string { return `{}` })
+	c, _ := newTestClient(t, srv, time.Microsecond)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	// Act
+	_, _, err := c.CreateSignupURL(ctx)
+
+	// Assert: CodeUnavailable + IsTransient=true（mapAMAPIError の context 経路と契約を揃える）
+	if err == nil {
+		t.Fatalf("expected error for pre-canceled context")
+	}
+	var de *pkgerrors.Error
+	if !stdErrors.As(err, &de) {
+		t.Fatalf("not *pkgerrors.Error: %T", err)
+	}
+	if de.Code != pkgerrors.CodeUnavailable {
+		t.Fatalf("Code = %q, want %q", de.Code, pkgerrors.CodeUnavailable)
+	}
+	if !de.IsTransient {
+		t.Fatalf("IsTransient = false, want true (cancel/timeout は一時障害扱い)")
+	}
+}
+
+func TestDoWithRetry_BackoffCanceled_ReturnsTransient(t *testing.T) {
+	// Arrange: 常に 503 を返す server。Sleep 内で cancel → backoff 中のキャンセル経路
+	srv, _ := retryServer(t, 100, http.StatusServiceUnavailable, `{}`)
+	httpClient := &http.Client{Transport: &endpointRewriter{
+		base:    srv.URL,
+		wrapped: srv.Client().Transport,
+	}}
+	ctx, cancel := context.WithCancel(context.Background())
+	cfg := config.Config{GoogleApplicationCredentials: "x.json"}
+	cli, err := NewClient(context.Background(), cfg, &fakeLogger{}, &Options{
+		HTTPClient:  httpClient,
+		MaxRetries:  defaultMaxRetries,
+		BaseBackoff: time.Second,
+		Sleep: func(ctx context.Context, d time.Duration) error {
+			cancel()
+			return ctx.Err()
+		},
+	})
+	if err != nil {
+		t.Fatalf("NewClient failed: %v", err)
+	}
+
+	// Act
+	_, _, err = cli.CreateSignupURL(ctx)
+
+	// Assert: CodeUnavailable + IsTransient=true
+	if err == nil {
+		t.Fatalf("expected error")
+	}
+	var de *pkgerrors.Error
+	if !stdErrors.As(err, &de) {
+		t.Fatalf("not *pkgerrors.Error: %T", err)
+	}
+	if de.Code != pkgerrors.CodeUnavailable {
+		t.Fatalf("Code = %q, want %q", de.Code, pkgerrors.CodeUnavailable)
+	}
+	if !de.IsTransient {
+		t.Fatalf("IsTransient = false, want true (cancel は一時障害扱い)")
+	}
+}
+
 // ---- mapAMAPIError table-driven test ----
 
 func TestMapAMAPIError_GoogleAPIError_Mapping(t *testing.T) {
@@ -175,8 +290,11 @@ func TestMapAMAPIError_GoogleAPIError_Mapping(t *testing.T) {
 		{http.StatusBadGateway, pkgerrors.CodeUpstream, true},
 		{http.StatusServiceUnavailable, pkgerrors.CodeUpstream, true},
 		{http.StatusGatewayTimeout, pkgerrors.CodeUpstream, true},
-		// その他 4xx は CodeUpstream + 非 transient
-		{http.StatusPaymentRequired, pkgerrors.CodeUpstream, false},
+		// その他 4xx は呼び出し側起因のドメインエラーとして CodeInvalidRequest + 非 transient
+		// に正規化する（Req 4.1）。
+		{http.StatusPaymentRequired, pkgerrors.CodeInvalidRequest, false},
+		{http.StatusMethodNotAllowed, pkgerrors.CodeInvalidRequest, false},
+		{http.StatusPreconditionFailed, pkgerrors.CodeInvalidRequest, false},
 		// その他 5xx は CodeUpstream + transient
 		{599, pkgerrors.CodeUpstream, true},
 	}
