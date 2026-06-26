@@ -329,7 +329,11 @@ func (s *service) LookupAndRefresh(ctx context.Context, rawSessionToken string, 
 	}
 
 	// 失効判定順序: 1) console_mismatch → 2) session_expired → 3) session_revoked → 4) session_idle
-	if sess.Console != expectedConsole {
+	//
+	// expectedConsole == oidc.ConsoleAny の場合は console 照合を skip し、後段の
+	// HTTP middleware（例: `httpserver.RequireAdminConsoleAndSuperAdmin`）に audience
+	// 判定を委譲する（Issue #37 / Req 2.4: tenant-console を 403 で拒否）。
+	if expectedConsole != oidc.ConsoleAny && sess.Console != expectedConsole {
 		err := pkgerrors.Wrap(
 			pkgerrors.CodeUnauthenticated,
 			"session console does not match expected console",

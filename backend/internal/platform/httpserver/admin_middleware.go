@@ -2,30 +2,48 @@ package httpserver
 
 import (
 	"net/http"
+	"strings"
 
 	internalerrors "github.com/hitoshiichikawa/ae-mdm/internal/errors"
 	"github.com/hitoshiichikawa/ae-mdm/internal/logger"
 	"github.com/hitoshiichikawa/ae-mdm/internal/platform/db"
 )
 
+// adminConsoleAudience は `/api/admin/*` ガードが許可する audience 値。
+//
+// `internal/platform/oidc.ConsoleAdmin` と同値だが、httpserver から oidc への直接依存を
+// 避けるため文字列定数として独立に定義する。AuthClaims.Console（string）との直接比較で
+// 判定する。
+const adminConsoleAudience = "admin-console"
+
+// authzDenyReason は `/api/admin/*` ガードが構造化ログに乗せる拒否理由の field 値。
+//
+// 値域は authz パッケージの DenyReason と意味的に並走するが、本層の関心は
+// 「audience 不一致」「SuperAdmin 不在」「session 未確立」の 3 区分に限られるため、
+// 重複定義を避けるために本ファイル内で固定の string リテラルを用いる。
+const (
+	authzDenyReasonSessionMissing      = "session_missing"
+	authzDenyReasonAudienceMismatch    = "audience_mismatch"
+	authzDenyReasonSuperAdminNotPresent = "super_admin_not_present"
+)
+
 // RequireSuperAdmin は `/api/admin/*` 配下に固定で挟む SuperAdmin ガード middleware。
+//
+// Issue #33 (A3a) で追加された当初実装は TenantContext の IsSuperAdmin のみで判定して
+// いたが、Issue #37 (A3b) で audience（admin-console） の判定を別 middleware
+// [RequireAdminConsoleAndSuperAdmin] に切り出した。
 //
 // 動作（requirements.md Req 5.4 / 5.5 / design.md Components: HTTP Server Bootstrap
 // 節「`/api/admin/*` 配下には SuperAdmin ガードを router group の `Use()` で固定して挟む」
 // と整合）:
 //   - TenantContext が ctx に確立されていない（CodeTenantCtxMissing）→ **401**
-//     `*errors.Error{Code: CodeUnauthenticated}` で応答（本 Issue 範囲ではこの経路は
-//     通常 TenantContextMiddleware で先に 401 になるが、admin 専用 middleware 単体でも
-//     fail-closed で動作するように本ガードを内包する）
 //   - TenantContext あり + IsSuperAdmin=false → **403**
-//     `*errors.Error{Code: CodeForbidden}` で応答（Req 5.5 の「対象リソースの存在を露出しない」
-//     ため body には対象 ID 等を含めない）
 //   - TenantContext あり + IsSuperAdmin=true → next.ServeHTTP に通過
 //
-// 本 Issue では auth スタブが claims を ctx に注入しない default deny 状態のため、
-// 通常運用では 401 で先に弾かれる。後続 Issue で OIDC 認証 + RBAC が配線された後、
-// 本 middleware は SuperAdmin チェックの正典として動作し続ける（実 RBAC への差し替えは
-// 後続 Issue で本関数の signature を保ったまま行う想定）。
+// Issue #37 以降は本 middleware よりも [RequireAdminConsoleAndSuperAdmin] を優先して
+// 使うこと。本 middleware は audience 判定を行わないため、tenant-console aud で発行
+// された SuperAdmin セッションを通過させる経路があり、要件 Req 2.4 を満たさない。
+// 既存呼び出し箇所との後方互換のために残置する（後続 Issue で除去予定）。
 func RequireSuperAdmin(log logger.Logger) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -49,4 +67,120 @@ func RequireSuperAdmin(log logger.Logger) func(http.Handler) http.Handler {
 			next.ServeHTTP(w, r)
 		})
 	}
+}
+
+// RequireAdminConsoleAndSuperAdmin は Issue #37 で追加された `/api/admin/*` ガード
+// middleware。
+//
+// requirements.md Req 2.1〜2.7 / Req 6.1〜6.3 / NFR 1 / NFR 4 / design.md Components:
+// HTTP Server Bootstrap 節「`/api/admin/*` 配下には admin-console aud かつ
+// SuperAdmin の 2 条件 AND ガードを router group の `Use()` で固定して挟む」と整合。
+//
+// AuthClaims.Console と AuthClaims.IsSuperAdmin（Issue #33 で auth middleware が
+// session lookup 成功時に注入）を見て判定する:
+//
+//   - AuthClaims が ctx に確立されていない → **401**
+//     `*errors.Error{Code: CodeUnauthenticated}`（Req 2.6 / 6.3）
+//   - AuthClaims.Console != "admin-console" → **403**
+//     `*errors.Error{Code: CodeForbidden}`（Req 2.4: tenant-console aud で発行された
+//     session を提示しても 403。body には対象リソース ID を含めない / Req 2.7 / 3.6）
+//   - AuthClaims.IsSuperAdmin == false → **403**
+//     `*errors.Error{Code: CodeForbidden}`（Req 2.5: 非 SuperAdmin の昇格試行を拒否）
+//   - 両方 OK → next.ServeHTTP に通過（Req 2.3）
+//
+// 拒否時は log.Warn で `authz_deny_reason` / `console` / `roles` 等の構造化 field を
+// 出力する（Req 7.1 / 7.2 / 7.3 / 7.4 / 7.5）。本 middleware が出すログ field は以下:
+//
+//   - authz_deny_reason: "session_missing" / "audience_mismatch" / "super_admin_not_present"
+//   - console: 提示された AuthClaims.Console（session 未確立時は省略）
+//   - roles: AuthClaims.Roles をカンマ区切りで連結（session 未確立時は省略）
+//   - actor_id: AuthClaims.AdminUserID（session 未確立時は省略）
+//   - session_hash_prefix: AuthClaims.SessionHashPrefix（auth middleware が成功時に転記済み、
+//     session 未確立時 / legacy claims 経路では省略 / NFR 1.1 / NFR 4.2）
+//   - request_id: AccessLog と共通の相関 ID
+//   - path / method: 拒否対象の HTTP リクエスト属性
+//
+// 本 middleware は HTTP 経路に位置するため action / resource / targetTenantID は context
+// として持たない（domain handler 配下で Authorizer が判定する deny は
+// [authz.Authorizer.AuthorizeAndLog] が action / resource / target を含む field 集合で
+// 別途 WARN を出力する / Req 7.2）。
+func RequireAdminConsoleAndSuperAdmin(log logger.Logger) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			claims, ok := AuthClaimsFromContext(r.Context())
+			if !ok {
+				// 認証セッション未確立 → 401（Req 2.6 / 6.3）。
+				logAdminAuthzDeny(log, r, AuthClaims{}, false, authzDenyReasonSessionMissing)
+				internalerrors.WriteHTTP(w, r, internalerrors.New(
+					internalerrors.CodeUnauthenticated,
+					"authentication required",
+				), log)
+				return
+			}
+			if claims.Console != adminConsoleAudience {
+				// admin-console aud 以外 → 403（Req 2.4 / 2.7）。
+				logAdminAuthzDeny(log, r, claims, true, authzDenyReasonAudienceMismatch)
+				internalerrors.WriteHTTP(w, r, internalerrors.New(
+					internalerrors.CodeForbidden,
+					"admin console required",
+				), log)
+				return
+			}
+			if !claims.IsSuperAdmin {
+				// 非 SuperAdmin → 403（Req 2.5 / 2.7）。
+				logAdminAuthzDeny(log, r, claims, true, authzDenyReasonSuperAdminNotPresent)
+				internalerrors.WriteHTTP(w, r, internalerrors.New(
+					internalerrors.CodeForbidden,
+					"super admin role required",
+				), log)
+				return
+			}
+			next.ServeHTTP(w, r)
+		})
+	}
+}
+
+// logAdminAuthzDeny は RequireAdminConsoleAndSuperAdmin の拒否経路で構造化 WARN ログを
+// 出す helper（Req 7.1 / 7.2 / 7.3 / 7.4 / 7.5）。
+//
+// field 命名:
+//   - authz_deny_reason: enum 値（session_missing / audience_mismatch / super_admin_not_present）
+//   - console: 提示された audience（claims 不在時は省略）
+//   - roles: AuthClaims.Roles をカンマ区切り（claims 不在時 / 空集合時は省略）
+//   - actor_id: AdminUserID（claims 不在時は省略）
+//   - session_hash_prefix: AuthClaims.SessionHashPrefix（claims 不在時 / legacy claims で
+//     空文字の場合は省略 / NFR 1.1 / NFR 4.2）
+//   - request_id: AccessLog と同じ X-Request-ID
+//   - path / method: 拒否対象 HTTP リクエスト属性
+//
+// `hasClaims` が false の場合は claims 由来の field（console / roles / actor_id /
+// session_hash_prefix）を一切付加しない（session_missing 経路）。
+//
+// 機密値（session cookie 生値 / id_token / state MAC 鍵）は本ログに含めない
+// （NFR 1.1 / NFR 4.2）。session_hash_prefix は短縮 prefix のみで全 hash は持たない。
+func logAdminAuthzDeny(log logger.Logger, r *http.Request, claims AuthClaims, hasClaims bool, reason string) {
+	if log == nil {
+		return
+	}
+	fields := []any{
+		"authz_deny_reason", reason,
+		"request_id", RequestIDFromContext(r.Context()),
+		"path", r.URL.Path,
+		"method", r.Method,
+	}
+	if hasClaims {
+		if claims.Console != "" {
+			fields = append(fields, "console", claims.Console)
+		}
+		if len(claims.Roles) > 0 {
+			fields = append(fields, "roles", strings.Join(claims.Roles, ","))
+		}
+		if actorID := claims.AdminUserID.String(); actorID != "" {
+			fields = append(fields, "actor_id", actorID)
+		}
+		if claims.SessionHashPrefix != "" {
+			fields = append(fields, "session_hash_prefix", claims.SessionHashPrefix)
+		}
+	}
+	log.Warn("admin authz denied", fields...)
 }

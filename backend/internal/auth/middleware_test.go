@@ -383,9 +383,76 @@ func TestMiddleware_HappyPath_InjectsAuthClaimsAndReachesNext(t *testing.T) {
 	if probe.gotClaims.IsSuperAdmin {
 		t.Errorf("claims.IsSuperAdmin: want false, got true")
 	}
+	// Console は Session.Console の文字列表現が転記される（Issue #37 / 6.2）
+	if probe.gotClaims.Console != string(oidc.ConsoleTenant) {
+		t.Errorf("claims.Console: want %q, got %q", string(oidc.ConsoleTenant), probe.gotClaims.Console)
+	}
 	// On success no Set-Cookie expire marker is emitted
 	if findCookieMW(t, rec, sessionCookieName) != nil {
 		t.Errorf("did not expect Set-Cookie for %s on success", sessionCookieName)
+	}
+}
+
+// (e1) 成功時 Console と SessionHashPrefix が AuthClaims に転記される
+//
+// Issue #37 (#44 PR iteration round 1): Session.Console → AuthClaims.Console の転記、
+// および raw token から派生する SessionHashPrefix（短縮 hash prefix）の転記を verify する。
+// Console が空文字に退行すると `/api/admin/*` ガード [RequireAdminConsoleAndSuperAdmin] が
+// audience_mismatch で実 session を拒否する回帰になるため、ここで明示的に固定する
+// （review-notes 7.3 / 6.2 / NFR 1.1）。
+func TestMiddleware_HappyPath_CopiesConsoleAndSessionHashPrefixToClaims(t *testing.T) {
+	cases := []struct {
+		name            string
+		expected        oidc.Console
+		sessionConsole  oidc.Console
+		wantConsoleSent string
+	}{
+		{"tenant_console", oidc.ConsoleTenant, oidc.ConsoleTenant, "tenant-console"},
+		{"admin_console", oidc.ConsoleAdmin, oidc.ConsoleAdmin, "admin-console"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			fx := newMWFixture(t, tc.expected)
+			tenantID := uuid.New()
+			adminUserID := uuid.New()
+			fx.svc.lookupIdentity = Identity{
+				AdminUserID:  adminUserID,
+				TenantID:     tenantID,
+				Roles:        []string{"TenantAdmin"},
+				IsSuperAdmin: false,
+			}
+			fx.svc.lookupSession = Session{
+				TokenHash: HashToken(testMWRawSessionToken),
+				Console:   tc.sessionConsole,
+			}
+			probe := &nextProbe{}
+
+			req := httptest.NewRequest(http.MethodGet, "/api/foo", nil)
+			req.AddCookie(&http.Cookie{Name: sessionCookieName, Value: testMWRawSessionToken})
+			rec := httptest.NewRecorder()
+			fx.handler(newNextProbeHandler(probe)).ServeHTTP(rec, req)
+
+			if rec.Code != http.StatusOK {
+				t.Fatalf("status: want 200, got %d", rec.Code)
+			}
+			if !probe.hasClaims {
+				t.Fatalf("AuthClaims missing on happy path")
+			}
+			// Session.Console が AuthClaims.Console に転記されていること
+			if probe.gotClaims.Console != tc.wantConsoleSent {
+				t.Errorf("claims.Console: want %q, got %q (Session.Console → AuthClaims.Console 転記失敗)",
+					tc.wantConsoleSent, probe.gotClaims.Console)
+			}
+			// SessionHashPrefix は HashPrefix(HashToken(raw)) と一致し、
+			// raw token そのものは含まない（NFR 1.1 / NFR 4.2）
+			wantPrefix := HashPrefix(HashToken(testMWRawSessionToken))
+			if probe.gotClaims.SessionHashPrefix != wantPrefix {
+				t.Errorf("claims.SessionHashPrefix: want %q, got %q", wantPrefix, probe.gotClaims.SessionHashPrefix)
+			}
+			if strings.Contains(probe.gotClaims.SessionHashPrefix, testMWRawSessionToken) {
+				t.Errorf("claims.SessionHashPrefix leaks raw session token: %q", probe.gotClaims.SessionHashPrefix)
+			}
+		})
 	}
 }
 

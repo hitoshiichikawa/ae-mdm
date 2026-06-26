@@ -120,7 +120,13 @@ func NewServer(
 	if authMWAdmin != nil {
 		adminRouter.Use(authMWAdmin)
 	}
-	adminRouter.Use(TenantContextMiddleware(log), RequireSuperAdmin(log))
+	// Issue #37 (A3b): RequireAdminConsoleAndSuperAdmin は admin-console aud かつ
+	// SuperAdmin の 2 条件 AND ガード。tenant-console aud で発行された SuperAdmin
+	// セッションが `/api/admin/*` に到達した場合、TenantContextMiddleware は通過するが
+	// 本 middleware が AuthClaims.Console を見て 403 で拒否する（Req 2.4 / 6.2）。
+	// 既存 RequireSuperAdmin（audience 判定なし）は backward compat のため admin_middleware.go
+	// に残置するが、本 chain には使用しない。
+	adminRouter.Use(TenantContextMiddleware(log), RequireAdminConsoleAndSuperAdmin(log))
 	adminRouter.HandleFunc("/*", notFoundHandler)
 
 	apiRouter := chi.NewRouter()

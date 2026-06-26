@@ -338,6 +338,21 @@ func (l *recordingLogger) hasFailureKind(want string) bool {
 	return false
 }
 
+// hasFieldEqual は任意 entry の任意 field 値が want と一致するエントリが存在するかを返す。
+// Issue #37: admin guard の `authz_deny_reason` / `console` 等の任意 field assertion に使う。
+func (l *recordingLogger) hasFieldEqual(key, want string) bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	for _, e := range l.entries {
+		if v, ok := e.Fields[key]; ok {
+			if s, ok2 := v.(string); ok2 && s == want {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 // hasFailureKindWithConsole は failure_kind + console の両方が一致するエントリを探す。
 func (l *recordingLogger) hasFailureKindWithConsole(wantKind, wantConsole string) bool {
 	l.mu.Lock()

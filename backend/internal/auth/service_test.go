@@ -911,6 +911,42 @@ func TestLookupAndRefresh_ConsoleMismatch_Returns401(t *testing.T) {
 	}
 }
 
+// (f4b) expectedConsole == ConsoleAny の場合は console 照合を skip し、tenant-console /
+// admin-console いずれの session でも success する（Issue #37 / Req 2.4: 後段 guard が 403 を返す）。
+// session 自体の他チェック（expiry / revoked / idle）は通常通り通過必要。
+func TestLookupAndRefresh_ConsoleAny_SkipsConsoleMatching(t *testing.T) {
+	cases := []struct {
+		name           string
+		sessionConsole oidc.Console
+	}{
+		{"tenant_console_session", oidc.ConsoleTenant},
+		{"admin_console_session", oidc.ConsoleAdmin},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := newMockTokenServer(t, testRawIDTokenValue)
+			fx := newServiceFixture(t, srv.URL)
+			now := fx.clock.now
+			sess := makeValidSession(now)
+			sess.Console = tc.sessionConsole
+			fx.repo.getSession = sess
+			fx.repo.getIdentity = Identity{AdminUserID: sess.AdminUserID}
+
+			_, gotSess, err := fx.svc.LookupAndRefresh(context.Background(), testRawSessionTokenValue, oidc.ConsoleAny, now)
+			if err != nil {
+				t.Fatalf("ConsoleAny で console 照合が走った: %v", err)
+			}
+			// session.Console は revoke / refresh で改変されず、元の値が呼び出し側まで届く
+			if gotSess.Console != tc.sessionConsole {
+				t.Errorf("session.Console = %s; want %s", gotSess.Console, tc.sessionConsole)
+			}
+			if fx.repo.calls.revoke != 0 {
+				t.Errorf("ConsoleAny の success 経路で revoke が呼ばれてはならない: revoke=%d", fx.repo.calls.revoke)
+			}
+		})
+	}
+}
+
 // (f5) repo.Get が session_tamper を返したら 401 で伝播
 func TestLookupAndRefresh_SessionTamper_Returns401(t *testing.T) {
 	srv := newMockTokenServer(t, testRawIDTokenValue)
