@@ -2,8 +2,11 @@ package oidc
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"net/http"
 
 	coreoidc "github.com/coreos/go-oidc/v3/oidc"
 	"golang.org/x/oauth2"
@@ -128,6 +131,13 @@ func NewVerifier(ctx context.Context, cfg config.Config) (Verifier, error) {
 // buildConsoleVerifier は 1 console 分の Provider + IDTokenVerifier + oauth2.Endpoint を
 // 構築する。go-oidc 内蔵 aud 検証は SkipClientIDCheck=true で明示的に無効化し、aud は
 // 本 package の VerifyIDToken で排他一致検証を行う。
+//
+// discovery（`coreoidc.NewProvider`）に加え、jwks_uri の prefetch（HTTP GET + 最低限の
+// JSON shape 検証）も bootstrap で実施する。jwks_uri が unreachable / 不正形式の場合は
+// 起動失敗として `*errors.Error{Code: CodeUnavailable, failure_kind: oidc_discovery}` を
+// 返す（NFR 3.2 fail-closed bootstrap / tasks.md L228-230 / design.md L295-296）。
+// 内蔵 RemoteKeySet は遅延 fetch なので初回 callback まで JWKS 異常が検知されない。本 prefetch
+// が二次の起動ゲートとなる。
 func buildConsoleVerifier(ctx context.Context, console Console, issuerURL, clientID string) (consoleVerifier, error) {
 	provider, err := coreoidc.NewProvider(ctx, issuerURL)
 	if err != nil {
@@ -138,6 +148,9 @@ func buildConsoleVerifier(ctx context.Context, console Console, issuerURL, clien
 			fmt.Sprintf("oidc discovery failed (console=%s, issuer=%s)", console, issuerURL),
 			joinFailureKind(err, FailureKindOIDCDiscovery),
 		)
+	}
+	if err := prefetchJWKS(ctx, provider, console, issuerURL); err != nil {
+		return consoleVerifier{}, err
 	}
 	// ClientID="" + SkipClientIDCheck=true で go-oidc 内蔵 aud 検証を切る。
 	// 両方明示しないと go-oidc v3 が "invalid configuration" で reject する。
@@ -157,6 +170,84 @@ func buildConsoleVerifier(ctx context.Context, console Console, issuerURL, clien
 		endpoint: endpoint,
 		verifier: idtv,
 	}, nil
+}
+
+// prefetchJWKS は discovery document から `jwks_uri` を抽出し、HTTP GET で取得して
+// 最低限の JSON shape（`keys` 配列が存在する）を検証する。
+//
+// 失敗時は `*errors.Error{Code: CodeUnavailable, failure_kind: oidc_discovery}` を返し、
+// 起動失敗として上位に伝搬する。レスポンスボディはサイズ上限 1 MiB で読み切る
+// （故障した IdP が巨大レスポンスを返すケースの defense）。
+func prefetchJWKS(ctx context.Context, provider *coreoidc.Provider, console Console, issuerURL string) error {
+	var discovery struct {
+		JWKSURI string `json:"jwks_uri"`
+	}
+	if err := provider.Claims(&discovery); err != nil {
+		return pkgerrors.Wrap(
+			pkgerrors.CodeUnavailable,
+			fmt.Sprintf("oidc discovery jwks_uri extract failed (console=%s, issuer=%s)", console, issuerURL),
+			joinFailureKind(err, FailureKindOIDCDiscovery),
+		)
+	}
+	if discovery.JWKSURI == "" {
+		return pkgerrors.Wrap(
+			pkgerrors.CodeUnavailable,
+			fmt.Sprintf("oidc discovery jwks_uri missing (console=%s, issuer=%s)", console, issuerURL),
+			FailureKindOIDCDiscovery,
+		)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, discovery.JWKSURI, nil)
+	if err != nil {
+		return pkgerrors.Wrap(
+			pkgerrors.CodeUnavailable,
+			fmt.Sprintf("oidc jwks request build failed (console=%s, jwks_uri=%s)", console, discovery.JWKSURI),
+			joinFailureKind(err, FailureKindOIDCDiscovery),
+		)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return pkgerrors.Wrap(
+			pkgerrors.CodeUnavailable,
+			fmt.Sprintf("oidc jwks fetch failed (console=%s, jwks_uri=%s)", console, discovery.JWKSURI),
+			joinFailureKind(err, FailureKindOIDCDiscovery),
+		)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode/100 != 2 {
+		return pkgerrors.Wrap(
+			pkgerrors.CodeUnavailable,
+			fmt.Sprintf("oidc jwks fetch non-2xx (console=%s, jwks_uri=%s, status=%d)", console, discovery.JWKSURI, resp.StatusCode),
+			FailureKindOIDCDiscovery,
+		)
+	}
+	// 1 MiB 上限で読み切る。本物の JWKS は通常 < 10 KB。
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if err != nil {
+		return pkgerrors.Wrap(
+			pkgerrors.CodeUnavailable,
+			fmt.Sprintf("oidc jwks read failed (console=%s, jwks_uri=%s)", console, discovery.JWKSURI),
+			joinFailureKind(err, FailureKindOIDCDiscovery),
+		)
+	}
+	var jwks struct {
+		Keys []json.RawMessage `json:"keys"`
+	}
+	if err := json.Unmarshal(body, &jwks); err != nil {
+		return pkgerrors.Wrap(
+			pkgerrors.CodeUnavailable,
+			fmt.Sprintf("oidc jwks parse failed (console=%s, jwks_uri=%s)", console, discovery.JWKSURI),
+			joinFailureKind(err, FailureKindOIDCDiscovery),
+		)
+	}
+	if len(jwks.Keys) == 0 {
+		return pkgerrors.Wrap(
+			pkgerrors.CodeUnavailable,
+			fmt.Sprintf("oidc jwks empty keys array (console=%s, jwks_uri=%s)", console, discovery.JWKSURI),
+			FailureKindOIDCDiscovery,
+		)
+	}
+	return nil
 }
 
 // VerifyIDToken は raw ID トークンを検証し、Claims を返す。

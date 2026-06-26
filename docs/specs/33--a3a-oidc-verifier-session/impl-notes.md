@@ -571,8 +571,9 @@ learning を `### Task <id>` 単位で追記する。`docs/specs/33--a3a-oidc-ve
   `ConsumeStateNonce` を token 交換**前**に実行する replay 防御 + OIDC nonce 一致確認 +
   `ResolveAdminUser` 403 マッピング + idle / absolute timeout 判定 + Logout 経路）/ 5.2
   （`backend/internal/auth/handler.go` の新規追加、HTTP 6 endpoints `GET /api/auth/login` /
-  `GET /api/auth/callback` / `GET /api/auth/me` / `POST /api/auth/logout` + tenant / admin
-  console の 2 系統対応 + httptest による单体テスト + Service interface のモック注入）は
+  `GET /api/auth/callback` / `POST /api/auth/logout` + tenant / admin console の 2 系統対応
+  （= 2 console × 3 endpoint = 6 endpoint）+ httptest による单体テスト + Service interface
+  のモック注入）は
   後続 fresh iteration で消化する。子 task 全完了時の親 task `5` の昇格は本 iteration で
   完了済みのため、auto-promotion 規約は no-op として扱う。
 

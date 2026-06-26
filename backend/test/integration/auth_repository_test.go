@@ -392,6 +392,55 @@ func TestAuthRepository_Create_Get_Touch_Revoke(t *testing.T) {
 	}
 }
 
+// TestAuthRepository_Touch_AfterRevoke_NoOp は logout 競合シナリオ対応（PR #42 round-1 review 由来）。
+//
+// Get と Touch の間で並走した Revoke が成功した場合に、Touch が revoked 行の last_seen_at を
+// 更新せず冪等に no-op として終わることを確認する（Req 5.1 / 5.3 物理化）。
+func TestAuthRepository_Touch_AfterRevoke_NoOp(t *testing.T) {
+	fixture, cleanup := setupAuthRepoFixture(t)
+	defer cleanup()
+
+	tenantID := seedTenant(t, fixture.ctx, fixture.pool, "Tenant-TouchRevoke")
+	adminUserID := seedAdminUser(t, fixture.ctx, fixture.pool, repoTestIssuer, "sub-touch-revoke", "tr@example.com", tenantID, []string{"TenantAdmin"})
+
+	repo := auth.NewRepository(fixture.pool)
+	now := time.Now().UTC().Truncate(time.Microsecond)
+	tokenHash := fmt.Sprintf("hash-touch-revoke-%s", uuid.NewString())
+	expiresAt := now.Add(8 * time.Hour)
+	if err := repo.Create(fixture.ctx, auth.Session{
+		TokenHash:   tokenHash,
+		AdminUserID: adminUserID,
+		Console:     oidc.ConsoleTenant,
+		IssuedAt:    now,
+		LastSeenAt:  now,
+		ExpiresAt:   expiresAt,
+	}); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	// (1) Revoke で session を失効させる（logout 相当）
+	revokeAt := now.Add(1 * time.Minute)
+	if err := repo.Revoke(fixture.ctx, tokenHash, revokeAt); err != nil {
+		t.Fatalf("Revoke: %v", err)
+	}
+
+	// (2) revoked 行に Touch を試みても error は返らないが last_seen_at は更新されない
+	later := now.Add(2 * time.Minute)
+	if err := repo.Touch(fixture.ctx, tokenHash, later); err != nil {
+		t.Fatalf("Touch after revoke: %v (期待: nil / 冪等 no-op)", err)
+	}
+	_, gotLastSeenAt, _, gotRevokedAt, _, found := fetchSession(t, fixture.ctx, fixture.pool, tokenHash)
+	if !found {
+		t.Fatalf("session row 不在")
+	}
+	if !gotLastSeenAt.Equal(now) {
+		t.Errorf("last_seen_at = %s; want %s (revoked 行は Touch で更新されないこと / Req 5.1 / 5.3)", gotLastSeenAt, now)
+	}
+	if gotRevokedAt == nil || !gotRevokedAt.Equal(revokeAt) {
+		t.Errorf("revoked_at = %v; want %s (revoked_at は変更されないこと)", gotRevokedAt, revokeAt)
+	}
+}
+
 // TestAuthRepository_Get_HashMismatch_SessionTamper はシナリオ (e) 対応。
 func TestAuthRepository_Get_HashMismatch_SessionTamper(t *testing.T) {
 	fixture, cleanup := setupAuthRepoFixture(t)

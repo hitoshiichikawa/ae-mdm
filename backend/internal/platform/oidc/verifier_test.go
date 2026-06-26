@@ -558,6 +558,103 @@ func TestNewVerifier_DiscoveryFailure_ReturnsUnavailable(t *testing.T) {
 	}
 }
 
+// NewVerifier が JWKS prefetch 失敗で CodeUnavailable を返す（NFR 3.2 / tasks.md L228-230 /
+// design.md L295-296）。discovery 自体は通るが jwks_uri が 404 を返すケース。
+func TestNewVerifier_JWKSPrefetchFailure_ReturnsUnavailable(t *testing.T) {
+	// Arrange: discovery は 200 を返すが jwks_uri は 404 を返す mock IdP を構築
+	mux := http.NewServeMux()
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+	issuer := srv.URL + testIssuerPath
+	mux.HandleFunc(testIssuerPath+"/.well-known/openid-configuration", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"issuer":                                issuer,
+			"authorization_endpoint":                issuer + "/auth",
+			"token_endpoint":                        issuer + "/token",
+			"jwks_uri":                              issuer + "/jwks",
+			"id_token_signing_alg_values_supported": []string{"RS256"},
+		})
+	})
+	mux.HandleFunc(testIssuerPath+"/jwks", func(w http.ResponseWriter, r *http.Request) {
+		http.NotFound(w, r)
+	})
+
+	cfg := config.Config{
+		OIDCTenantIssuerURL: issuer,
+		OIDCTenantClientID:  testTenantClientID,
+		OIDCAdminIssuerURL:  issuer,
+		OIDCAdminClientID:   testAdminClientID,
+	}
+
+	// Act
+	_, err := NewVerifier(context.Background(), cfg)
+
+	// Assert
+	if err == nil {
+		t.Fatalf("expected jwks prefetch error, got nil")
+	}
+	var pe *pkgerrors.Error
+	if !stderrors.As(err, &pe) {
+		t.Fatalf("expected *errors.Error, got %T: %v", err, err)
+	}
+	if pe.Code != pkgerrors.CodeUnavailable {
+		t.Errorf("expected Code=CodeUnavailable, got %s", pe.Code)
+	}
+	if !stderrors.Is(err, FailureKindOIDCDiscovery) {
+		t.Errorf("expected failure_kind=oidc_discovery in Cause chain, got: %v", err)
+	}
+}
+
+// NewVerifier が JWKS の keys 配列が空のとき CodeUnavailable を返す（誤設定 / 鍵未登録の
+// 起動時 fail-fast）。
+func TestNewVerifier_JWKSEmptyKeys_ReturnsUnavailable(t *testing.T) {
+	// Arrange: jwks_uri は 200 を返すが keys 配列が空の mock IdP を構築
+	mux := http.NewServeMux()
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+	issuer := srv.URL + testIssuerPath
+	mux.HandleFunc(testIssuerPath+"/.well-known/openid-configuration", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"issuer":                                issuer,
+			"authorization_endpoint":                issuer + "/auth",
+			"token_endpoint":                        issuer + "/token",
+			"jwks_uri":                              issuer + "/jwks",
+			"id_token_signing_alg_values_supported": []string{"RS256"},
+		})
+	})
+	mux.HandleFunc(testIssuerPath+"/jwks", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"keys": []}`))
+	})
+
+	cfg := config.Config{
+		OIDCTenantIssuerURL: issuer,
+		OIDCTenantClientID:  testTenantClientID,
+		OIDCAdminIssuerURL:  issuer,
+		OIDCAdminClientID:   testAdminClientID,
+	}
+
+	// Act
+	_, err := NewVerifier(context.Background(), cfg)
+
+	// Assert
+	if err == nil {
+		t.Fatalf("expected empty-keys error, got nil")
+	}
+	var pe *pkgerrors.Error
+	if !stderrors.As(err, &pe) {
+		t.Fatalf("expected *errors.Error, got %T: %v", err, err)
+	}
+	if pe.Code != pkgerrors.CodeUnavailable {
+		t.Errorf("expected Code=CodeUnavailable, got %s", pe.Code)
+	}
+	if !stderrors.Is(err, FailureKindOIDCDiscovery) {
+		t.Errorf("expected failure_kind=oidc_discovery in Cause chain, got: %v", err)
+	}
+}
+
 // 「機密値を error wrap に補間しない」契約の追加 assert（複数 failure path をまとめて検証）。
 //
 // raw JWT / client_id を含む文字列が error メッセージに登場しないことを 4 つの失敗種別で

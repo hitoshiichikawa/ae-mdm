@@ -346,12 +346,20 @@ func (r *repository) Get(ctx context.Context, tokenHash string) (Session, Identi
 }
 
 // Touch は Repository.Touch の実装。
+//
+// `revoked_at IS NULL` を WHERE 条件に含めることで、`Get` と `Touch` の間に並走した
+// `Revoke` が成功した行（= 直後にログアウトされた session）の `last_seen_at` を
+// 更新しないことを保証する（Req 5.1 / 5.3 / PR #42 round-1 review 由来）。条件に
+// マッチしなくても本メソッドは error を返さない（呼び出し側で `LookupAndRefresh` の
+// 次回呼び出しが `Get` 段階で revoked_at を検知し失効と判定する経路に倒れる / 冪等）。
 func (r *repository) Touch(ctx context.Context, tokenHash string, now time.Time) error {
 	ctx = superAdminContext(ctx)
 	return db.BeginTxFunc(ctx, r.pool, func(tx pgx.Tx) error {
 		// Req 4.8: expires_at は変更しない。last_seen_at のみを now にセット。
+		// Req 5.1 / 5.3: revoked_at が立っている行（logout / revokeOnExpire 済）は更新しない。
 		if _, err := tx.Exec(ctx,
-			`UPDATE sessions SET last_seen_at = $1 WHERE token_hash = $2`,
+			`UPDATE sessions SET last_seen_at = $1
+			 WHERE token_hash = $2 AND revoked_at IS NULL`,
 			now, tokenHash,
 		); err != nil {
 			return pkgerrors.Wrap(

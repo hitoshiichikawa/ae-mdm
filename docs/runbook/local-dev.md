@@ -224,14 +224,17 @@ OIDC ログインフロー（umbrella task 3.1）が実装されると、`http:/
 
 ### 6. OIDC 認証フロー検証手順
 
-Issue #33（A3a: OIDC Verifier + Session 管理）で実装された `/api/auth/login` /
-`/api/auth/callback` / `/api/auth/me` / `POST /api/auth/logout`（および `/api/admin/auth/*`
-の admin 系 4 endpoint）を、ローカルで end-to-end に検証する手順です。
+Issue #33（A3a: OIDC Verifier + Session 管理）で実装された `GET /api/auth/login` /
+`GET /api/auth/callback` / `POST /api/auth/logout`（および `/api/admin/auth/*` の admin
+系 3 endpoint、計 6 endpoint）を、ローカルで end-to-end に検証する手順です。
+`GET /api/auth/me` は本 Issue のスコープ外です（identity 露出 API は後続 Issue で
+扱う）。
 
 #### 6.1 前提: Keycloak realm export の 2 client 定義
 
 OIDC フローを通すためには、Keycloak realm に **tenant-console** / **admin-console** の
-2 client が登録されている必要があります（design.md L195 / requirements.md 8.4）。
+2 client が登録されている必要があります（A3a design.md「OIDC Verifier」節 /
+requirements.md Req 6.1 / 6.2 の 2 コンソール OIDC クライアント分離）。
 
 | 項目 | 配置先 | 内容 |
 |---|---|---|
@@ -300,7 +303,10 @@ openssl rand -hex 32
    - `__Host-ae_mdm_session` cookie 発行 + sessions テーブルに `(token_hash, console, ...)`
      を INSERT + state cookie 削除
 7. SPA が `return_to` で指定された相対パス（既定 `/`）に 302 リダイレクトされ、以降は
-   session cookie でリクエストが認可される（`GET /api/auth/me` で identity 情報を確認可）
+   session cookie でリクエストが認可される（identity 露出 API `GET /api/auth/me` 等は
+   本 Issue では mount しないため、cookie 有効性の手動確認はブラウザ DevTools の Application
+   タブで `__Host-ae_mdm_session` が Secure + HttpOnly + SameSite=Lax で発行されていることを
+   確認する）
 8. `POST /api/auth/logout` で session cookie が revoke される（DB 上の `sessions.revoked_at`
    セット + cookie 削除 / 再提示は 401 `session_revoked`）
 
