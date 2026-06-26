@@ -679,7 +679,7 @@
   - _Requirements: 5.3, 5.4, 6.2, 6.3_
   - _Boundary: HTTPServer_
   - _Depends: 6.1, 5.2_
-- [ ] 6.3 cmd/api bootstrap に OIDC Verifier / Auth 配線追加
+- [x] 6.3 cmd/api bootstrap に OIDC Verifier / Auth 配線追加
   - `backend/cmd/api/main.go` を編集。`config.Load()` の後に `oidc.NewVerifier(ctx, cfg)` を
     呼び（失敗時は exit 1 / NFR 3.2）、`auth.NewRepository(pool)` → **`auth.NewService(cfg,
     verifier, repo, oauth2Configs, clock, auth.TokenGenerator(session.New), log)`**
