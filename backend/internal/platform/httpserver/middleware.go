@@ -74,6 +74,12 @@ type AuthClaims struct {
 	// Console は OIDC ID トークンの aud から判別したコンソール種別を string で持つ
 	// （"tenant-console" / "admin-console" のいずれか）。Issue #37 で追加。
 	Console string
+	// SessionHashPrefix は auth middleware が確立した session の token_hash 短縮 prefix
+	// （先頭 8 文字）。Issue #37 (#44 PR iteration round 1) で Req 7.3 の denied ログに
+	// 載せるために追加。raw token / 全 hash は決して持たない（NFR 1.1 / NFR 4.2）。
+	// auth middleware が成功時のみ populate する。zero value（空文字）は legacy 経路
+	// （session_hash_prefix 取得経路が無い fixture / 過渡的な後方互換）を表す。
+	SessionHashPrefix string
 }
 
 // authClaimsCtxKey は AuthClaims を request context に格納する private な key 型。
