@@ -397,7 +397,7 @@
   - _Boundary: AuthRepository_
   - _Depends: 1.2, 1.3, 3.1, 3.2_
 
-- [ ] 5. auth.Service（4 ユースケース）+ auth.Handler（HTTP 6 endpoints）
+- [x] 5. auth.Service（4 ユースケース）+ auth.Handler（HTTP 6 endpoints）
 - [ ] 5.1 Service 実装 + 単体テスト
   - `backend/internal/auth/service.go` を新規追加。`Service` interface（`BeginLogin` /
     `HandleCallback` / `LookupAndRefresh` / `Logout`）を提供
