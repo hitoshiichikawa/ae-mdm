@@ -1,6 +1,16 @@
 package main
 
-import "testing"
+import (
+	"context"
+	"reflect"
+	"testing"
+
+	goidc "github.com/coreos/go-oidc/v3/oidc"
+	"golang.org/x/oauth2"
+
+	"github.com/hitoshiichikawa/ae-mdm/internal/config"
+	"github.com/hitoshiichikawa/ae-mdm/internal/platform/oidc"
+)
 
 // TestHealthcheckURL_RespectsHTTPListenAddr は HTTP_LISTEN_ADDR env からの port 抽出と
 // loopback URL 構築の挙動を確認する（PR #31 round-1 / round-2 / round-3 review 由来）。
@@ -27,5 +37,102 @@ func TestHealthcheckURL_RespectsHTTPListenAddr(t *testing.T) {
 				t.Errorf("healthcheckURL(%q) = %q; want %q", c.input, got, c.want)
 			}
 		})
+	}
+}
+
+// fakeVerifier は task 6.3 の buildOAuth2Configs を独立に検証するための oidc.Verifier 実装。
+// tenant / admin 別の AuthStyleInHeader 固定 Endpoint を返し、VerifyIDToken は使わない。
+type fakeVerifier struct {
+	tenantEndpoint oauth2.Endpoint
+	adminEndpoint  oauth2.Endpoint
+}
+
+func (f *fakeVerifier) VerifyIDToken(_ context.Context, _ string) (oidc.Claims, error) {
+	return oidc.Claims{}, nil
+}
+func (f *fakeVerifier) TenantEndpoint() oauth2.Endpoint { return f.tenantEndpoint }
+func (f *fakeVerifier) AdminEndpoint() oauth2.Endpoint  { return f.adminEndpoint }
+
+// TestBuildOAuth2Configs は task 6.3 で追加した buildOAuth2Configs helper が、
+// tenant / admin それぞれの ClientID / ClientSecret / RedirectURL / Scopes / Endpoint を
+// Config と Verifier から決定論的に取り出すことを回帰的に守る。
+//
+// 検証観点（tasks.md 6.3 詳細項目 / impl-notes Task 5.1 の Scopes 必須要件と整合）:
+//   - 戻り map は ConsoleTenant / ConsoleAdmin の 2 key のみを持つ
+//   - Scopes に goidc.ScopeOpenID（"openid"）/ "email" / "profile" を含む
+//     （openid 不在だと IdP が id_token を発行せず、後段 token.Extra で 502 に化ける）
+//   - 各 oauth2.Config の Endpoint は Verifier の TenantEndpoint() / AdminEndpoint() を
+//     そのまま採用（AuthStyle == AuthStyleInHeader / client_secret_basic 固定の契約は
+//     verifier_test.go の TestVerifier_EndpointAuthStyle_IsInHeader が一次的に守るので、
+//     本 test では Endpoint が「verifier から取り出した値」と byte-equal で一致することのみ
+//     assert する）
+func TestBuildOAuth2Configs(t *testing.T) {
+	tenantEndpoint := oauth2.Endpoint{
+		AuthURL:   "https://idp.tenant.example/auth",
+		TokenURL:  "https://idp.tenant.example/token",
+		AuthStyle: oauth2.AuthStyleInHeader,
+	}
+	adminEndpoint := oauth2.Endpoint{
+		AuthURL:   "https://idp.admin.example/auth",
+		TokenURL:  "https://idp.admin.example/token",
+		AuthStyle: oauth2.AuthStyleInHeader,
+	}
+	v := &fakeVerifier{tenantEndpoint: tenantEndpoint, adminEndpoint: adminEndpoint}
+
+	cfg := config.Config{
+		OIDCTenantClientID:     "tenant-client-id",
+		OIDCTenantClientSecret: "tenant-client-secret",
+		OIDCTenantRedirectURL:  "http://localhost:8080/api/auth/callback",
+		OIDCAdminClientID:      "admin-client-id",
+		OIDCAdminClientSecret:  "admin-client-secret",
+		OIDCAdminRedirectURL:   "http://localhost:8080/api/admin/auth/callback",
+	}
+
+	got := buildOAuth2Configs(cfg, v)
+
+	if len(got) != 2 {
+		t.Fatalf("buildOAuth2Configs: got %d entries; want 2", len(got))
+	}
+
+	wantScopes := []string{goidc.ScopeOpenID, "email", "profile"}
+
+	tenant, ok := got[oidc.ConsoleTenant]
+	if !ok {
+		t.Fatalf("buildOAuth2Configs: missing tenant entry")
+	}
+	if tenant.ClientID != cfg.OIDCTenantClientID {
+		t.Errorf("tenant.ClientID = %q; want %q", tenant.ClientID, cfg.OIDCTenantClientID)
+	}
+	if tenant.ClientSecret != cfg.OIDCTenantClientSecret {
+		t.Errorf("tenant.ClientSecret mismatch")
+	}
+	if tenant.RedirectURL != cfg.OIDCTenantRedirectURL {
+		t.Errorf("tenant.RedirectURL = %q; want %q", tenant.RedirectURL, cfg.OIDCTenantRedirectURL)
+	}
+	if !reflect.DeepEqual(tenant.Scopes, wantScopes) {
+		t.Errorf("tenant.Scopes = %v; want %v", tenant.Scopes, wantScopes)
+	}
+	if tenant.Endpoint != tenantEndpoint {
+		t.Errorf("tenant.Endpoint = %+v; want %+v", tenant.Endpoint, tenantEndpoint)
+	}
+
+	admin, ok := got[oidc.ConsoleAdmin]
+	if !ok {
+		t.Fatalf("buildOAuth2Configs: missing admin entry")
+	}
+	if admin.ClientID != cfg.OIDCAdminClientID {
+		t.Errorf("admin.ClientID = %q; want %q", admin.ClientID, cfg.OIDCAdminClientID)
+	}
+	if admin.ClientSecret != cfg.OIDCAdminClientSecret {
+		t.Errorf("admin.ClientSecret mismatch")
+	}
+	if admin.RedirectURL != cfg.OIDCAdminRedirectURL {
+		t.Errorf("admin.RedirectURL = %q; want %q", admin.RedirectURL, cfg.OIDCAdminRedirectURL)
+	}
+	if !reflect.DeepEqual(admin.Scopes, wantScopes) {
+		t.Errorf("admin.Scopes = %v; want %v", admin.Scopes, wantScopes)
+	}
+	if admin.Endpoint != adminEndpoint {
+		t.Errorf("admin.Endpoint = %+v; want %+v", admin.Endpoint, adminEndpoint)
 	}
 }
