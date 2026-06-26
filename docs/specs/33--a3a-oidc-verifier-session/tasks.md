@@ -713,7 +713,7 @@
   - _Requirements: NFR 3.1, NFR 3.2_
   - _Boundary: cmd-api_
   - _Depends: 6.2_
-- [ ] 6.4 結合テスト（auth 全フロー）
+- [x] 6.4 結合テスト（auth 全フロー）
   - `backend/test/integration/auth_login_callback_test.go` を新規追加。`docker compose up -d
     postgres` 前提 + テスト用 RSA private key で OIDC IdP を `httptest.NewServer` で mock
     （discovery / JWKS / token endpoint を提供）。シナリオ:
