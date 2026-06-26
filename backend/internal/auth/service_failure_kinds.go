@@ -53,4 +53,10 @@ const (
 	// FailureKindReturnToInvalid は `return_to` クエリパラメータ検証失敗
 	// （open redirect 候補 / 確認事項 3 / design.md L767）。BeginLogin で 400 にマッピング。
 	FailureKindReturnToInvalid failureKind = "return_to_invalid"
+
+	// FailureKindInvalidRequest は Handler 入口判定で必須クエリ（`code` / `state` 等）
+	// の欠落を検出した場合の sentinel（design.md API Contract /api/auth/callback
+	// Errors 列「400（return_to が不正 URL / `code` 欠落 / `state` 欠落）」/ tasks.md
+	// task 5.2 詳細項目 / Req 2.5）。Service 呼び出し前に Handler で即時 400 を返す。
+	FailureKindInvalidRequest failureKind = "invalid_request"
 )

@@ -16,7 +16,7 @@
 //   - 許可: github.com/hitoshiichikawa/ae-mdm/internal/config
 //   - 禁止: 上位 application / cmd / 他 domain への直接 import
 //
-// # 構成（task 5.1 時点）
+// # 構成（task 5.2 時点）
 //
 //   - types.go                       : Identity / Session のドメイン型
 //   - clock.go                       : Clock interface と SystemClock 実装（DI 境界）
@@ -38,12 +38,20 @@
 //   - service.go                     : Service interface（BeginLogin / HandleCallback /
 //     LookupAndRefresh / Logout）+ 本番実装。Verifier / Repository / Clock / TokenGenerator /
 //     oauth2.Config を DI で受け取り、state cookie 発行・nonce 照合・session 失効判定を集約。
-//   - service_failure_kinds.go       : Service が返す failureKind sentinel 追加定数
+//   - service_failure_kinds.go       : Service / Handler が返す failureKind sentinel 追加定数
 //     （state_console_mismatch / invalid_aud / nonce_mismatch / csprng_failure /
 //     upstream_oidc_token / console_mismatch / session_expired / session_revoked /
-//     session_idle / return_to_invalid）。
+//     session_idle / return_to_invalid / invalid_request）。
 //   - service_test.go                : Service の単体テスト（fake Verifier / Repository /
 //     Clock / Logger / oauth2 token endpoint mock 経由）。
+//   - handler.go                     : HTTP Handler（Mount で `consolePrefix` 配下に
+//     `/login` GET / `/callback` GET / `/logout` POST の 3 route を sub-router で登録）。
+//     tenant / admin 2 系統で同一構造を持ち、Mount を 2 度呼ぶことで 6 endpoint をカバー。
+//     callback 入口で `code` / `state` 欠落を 400 invalid_request で reject、成功時は
+//     state cookie 削除 + session cookie 発行 + 302、logout は cookie 不在で 401 を返す。
+//   - handler_test.go                : Handler の httptest 単体テスト（fake Service 経由で
+//     login 302 / callback 302+cookie / state mismatch 401 / code/state 欠落 400 /
+//     logout 204+cookie 不在 401 を tenant + admin 両系統で網羅）。
 //
 // # 機密値の非埋込契約
 //
