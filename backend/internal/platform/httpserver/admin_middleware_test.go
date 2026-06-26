@@ -130,11 +130,12 @@ func TestRequireSuperAdmin_SuperAdmin_PassesToNext(t *testing.T) {
 // newAdminConsoleClaims は admin-console aud + SuperAdmin の正常 claims を作る helper。
 func newAdminConsoleClaims() AuthClaims {
 	return AuthClaims{
-		TenantID:     uuid.Nil, // SuperAdmin の cross-tenant 文脈
-		AdminUserID:  uuid.New(),
-		Roles:        []string{"SuperAdmin"},
-		IsSuperAdmin: true,
-		Console:      "admin-console",
+		TenantID:          uuid.Nil, // SuperAdmin の cross-tenant 文脈
+		AdminUserID:       uuid.New(),
+		Roles:             []string{"SuperAdmin"},
+		IsSuperAdmin:      true,
+		Console:           "admin-console",
+		SessionHashPrefix: "abc12345",
 	}
 }
 
@@ -204,6 +205,9 @@ func TestRequireAdminConsoleAndSuperAdmin_TenantConsole_Returns403(t *testing.T)
 	assertLogFieldExists(t, log, "authz_deny_reason", authzDenyReasonAudienceMismatch)
 	assertLogFieldExists(t, log, "console", "tenant-console")
 	assertLogFieldExists(t, log, "actor_id", claims.AdminUserID.String())
+	// Req 7.2 / 7.3: roles と session_hash_prefix も付加される
+	assertLogFieldExists(t, log, "roles", "SuperAdmin")
+	assertLogFieldExists(t, log, "session_hash_prefix", claims.SessionHashPrefix)
 }
 
 // TestRequireAdminConsoleAndSuperAdmin_AdminConsole_NotSuperAdmin_Returns403 は Req 2.5 / 2.7
@@ -221,6 +225,23 @@ func TestRequireAdminConsoleAndSuperAdmin_AdminConsole_NotSuperAdmin_Returns403(
 	}
 	assertLogFieldExists(t, log, "authz_deny_reason", authzDenyReasonSuperAdminNotPresent)
 	assertLogFieldExists(t, log, "console", "admin-console")
+	// Req 7.2 / 7.3: roles と session_hash_prefix も付加される
+	assertLogFieldExists(t, log, "roles", "TenantAdmin")
+	assertLogFieldExists(t, log, "session_hash_prefix", claims.SessionHashPrefix)
+}
+
+// TestRequireAdminConsoleAndSuperAdmin_NoSession_DoesNotEmitClaimsFields は session_missing
+// 経路で claims 由来 field（roles / actor_id / session_hash_prefix / console）が出力されない
+// ことを verify する。Req 7.3 / NFR 1.1: claims 不在時は session_hash_prefix を出さない。
+func TestRequireAdminConsoleAndSuperAdmin_NoSession_DoesNotEmitClaimsFields(t *testing.T) {
+	_, log, _ := runAdminGuard(t, nil)
+	for _, key := range []string{"roles", "actor_id", "session_hash_prefix", "console"} {
+		for _, call := range log.warnCalls {
+			if _, ok := fieldValue(call.fields, key); ok {
+				t.Errorf("session_missing 経路で field %q が出力されている: %+v", key, call.fields)
+			}
+		}
+	}
 }
 
 // TestRequireAdminConsoleAndSuperAdmin_Success_PassesToNext は Req 2.3 を verify する。

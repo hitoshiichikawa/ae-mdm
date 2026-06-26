@@ -1,7 +1,12 @@
 package authz
 
 import (
+	"context"
+	"strings"
+
 	"github.com/google/uuid"
+
+	"github.com/hitoshiichikawa/ae-mdm/internal/logger"
 )
 
 // Audience は OIDC ID トークンの aud から判別したコンソール種別を表す型。
@@ -214,4 +219,70 @@ func hasKnownRole(roles []string, want Role) bool {
 		}
 	}
 	return false
+}
+
+// LogContext は Authorizer.AuthorizeAndLog が denied ログに付加する追加 context を表す。
+//
+// HTTP middleware / domain handler 配下で Authorizer を呼ぶ際、呼び出し元しか保持しない
+// 識別子（request_id / actor_id / session_hash_prefix）を Authorizer の log field に乗せる
+// ための入力契約。zero value は安全（フィールドは出力時に空文字判定で省略される）。
+//
+// requirements.md Req 7.3 / 7.4 / 7.5 の denied ログ field を満たすために用意する。
+type LogContext struct {
+	// RequestID は AccessLog と共通の相関 ID（X-Request-ID）。空文字なら省略。
+	RequestID string
+	// ActorID は AuthClaims.AdminUserID（操作主体）。空文字なら省略。
+	ActorID string
+	// SessionHashPrefix は AuthClaims.SessionHashPrefix（短縮 hash prefix のみ）。
+	// raw token / 全 hash は受け取らない（NFR 1.1 / NFR 4.2）。空文字なら省略。
+	SessionHashPrefix string
+}
+
+// AuthorizeAndLog は Authorize の結果を返しつつ、deny 判定時に構造化 WARN ログを出力する。
+//
+// requirements.md Req 7.1 / 7.2 / 7.3 / 7.4 / 7.5 の denied ログ契約を satisfy する公開
+// エントリポイント。呼び出し側（domain handler 等）は本メソッドを使うことで roles /
+// audience / action / resource / targetTenantID / authz_deny_reason / actor_id /
+// session_hash_prefix / request_id を含む構造化ログを Authorizer 側で一元的に発行できる
+// （呼び出し側で都度 log.Warn を組み立てる重複を避ける）。
+//
+// Decision は Authorize() の戻り値と同一（外部状態に依存しない決定論的判定 / NFR 1.2）。
+// 本メソッドは Authorize の上に薄く logging を被せるだけで、判定ロジックは Authorize に
+// 集約する。log == nil の場合はログ出力を skip（Authorize の戻り値のみ返す）。ctx は
+// 将来 trace_id 等の context-bound field を載せるための拡張点として受け取る（現状未使用）。
+//
+// 機密値（raw token / id_token / state MAC 鍵 / 全 hash）は本メソッドが組み立てる log field に
+// 含まれない契約（NFR 1.1 / NFR 4.2）。session_hash_prefix は呼び出し側が短縮済みで渡す。
+func (a *Authorizer) AuthorizeAndLog(_ context.Context, log logger.Logger, lc LogContext, req Request) Decision {
+	decision := a.Authorize(req)
+	if decision.Allowed {
+		return decision
+	}
+	if log == nil {
+		return decision
+	}
+	fields := []any{
+		"authz_deny_reason", string(decision.DenyReason),
+		"audience", string(req.Audience),
+		"action", string(req.Action),
+		"resource", string(req.Resource),
+		"target_tenant_id", req.TargetTenantID,
+	}
+	if len(req.Roles) > 0 {
+		fields = append(fields, "roles", strings.Join(req.Roles, ","))
+	}
+	if req.SessionTenantID != uuid.Nil {
+		fields = append(fields, "session_tenant_id", req.SessionTenantID.String())
+	}
+	if lc.RequestID != "" {
+		fields = append(fields, "request_id", lc.RequestID)
+	}
+	if lc.ActorID != "" {
+		fields = append(fields, "actor_id", lc.ActorID)
+	}
+	if lc.SessionHashPrefix != "" {
+		fields = append(fields, "session_hash_prefix", lc.SessionHashPrefix)
+	}
+	log.Warn("authz denied", fields...)
+	return decision
 }

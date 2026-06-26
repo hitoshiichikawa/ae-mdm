@@ -1,9 +1,14 @@
 package authz
 
 import (
+	"context"
+	"strings"
+	"sync"
 	"testing"
 
 	"github.com/google/uuid"
+
+	"github.com/hitoshiichikawa/ae-mdm/internal/logger"
 )
 
 // testTenantA / testTenantB は表駆動テストで使う固定 UUID（test 内で再利用）。
@@ -419,5 +424,168 @@ func TestAuthorize_SameTenant_NoSuperAdmin_StillAllowedByMatrix(t *testing.T) {
 	got := a.Authorize(req)
 	if !got.Allowed {
 		t.Fatalf("same-tenant Operator command:lock が allow されるべき: %+v", got)
+	}
+}
+
+// ----------------------------------------------------------------------------
+// AuthorizeAndLog: Req 7.1 / 7.2 / 7.3 / 7.4 / 7.5 の denied ログ契約を verify する
+// ----------------------------------------------------------------------------
+
+// fakeAuthzLogger は Authorizer.AuthorizeAndLog の WARN 呼び出しを記録する test double。
+// logger.Logger interface の最小実装で、他レベルは無視する（Authorizer は WARN のみ出す）。
+type fakeAuthzLogger struct {
+	mu       sync.Mutex
+	warnMsgs []string
+	warnArgs [][]any
+}
+
+func (l *fakeAuthzLogger) Debug(_ string, _ ...any) {}
+func (l *fakeAuthzLogger) Info(_ string, _ ...any)  {}
+func (l *fakeAuthzLogger) Warn(msg string, fields ...any) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.warnMsgs = append(l.warnMsgs, msg)
+	l.warnArgs = append(l.warnArgs, append([]any(nil), fields...))
+}
+func (l *fakeAuthzLogger) Error(_ string, _ ...any)            {}
+func (l *fakeAuthzLogger) With(_ ...any) logger.Logger         { return l }
+func (l *fakeAuthzLogger) Sync() error                         { return nil }
+
+// fieldValue は variadic key/value スライスから value を取り出す helper。
+func fieldValue(fields []any, key string) (string, bool) {
+	for i := 0; i+1 < len(fields); i += 2 {
+		k, ok := fields[i].(string)
+		if !ok || k != key {
+			continue
+		}
+		if v, ok := fields[i+1].(string); ok {
+			return v, true
+		}
+	}
+	return "", false
+}
+
+// TestAuthorizeAndLog_AllowedDoesNotLog は allow 経路でログを出さないことを verify する。
+func TestAuthorizeAndLog_AllowedDoesNotLog(t *testing.T) {
+	a := New()
+	log := &fakeAuthzLogger{}
+	req := Request{
+		Roles:           []string{string(RoleOperator)},
+		SessionTenantID: testTenantA,
+		Audience:        AudienceTenantConsole,
+		Action:          ActionLock,
+		Resource:        ResourceCommand,
+		TargetTenantID:  testTenantA.String(),
+	}
+	got := a.AuthorizeAndLog(context.Background(), log, LogContext{RequestID: "rid-1"}, req)
+	if !got.Allowed {
+		t.Fatalf("expected allow, got %+v", got)
+	}
+	if len(log.warnMsgs) != 0 {
+		t.Errorf("allow 経路で WARN ログが出てはならない: %v", log.warnMsgs)
+	}
+}
+
+// TestAuthorizeAndLog_DenyEmitsRequiredFields は Req 7.1 / 7.2 / 7.4 / 7.5 を verify する。
+// authz_deny_reason / audience / action / resource / target_tenant_id / roles /
+// request_id / actor_id / session_hash_prefix が field として乗ること。
+func TestAuthorizeAndLog_DenyEmitsRequiredFields(t *testing.T) {
+	a := New()
+	log := &fakeAuthzLogger{}
+	req := Request{
+		Roles:           []string{string(RoleViewer), string(RoleOperator)},
+		SessionTenantID: testTenantA,
+		Audience:        AudienceTenantConsole,
+		Action:          ActionWipe,
+		Resource:        ResourceCommand,
+		TargetTenantID:  testTenantA.String(),
+	}
+	lc := LogContext{
+		RequestID:         "rid-abc",
+		ActorID:           "11111111-1111-4111-8111-111111111111",
+		SessionHashPrefix: "deadbeef",
+	}
+	got := a.AuthorizeAndLog(context.Background(), log, lc, req)
+	if got.Allowed {
+		t.Fatalf("expected deny (Viewer+Operator は command:wipe を持たない), got %+v", got)
+	}
+	if got.DenyReason != DenyReasonRoleNotPermitted {
+		t.Errorf("DenyReason = %q; want %q", got.DenyReason, DenyReasonRoleNotPermitted)
+	}
+	if len(log.warnArgs) != 1 {
+		t.Fatalf("WARN 1 件期待: got %d 件 (%v)", len(log.warnArgs), log.warnMsgs)
+	}
+	fields := log.warnArgs[0]
+	wantPairs := map[string]string{
+		"authz_deny_reason":   "role_not_permitted",
+		"audience":            "tenant-console",
+		"action":              "command:wipe",
+		"resource":            "command",
+		"target_tenant_id":    testTenantA.String(),
+		"roles":               "Viewer,Operator",
+		"request_id":          "rid-abc",
+		"actor_id":            "11111111-1111-4111-8111-111111111111",
+		"session_hash_prefix": "deadbeef",
+		"session_tenant_id":   testTenantA.String(),
+	}
+	for k, want := range wantPairs {
+		got, ok := fieldValue(fields, k)
+		if !ok {
+			t.Errorf("WARN field %q がない: %+v", k, fields)
+			continue
+		}
+		if got != want {
+			t.Errorf("WARN field %q = %q; want %q", k, got, want)
+		}
+	}
+}
+
+// TestAuthorizeAndLog_DenyOmitsEmptyLogContextFields は LogContext zero value で
+// request_id / actor_id / session_hash_prefix が省略されることを verify する。
+func TestAuthorizeAndLog_DenyOmitsEmptyLogContextFields(t *testing.T) {
+	a := New()
+	log := &fakeAuthzLogger{}
+	req := makeReq(RoleViewer, ActionWipe, ResourceCommand)
+	a.AuthorizeAndLog(context.Background(), log, LogContext{}, req)
+	if len(log.warnArgs) != 1 {
+		t.Fatalf("WARN 1 件期待: got %d 件", len(log.warnArgs))
+	}
+	for _, key := range []string{"request_id", "actor_id", "session_hash_prefix"} {
+		if _, ok := fieldValue(log.warnArgs[0], key); ok {
+			t.Errorf("LogContext zero で field %q が出力されている", key)
+		}
+	}
+}
+
+// TestAuthorizeAndLog_NilLoggerIsNoop は log == nil 時にも Decision を返し panic しないことを verify する。
+func TestAuthorizeAndLog_NilLoggerIsNoop(t *testing.T) {
+	a := New()
+	req := makeReq(RoleViewer, ActionWipe, ResourceCommand)
+	got := a.AuthorizeAndLog(context.Background(), nil, LogContext{}, req)
+	if got.Allowed {
+		t.Fatalf("expected deny, got allow")
+	}
+}
+
+// TestAuthorizeAndLog_DoesNotLeakRawToken は SessionHashPrefix のみが流れ、想定外の長尺 hash
+// が log field に乗らない契約（NFR 1.1 / NFR 4.2）を verify する。
+func TestAuthorizeAndLog_DoesNotLeakRawToken(t *testing.T) {
+	a := New()
+	log := &fakeAuthzLogger{}
+	const rawTokenLike = "RAW-TOKEN-DO-NOT-LEAK-12345678901234567890"
+	lc := LogContext{SessionHashPrefix: "shortprefix"}
+	req := makeReq(RoleViewer, ActionWipe, ResourceCommand)
+	a.AuthorizeAndLog(context.Background(), log, lc, req)
+	if len(log.warnArgs) != 1 {
+		t.Fatalf("WARN 1 件期待")
+	}
+	for _, v := range log.warnArgs[0] {
+		s, ok := v.(string)
+		if !ok {
+			continue
+		}
+		if strings.Contains(s, rawTokenLike) {
+			t.Errorf("log field に raw token が漏れている: %q", s)
+		}
 	}
 }
