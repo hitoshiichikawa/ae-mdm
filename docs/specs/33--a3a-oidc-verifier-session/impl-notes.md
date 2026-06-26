@@ -576,6 +576,126 @@ learning を `### Task <id>` 単位で追記する。`docs/specs/33--a3a-oidc-ve
   後続 fresh iteration で消化する。子 task 全完了時の親 task `5` の昇格は本 iteration で
   完了済みのため、auto-promotion 規約は no-op として扱う。
 
+### Task 5.1
+
+- **採用方針**: `backend/internal/auth/{service.go, service_failure_kinds.go, service_test.go}`
+  の 3 ファイルを新規追加し、`doc.go` の構成リストを task 5.1 時点に更新。`Service` interface
+  は `BeginLogin` / `HandleCallback` / `LookupAndRefresh` / `Logout` の 4 ユースケースを提供し、
+  Verifier / Repository / Clock / TokenGenerator / oauth2.Config を DI で受け取る形に整理した。
+  fake oauth2 token endpoint は `httptest.NewServer` で構築し、id_token 返却 / 欠落 / 5xx の
+  3 パターンを切り替えられる helper を service_test.go に集約。
+- **重要な判断**:
+  - **Nonce / OIDCNonce の独立生成**: tasks.md L408〜L409 / design.md L518〜L525 の指示通り、
+    `crypto/rand.Read` で 16 byte ずつ **別々に**生成する `generateNonce()` を 2 回呼ぶ
+    実装にした。同値を使い回す案 (1 nonce を state と OIDC nonce で共用) を採用すると
+    state と OIDC nonce の意味分離が崩れる（OAuth `state` は CSRF 防止、OIDC `nonce` は
+    authorization code injection 防止で別目的 / RFC OIDC Core 1.0 §3.1.2.1）。テスト
+    `TestBeginLogin_ValidReturnTo_ReturnsRedirectAndCookie` で `state != nonce` を assertion
+    して退行を防ぐ。
+  - **`ConsumeStateNonce` を token 交換より前に呼ぶ**: tasks.md L430〜L436 / design.md L682〜L685
+    の指示通り、state.Verify 直後 + payload.Console 照合直後 + token 交換**前**に
+    `repo.ConsumeStateNonce` を呼ぶ実装にした。これにより replay 攻撃が IdP token endpoint /
+    DB session INSERT に到達する前に弾ける（attack surface 最小化 / Req 2.9）。テスト
+    `TestHandleCallback_StateReplay_Returns401AndDoesNotExchange` で fake repo が state_replay
+    を返した時に `verifier.VerifyIDToken` / `ResolveAdminUser` / `Create` のいずれも呼ばれない
+    ことを assertion している。
+  - **`token.Extra("id_token").(string)` の two-value form 必須**: tasks.md L440〜L443 /
+    design.md L686〜L689 の指示通り、`rawIDToken, ok := token.Extra("id_token").(string)` で
+    取り出し、`!ok || rawIDToken == ""` なら `upstream_oidc_token` (502) を返す。直接
+    `token.Extra("id_token").(string)` の **single-value form** だと token endpoint が
+    `id_token` を返さない / 文字列でない場合に panic を起こす（NFR 3.1 fail-closed 違反）。
+    テスト `TestHandleCallback_NoIDToken_ReturnsUpstreamFailure` で id_token 欠落経路を回帰
+    的に守る。
+  - **`Claims.Nonce` 一致確認は Service 層、Verifier 側では行わない**: 設計の境界分離
+    （task 2.1 の判断と整合）。Service の HandleCallback 内で
+    `subtle.ConstantTimeCompare([]byte(claims.Nonce), []byte(payload.OIDCNonce)) != 1` で
+    照合し、不一致は `nonce_mismatch` (401) で reject。`claims.Nonce == ""`（IdP が nonce を
+    要求どおりに返さなかった場合）も `payload.OIDCNonce` が 16 byte ランダムなので
+    constant-time 比較は **不一致**を返し、同じ `nonce_mismatch` 経路で fail-closed する。
+    テスト `TestHandleCallback_NonceMismatch_Returns401` + `TestHandleCallback_EmptyIDTokenNonce_Returns401`
+    で 2 経路を回帰的に守る。
+  - **`TokenGenerator` DI で csprng_failure を回帰**: tasks.md L457〜L463 / design.md L717〜L722
+    の指示通り、`NewService` の引数に `tokenGen TokenGenerator` を明示し、本番は `session.New`
+    を渡す、テストは `func() (string, error) { return "", err }` を渡せる構造にした。
+    テスト `TestHandleCallback_TokenGenError_ReturnsCSPRNGFailure` で fake fn が err を
+    返した時に `repo.Create` が呼ばれず 500 になることを assertion している（Req 3.5 / NFR 3.1
+    fail-closed の回帰保証）。
+  - **失効判定順序 console → absolute → revoked → idle**: tasks.md L478〜L483 / design.md
+    L795〜L797 の指示通り、`LookupAndRefresh` で 4 段の順に判定する。`absolute → revoked → idle`
+    の順は「絶対拘束 → 明示 logout → idle」の優先度で、console_mismatch を最先頭に置くのは
+    漏洩した tenant session が `/api/admin` に提示された場合に即座に reject する経路を
+    成立させるため（design.md L799）。失効時は `revokeOnExpire` で `repo.Revoke` を冪等に
+    呼ぶ（Req 4.6）が、Revoke 自体のエラーは failure_kind 経路を上書きしないようログのみに
+    残す設計とした（元の failure_kind の伝播を優先 / NFR 3.1 fail-closed）。
+  - **`return_to` 正規化**: tasks.md L404〜L408 / design.md 確認事項 3 の指示通り
+    「同一オリジン内相対パスのみ許容」を採用。空文字 → `/`（default）、`//` で始まる
+    scheme-relative URL / `http://` / `https://` を含む absolute URL / `dashboard` のような
+    `/` で始まらない相対パスはすべて 400 で reject。`url.Parse` で `u.Host != "" || u.Scheme != ""`
+    の二段防御を追加し、`//` prefix の見落としや想定外の scheme を弾く。
+  - **`failure_kind` ログ field の明示出力**: tasks.md L486〜L494 / design.md L1090〜L1097 の
+    指示通り、各失敗パスで `log.Warn("auth failure", "failure_kind", kind, "console", ...,
+    "session_hash_prefix", ...)` の形式で **明示的に** field を出す。`logWarnFailure` /
+    `logWarnSession` の 2 helper に集約し、auth package の `failureKind` は `errors.As` で
+    抽出、oidc package の `failureKind` は unexported type なので `Error()` 戻り値の文字列を
+    Cause チェーンから走査して既知リストと突き合わせる best-effort 経路を `extractFailureKind`
+    に実装。テスト `TestService_LogFailureKindOnFailure` / `TestBeginLogin_LogsFailureKindOnReturnToInvalid`
+    で fake logger に field が乗ることを assertion している（NFR 4.1 の実装契約を回帰）。
+  - **機密値非埋込契約**: tasks.md L495〜L502 / design.md L1099〜L1117 の指示通り、`*errors.Error.Message`
+    / `Cause` メッセージに `cfg.StateMACSecret` / `cfg.OIDC*ClientSecret` / state cookie 生値 /
+    session cookie 生値 / id_token raw JWT を **文字列補間しない**。oauth2 / state.Verify /
+    repository の error はそのまま wrap し、追加 context は `failure_kind` / `console` /
+    `session_hash_prefix` 等の非機密値のみとする。テスト
+    `TestHandleCallback_SensitiveValuesNotEmbeddedInError` /
+    `TestBeginLogin_SensitiveValuesNotEmbeddedInError` /
+    `TestLookupAndRefresh_SensitiveValuesNotEmbeddedInError` の 3 系統で 5 種の機密値
+    （state secret / client secret / raw id_token / raw session token / full session hash）が
+    `err.Error()` に含まれないことを assertion し、回帰耐性を確保した（NFR 1.1 / NFR 4.2 の
+    一次防御）。
+  - **`service_failure_kinds.go` の別ファイル化**: state.go / repository_failure_kinds.go の
+    パターンを踏襲し、Service 固有の 10 sentinel（state_console_mismatch / invalid_aud /
+    nonce_mismatch / csprng_failure / upstream_oidc_token / console_mismatch / session_expired /
+    session_revoked / session_idle / return_to_invalid）を別ファイルに分離した。service.go の
+    責務（4 ユースケースの集約）を膨張させずに failure_kind 追加を一箇所に集約できる
+    （doc.go の構成リストも task 5.1 時点に更新）。
+  - **state / session cookie 削除 helper の使い分け**: 本 task の HandleCallback 戻り値は
+    `(rawSessionToken, sessionCookie, returnTo, err)` のみで、state cookie の削除は **Handler
+    の責務**（後続 task 5.2 が `state.ExpireCookieAttributes()` を発行する）。task 3.2 の確認
+    事項で確立した「state cookie 削除 = `auth.ExpireCookieAttributes()`、session cookie 削除
+    = `auth.SessionExpireCookieAttributes()`」の使い分けを Service レイヤでも維持する
+    （Service はどちらの cookie 属性 helper も呼び出さず、Handler が経路ごとに使い分ける）。
+- **残存課題**:
+  - 後続 task 5.2 `auth.Handler` で Service の 4 メソッドを HTTP / cookie I/O に橋渡しする。
+    `/api/auth/callback` 入口で `code` / `state` クエリ欠落判定を 400 `invalid_request` で
+    行う責務は Handler 側（本 Service はクエリ欠落を仮定しない契約）。
+  - 後続 task 6.1 `auth.Middleware` で `LookupAndRefresh` を呼び、`httpserver.AuthClaims` を
+    ctx に注入する。本 Service の `LookupAndRefresh` 戻り値 `(Identity, Session, error)` を
+    そのまま使い、middleware は ctx 注入と Set-Cookie 発行のみを担う。
+  - 後続 task 6.3 `cmd/api/main.go` bootstrap で `auth.NewService(cfg, verifier, repo,
+    map[oidc.Console]*oauth2.Config{...}, auth.SystemClock{}, auth.TokenGenerator(session.New),
+    log)` を呼んで本番値で構築する。`oauth2.Config.Scopes` には `goidc.ScopeOpenID` /
+    `"email"` / `"profile"` を必ず含める（id_token 発行のため / 本 Service テストは
+    fake verifier を使うので scope 不在の経路は Service 単体では検出できず、後続 task 6.4
+    の integration test で実 IdP mock 経由で検証する）。
+  - 確認事項: 本 task では `failureKind` 型を `extractFailureKind` で oidc package のものも
+    含めて統一的に文字列化する `best-effort` 経路を採用したが、oidc package の `failureKind`
+    が unexported のため文字列マッチに依存している。`Error()` の戻り値が変化した場合
+    （go-oidc upgrade で文言が変わる等）に best-effort fallback が黙って失敗する可能性
+    がある。将来的に oidc.FailureKind* 定数を auth package から `errors.As` で直接識別
+    できるよう **公開化を検討**する余地がある（本 task 範囲外、後続 Issue / refactor で扱う）。
+
+### Task 5.1 — Verify 実行結果
+
+- `cd backend && go build ./...`: PASS
+- `cd backend && go vet ./...`: PASS
+- `cd backend && go test ./... -count=1`: 全 package PASS（`internal/auth` の Service 関連
+  テスト 30 ケース超 + 既存テスト全件 / 約 4 秒）。`internal/platform/oidc` も含めて
+  影響範囲全件で regression なし。
+- DB-backed verify: 本 task は Service 単体（fake Verifier / Repository / Clock / Logger /
+  oauth2 mock）で完結し、DB を要求しない。HTTP 経路を被せた e2e 検証は後続 task 6.4 の
+  `auth_login_callback_test.go` 等の integration test で実施される予定（tasks.md L716〜L750
+  の DB-backed verify 義務）。
+- 実行日時: 2026-06-26
+
 ## 確認事項
 
 本セクションは `requirements.md` / `design.md` / `tasks.md` 本文の書き換えを伴わずに、実装フェーズ
