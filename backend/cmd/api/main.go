@@ -24,10 +24,16 @@ import (
 	"syscall"
 	"time"
 
+	goidc "github.com/coreos/go-oidc/v3/oidc"
+	"github.com/go-chi/chi/v5"
+	"golang.org/x/oauth2"
+
+	"github.com/hitoshiichikawa/ae-mdm/internal/auth"
 	"github.com/hitoshiichikawa/ae-mdm/internal/config"
 	"github.com/hitoshiichikawa/ae-mdm/internal/logger"
 	"github.com/hitoshiichikawa/ae-mdm/internal/platform/db"
 	"github.com/hitoshiichikawa/ae-mdm/internal/platform/httpserver"
+	"github.com/hitoshiichikawa/ae-mdm/internal/platform/oidc"
 )
 
 const (
@@ -86,10 +92,14 @@ func healthcheckURL(listenAddr string) string {
 //  1. config.Load() … env 検証 fail-fast（CodeConfigInvalid）
 //  2. logger.NewLogger(cfg) + SetDefault … 以降のログを構造化
 //  3. db.NewPool(ctx, cfg) … 起動時 Ping 含む（CodeUnavailable）
-//  4. httpserver.NewServer(cfg, log, pool) … 2 サブルータ mount
-//  5. ListenAndServe goroutine + signal.NotifyContext で graceful shutdown
+//  4. oidc.NewVerifier(ctx, cfg) … 両 issuer の discovery / JWKS prefetch（NFR 3.2）
+//  5. auth.NewRepository(pool) + auth.NewService(...) + tenant / admin の
+//     auth.NewMiddleware(...) を構築（Req 6.2 / 6.3 の物理分離強制）
+//  6. httpserver.NewServer(cfg, log, pool, authMWTenant, authMWAdmin, authMount) …
+//     2 サブルータ mount + auth エンドポイント mount
+//  7. ListenAndServe goroutine + signal.NotifyContext で graceful shutdown
 //
-// いずれかの初期化失敗で exit code 1 + 構造化 ERROR ログを出す（NFR 3.1）。
+// いずれかの初期化失敗で exit code 1 + 構造化 ERROR ログを出す（NFR 3.1 / 3.2）。
 // pool は defer で Close する（shutdown 順序: HTTP server.Shutdown → pool.Close）。
 func runBootstrap(ctx context.Context) int {
 	// (1) config
@@ -120,8 +130,46 @@ func runBootstrap(ctx context.Context) int {
 	}
 	defer pool.Close()
 
-	// (4) http server
-	srv, _, err := httpserver.NewServer(cfg, log, pool)
+	// (4) OIDC Verifier（tenant / admin 双方の discovery を起動時に実行 / NFR 3.2 の
+	// fail-closed bootstrap）
+	verifier, err := oidc.NewVerifier(ctx, cfg)
+	if err != nil {
+		log.Error("ae-mdm api: oidc.NewVerifier failed",
+			logger.Err(err),
+		)
+		return 1
+	}
+
+	// (5) auth domain の DI 配線
+	//
+	// Repository は pgxpool 経由で SuperAdmin context 下に sessions / state_nonces /
+	// admin_users へアクセスする。Service は Verifier / Repository / Clock / TokenGenerator
+	// を組み合わせて BeginLogin / HandleCallback / LookupAndRefresh / Logout を提供する。
+	// `auth.TokenGenerator(auth.New)` は本番用の opaque session token 生成器（32 byte
+	// crypto/rand + base64url no-padding）。テストでは fake fn を差し込んで CSPRNG 失敗経路を
+	// 観測する（design.md「Auth Service」 / impl-notes Task 5.1）。
+	clock := auth.SystemClock{}
+	repo := auth.NewRepository(pool)
+	oauth2Configs := buildOAuth2Configs(cfg, verifier)
+	svc := auth.NewService(cfg, verifier, repo, oauth2Configs, clock, auth.TokenGenerator(auth.New), log)
+
+	// tenant / admin 系の Auth Middleware を **別インスタンス**で構築する。
+	// `expectedConsole` を closure に固定することで、漏洩した tenant cookie が
+	// `/api/admin/...` に提示された場合に `authMWAdmin` 側で `console_mismatch` を検出して
+	// 即 401 + cookie 削除になる（Req 6.2 / 6.3 の物理分離強制）。
+	authMWTenant := auth.NewMiddleware(svc, oidc.ConsoleTenant, log, clock)
+	authMWAdmin := auth.NewMiddleware(svc, oidc.ConsoleAdmin, log, clock)
+
+	// auth.Handler.Mount を `authMount` として注入する。`httpserver.NewServer` が
+	// `(r, "/api/auth", ConsoleTenant)` と `(r, "/api/admin/auth", ConsoleAdmin)` の
+	// 2 度呼びを担当する。
+	authHandler := auth.NewHandler(svc, log)
+	authMount := func(r chi.Router, consolePrefix string, console oidc.Console) {
+		authHandler.Mount(r, consolePrefix, console)
+	}
+
+	// (6) http server
+	srv, _, err := httpserver.NewServer(cfg, log, pool, authMWTenant, authMWAdmin, authMount)
 	if err != nil {
 		log.Error("ae-mdm api: httpserver.NewServer failed",
 			logger.Err(err),
@@ -129,8 +177,37 @@ func runBootstrap(ctx context.Context) int {
 		return 1
 	}
 
-	// (5) ListenAndServe + graceful shutdown
+	// (7) ListenAndServe + graceful shutdown
 	return runHTTPServer(ctx, srv, log)
+}
+
+// buildOAuth2Configs は tenant / admin の oauth2.Config を 1 つの map に束ねて構築する。
+//
+//   - Scopes には goidc.ScopeOpenID（"openid"）/ "email" / "profile" を必ず含める
+//     （openid scope 不在だと OIDC IdP は authorization code フローで id_token を発行せず、
+//     後段 token.Extra("id_token") が空文字 → upstream_oidc_token で 502 に化けて Req 1.x が
+//     成立しない / tasks.md 5.1 詳細項目および impl-notes Task 5.1 と整合）。
+//   - Endpoint は verifier.TenantEndpoint() / verifier.AdminEndpoint() を使う。両 helper は
+//     内部で AuthStyle = oauth2.AuthStyleInHeader を明示上書き済みで、client_secret_basic 固定を
+//     契約として強制する（tasks.md 6.3 詳細項目 + impl-notes Task 2.1 と整合）。
+func buildOAuth2Configs(cfg config.Config, verifier oidc.Verifier) map[oidc.Console]*oauth2.Config {
+	scopes := []string{goidc.ScopeOpenID, "email", "profile"}
+	return map[oidc.Console]*oauth2.Config{
+		oidc.ConsoleTenant: {
+			ClientID:     cfg.OIDCTenantClientID,
+			ClientSecret: cfg.OIDCTenantClientSecret,
+			RedirectURL:  cfg.OIDCTenantRedirectURL,
+			Scopes:       scopes,
+			Endpoint:     verifier.TenantEndpoint(),
+		},
+		oidc.ConsoleAdmin: {
+			ClientID:     cfg.OIDCAdminClientID,
+			ClientSecret: cfg.OIDCAdminClientSecret,
+			RedirectURL:  cfg.OIDCAdminRedirectURL,
+			Scopes:       scopes,
+			Endpoint:     verifier.AdminEndpoint(),
+		},
+	}
 }
 
 // runHTTPServer は srv.ListenAndServe を goroutine で起動し、SIGINT/SIGTERM 受信時に

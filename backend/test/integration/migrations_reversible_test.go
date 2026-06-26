@@ -10,8 +10,11 @@ import (
 )
 
 // migration が作成する主要テーブル群。down 後に「これらが消失」していることを確認する。
-// 全 12 ペア（0001-0012）が作る 12 テーブル + 関連する enum / RLS policy のうち、
-// テーブル存在で代表させる。
+// 全 12 ペア（0001-0012）が作る 12 テーブル + Issue #33 (A3a) で追加された
+// state_nonces（0015）+ 関連する enum / RLS policy のうち、テーブル存在で代表させる。
+// 0013（sessions 拡張）/ 0014（admin_users 拡張）は既存テーブルへの列追加のため
+// 本リストの対象外（テーブル存在のみで代表できないため、reversibility は migration 適用
+// 自体の成功で担保する）。
 var primaryTables = []string{
 	"tenants",
 	"admin_users",
@@ -25,6 +28,7 @@ var primaryTables = []string{
 	"audit_logs",
 	"notification_dedupe",
 	"unassigned_notifications",
+	"state_nonces",
 }
 
 // TestMigrationsReversible_DownDropsTablesUpRecreates はシナリオ (a) (b) 対応。

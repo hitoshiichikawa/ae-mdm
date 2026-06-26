@@ -11,15 +11,29 @@ import (
 // redactKeySubstrings は機密情報を含む field 名のサブストリング allowlist。
 // field 名（lower-case 化したもの）がこれらのいずれかを含む場合、その値を redactedPlaceholder で
 // 置換する。requirements.md Req 2.5 / design.md Security Considerations 節と整合。
+//
+// Issue #33 task 1.4（A3a: OIDC Verifier + Session 管理）で auth 領域 4 件
+// （`state_mac_secret` / `client_secret` / `state_cookie` / `session_cookie`）を追加。
+// `state_cookie` / `session_cookie` は既存 `cookie` substring でも substring 一致でカバー
+// されるが、独立 allowlist 化することで「auth ドメインの cookie 名を意味的に明示」する責務
+// （Req 1.11 / 3.6 / NFR 1.1 / NFR 4.2）。
 var redactKeySubstrings = []string{
+	// session / OIDC token 系（A2 既存）
 	"session_secret",
 	"id_token",
 	"access_token",
 	"refresh_token",
+	// cookie 系（A2 既存 `cookie` + Issue #33 task 1.4 で auth cookie を独立明示）
 	"cookie",
+	"state_cookie",
+	"session_cookie",
+	// GCP credential 系（A2 既存）
 	"google_application_credentials",
 	"sa_json",
 	"private_key",
+	// generic secret / password 系（A2 既存 `password` + Issue #33 task 1.4 で auth secret を追加）
+	"state_mac_secret",
+	"client_secret",
 	"password",
 }
 

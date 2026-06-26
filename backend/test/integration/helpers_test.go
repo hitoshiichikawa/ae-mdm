@@ -232,6 +232,10 @@ func seedDummyData(t *testing.T, ctx context.Context, pool *pgxpool.Pool) seeded
 	}
 
 	// admin_users
+	// 0014_admin_users_add_oidc_issuer で oidc_issuer NOT NULL 列が追加されたため、
+	// 既存 INSERT に oidc_issuer カラム + テスト用 issuer URL を追加する
+	// （fixture では tenant / admin で別 issuer を使わないため共通の test issuer URL を入れる）。
+	const testOIDCIssuer = "https://idp.test.example.com/realms/ae-mdm-test"
 	for _, p := range []struct {
 		id       uuid.UUID
 		tenantID uuid.UUID
@@ -242,8 +246,8 @@ func seedDummyData(t *testing.T, ctx context.Context, pool *pgxpool.Pool) seeded
 		{ids.adminBID, ids.tenantBID, "sub-B", "admin-b@example.com"},
 	} {
 		if _, err := tx.Exec(ctx,
-			`INSERT INTO admin_users (id, oidc_subject, email, tenant_id) VALUES ($1, $2, $3, $4)`,
-			p.id, p.sub, p.email, p.tenantID); err != nil {
+			`INSERT INTO admin_users (id, oidc_subject, oidc_issuer, email, tenant_id) VALUES ($1, $2, $3, $4, $5)`,
+			p.id, p.sub, testOIDCIssuer, p.email, p.tenantID); err != nil {
 			t.Fatalf("INSERT admin_users: %v", err)
 		}
 	}
@@ -290,9 +294,13 @@ func seedDummyData(t *testing.T, ctx context.Context, pool *pgxpool.Pool) seeded
 		{ids.sessionATH, ids.adminAID},
 		{ids.sessionBTH, ids.adminBID},
 	} {
+		// 0013_extend_sessions で idle_at → last_seen_at に rename され、console NOT NULL
+		// （'tenant-console' / 'admin-console' のいずれか）が追加された。fixture は A2 同様の
+		// セッション生存条件を維持するため last_seen_at = now（直近アクセス済み）/
+		// console = 'tenant-console' を明示指定する（revoked_at は NULL のまま）。
 		if _, err := tx.Exec(ctx,
-			`INSERT INTO sessions (token_hash, admin_user_id, idle_at, expires_at) VALUES ($1, $2, $3, $4)`,
-			p.tokenHash, p.adminUserID, now.Add(30*time.Minute), now.Add(8*time.Hour)); err != nil {
+			`INSERT INTO sessions (token_hash, admin_user_id, last_seen_at, expires_at, console) VALUES ($1, $2, $3, $4, $5)`,
+			p.tokenHash, p.adminUserID, now, now.Add(8*time.Hour), "tenant-console"); err != nil {
 			t.Fatalf("INSERT sessions: %v", err)
 		}
 	}

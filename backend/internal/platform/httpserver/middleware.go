@@ -48,41 +48,50 @@ func RequestIDFromContext(ctx context.Context) string {
 	return ""
 }
 
-// authClaims は **本 Issue のスコープ外**の auth middleware が
-// request context に注入する「認証済みクレーム」の内部表現。
+// AuthClaims は auth middleware が request context に注入する「認証済みクレーム」の
+// 内部表現。
 //
-// 後続 Issue（umbrella tasks 3.1: OIDC Verifier / Session Manager）で OIDC 検証
-// 経路が実装された際に同型を再利用する想定。本 Issue ではあくまで
-// TenantContextMiddleware の入力契約 *だけ* を確定させる目的で、claims を **何も
-// 注入しない default deny 状態** を成立させる。
+// Issue #33（OIDC Verifier + Session 管理 / umbrella tasks 3.1）の auth domain
+// （`backend/internal/auth`）から `httpserver.WithAuthClaims(ctx, AuthClaims{...})` で
+// claims を注入できるよう、本型および関連 helper は public シンボルとして公開する
+// （A2 では同型が private（`authClaims`）であり、test 用にのみ内部 helper が露出していた）。
+// フィールド構成は不変（TenantID / AdminUserID / Roles / IsSuperAdmin）。
 //
-// auth middleware が claims を注入する API は内部 helper [withAuthClaims] のみで提供し、
-// 公開はしない（後続 Issue で auth package を切り出した時点で public 化する想定）。
-type authClaims struct {
+// TenantContextMiddleware は claims が ctx に存在しない場合に **default deny** で 401 を
+// 返し、存在する場合のみ TenantContext を組み立てて next chain に進める入力契約を持つ
+// （後段の RequireSuperAdmin / RLS と二重防御を成す）。
+type AuthClaims struct {
 	TenantID     uuid.UUID
 	AdminUserID  uuid.UUID
 	Roles        []string
 	IsSuperAdmin bool
 }
 
-// authClaimsCtxKey は authClaims を request context に格納する private な key 型。
+// authClaimsCtxKey は AuthClaims を request context に格納する private な key 型。
+// package 外からは [WithAuthClaims] / [AuthClaimsFromContext] 経由でのみ操作する
+// （key 自体は外部に露出させず、key 型の衝突や直接書込みを防ぐ）。
 type authClaimsCtxKey struct{}
 
-// withAuthClaims は test fixture および後続 Issue の auth middleware から claims を
-// request context に注入するための内部 helper。本 Issue ではテスト用 router からのみ
-// 使う（package 外から呼べないため auth スタブの default deny を物理的に成立させる）。
-func withAuthClaims(ctx context.Context, claims authClaims) context.Context {
+// WithAuthClaims は auth middleware（`backend/internal/auth`）が AuthClaims を
+// request context に注入するための public helper。test fixture も同経路で利用する。
+//
+// 本 helper は context.WithValue のラッパであり、ctx に同一 key の既存値がある場合は
+// 後勝ちで上書きする標準挙動に従う。
+func WithAuthClaims(ctx context.Context, claims AuthClaims) context.Context {
 	return context.WithValue(ctx, authClaimsCtxKey{}, claims)
 }
 
-// authClaimsFromContext は request context から authClaims を取り出す。
+// AuthClaimsFromContext は request context から AuthClaims を取り出す。
 // 未設定なら (zero, false)。
-func authClaimsFromContext(ctx context.Context) (authClaims, bool) {
+//
+// TenantContextMiddleware が default deny 判定で参照するほか、後続 Issue の handler が
+// claims を直接参照する場合の取り出し口としても公開する。
+func AuthClaimsFromContext(ctx context.Context) (AuthClaims, bool) {
 	if ctx == nil {
-		return authClaims{}, false
+		return AuthClaims{}, false
 	}
 	v := ctx.Value(authClaimsCtxKey{})
-	c, ok := v.(authClaims)
+	c, ok := v.(AuthClaims)
 	return c, ok
 }
 
@@ -281,23 +290,20 @@ func recordedStatus(rec *statusRecorder) int {
 //
 // 入力契約（design.md「Tenant Context Middleware」節 / 同節 Invariants「tenant_id を
 // 持たないリクエストが `/api/...` に到達した場合 401 を返す」と整合）:
-//   - 本 Issue では auth middleware の実装本体が未定であるため、上流の auth スタブが
-//     `*authClaims` を request context に注入する前提のアダプタとして実装する
+//   - 上流の auth middleware（`backend/internal/auth`）が
+//     [WithAuthClaims] で `AuthClaims` を request context に注入する前提のアダプタとして
+//     実装する（Issue #33 の OIDC Verifier + Session 管理経路）
 //   - claims が ctx に存在しない場合（default deny 状態）は TenantContext を確立せず、
 //     `*errors.Error{Code: CodeUnauthenticated}` で **401 を返して chain を終端**する
 //     （`/api/...` 配下のハンドラ未実装でも認証ガードが先に発火するため 401 で閉じる /
 //     後段の DB アクセスは BeginTxFunc panic + RLS の二重防御で更に止まる）
 //   - claims が存在する場合は TenantContext を組み立てて db.WithTenantContext で put し、
 //     next.ServeHTTP に進める（TenantID / AdminUserID / Roles / IsSuperAdmin を転記）
-//
-// 後続 Issue で auth middleware 本体（OIDC 検証 / Session lookup）が実装された段階で、
-// 本関数の入力契約（authClaims を ctx 経由で受け取る）は維持されたまま auth スタブが
-// 実 claims を注入するようになる。
 func TenantContextMiddleware(log logger.Logger) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			ctx := r.Context()
-			claims, ok := authClaimsFromContext(ctx)
+			claims, ok := AuthClaimsFromContext(ctx)
 			if !ok {
 				// default deny: claims 不在は未認証として 401 を返し、chain を終端する。
 				internalerrors.WriteHTTP(w, r, internalerrors.New(

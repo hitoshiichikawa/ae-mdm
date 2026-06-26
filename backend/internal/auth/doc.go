@@ -1,0 +1,73 @@
+// Package auth は ae-mdm の認証基盤（A3a / Issue #33）のドメイン層を提供する。
+// OIDC ID トークン検証（`internal/platform/oidc`）を経た Claims から内部 Identity を解決し、
+// state cookie / session cookie の発行・検証・失効を担当する。
+//
+// # 依存方向ルール
+//
+// 本 package は以下のレイヤのみを import する。逆方向（platform 系から auth domain への
+// import）は禁止（design.md「Domain Layer (Auth)」節および「auth claims の package 境界」
+// 節と整合）:
+//
+//   - 許可: github.com/hitoshiichikawa/ae-mdm/internal/platform/oidc
+//   - 許可: github.com/hitoshiichikawa/ae-mdm/internal/platform/db
+//   - 許可: github.com/hitoshiichikawa/ae-mdm/internal/platform/httpserver
+//   - 許可: github.com/hitoshiichikawa/ae-mdm/internal/logger
+//   - 許可: github.com/hitoshiichikawa/ae-mdm/internal/errors
+//   - 許可: github.com/hitoshiichikawa/ae-mdm/internal/config
+//   - 禁止: 上位 application / cmd / 他 domain への直接 import
+//
+// # 構成（task 6.1 時点）
+//
+//   - types.go                       : Identity / Session のドメイン型
+//   - clock.go                       : Clock interface と SystemClock 実装（DI 境界）
+//   - state.go                       : state cookie の Sign / Verify / CookieAttributes /
+//     ExpireCookieAttributes / StatePayload / failureKind sentinel
+//   - state_test.go                  : state cookie の単体テスト
+//   - session.go                     : session helper（New / HashToken / SessionCookieAttributes /
+//     SessionExpireCookieAttributes / HashPrefix）。cookie 属性 helper は state.go の
+//     同名関数と衝突するため Session プレフィックス付きで命名（auth package を
+//     フラット配置する task 3.1 の判断と整合）
+//   - session_test.go                : session helper の単体テスト
+//   - repository.go                  : Repository interface + pgxpool ベース実装。
+//     sessions / admin_users / state_nonces への CRUD を SuperAdmin context 配下で集約。
+//     callback handler / middleware が TenantContextMiddleware の外側で動作するため、
+//     Repository が自身で SuperAdmin context を確立して db.BeginTxFunc を経由する。
+//   - repository_failure_kinds.go    : Repository が返す failureKind sentinel 追加定数
+//     （state_replay / admin_user_not_provisioned / session_tamper）。
+//     state.go の failureKind 型本体を再利用しつつ、責務分離のため別ファイル化。
+//   - service.go                     : Service interface（BeginLogin / HandleCallback /
+//     LookupAndRefresh / Logout）+ 本番実装。Verifier / Repository / Clock / TokenGenerator /
+//     oauth2.Config を DI で受け取り、state cookie 発行・nonce 照合・session 失効判定を集約。
+//   - service_failure_kinds.go       : Service / Handler が返す failureKind sentinel 追加定数
+//     （state_console_mismatch / invalid_aud / nonce_mismatch / csprng_failure /
+//     upstream_oidc_token / console_mismatch / session_expired / session_revoked /
+//     session_idle / return_to_invalid / invalid_request）。
+//   - service_test.go                : Service の単体テスト（fake Verifier / Repository /
+//     Clock / Logger / oauth2 token endpoint mock 経由）。
+//   - handler.go                     : HTTP Handler（Mount で `consolePrefix` 配下に
+//     `/login` GET / `/callback` GET / `/logout` POST の 3 route を sub-router で登録）。
+//     tenant / admin 2 系統で同一構造を持ち、Mount を 2 度呼ぶことで 6 endpoint をカバー。
+//     callback 入口で `code` / `state` 欠落を 400 invalid_request で reject、成功時は
+//     state cookie 削除 + session cookie 発行 + 302、logout は cookie 不在で 401 を返す。
+//   - handler_test.go                : Handler の httptest 単体テスト（fake Service 経由で
+//     login 302 / callback 302+cookie / state mismatch 401 / code/state 欠落 400 /
+//     logout 204+cookie 不在 401 を tenant + admin 両系統で網羅）。
+//   - middleware.go                  : Auth Middleware（`NewMiddleware(svc, expectedConsole,
+//     log, clock)`）。session cookie lookup + console 照合 + 失効時 cookie 削除 + ctx への
+//     `httpserver.AuthClaims` 注入を担う。`expectedConsole` を closure に固定することで
+//     tenant 系 / admin 系の 2 インスタンスを構築し、漏洩した tenant cookie が admin route に
+//     提示された場合に Service 側で `console_mismatch` で即拒否される経路（Req 6.2 / 6.3）を
+//     物理的に成立させる。失効時の cookie 削除には `SessionExpireCookieAttributes()`（session
+//     用）を必ず使い、`ExpireCookieAttributes()`（state 用）と取り違えない命名規約を継承。
+//   - middleware_test.go             : Middleware の単体テスト（fake Service + httptest 経由で
+//     cookie 不在 / session_idle / session_expired / session_revoked / session_tamper /
+//     console_mismatch / 成功時の AuthClaims ctx 注入 / next 到達 / 機密値非埋込 を網羅）。
+//
+// # 機密値の非埋込契約
+//
+// state MAC 鍵（`cfg.StateMACSecret`）/ state cookie 生値 / session cookie 生値 /
+// id_token raw JWT を `*errors.Error.Message` や Cause メッセージ本文に
+// 文字列補間しない（NFR 1.1 / NFR 4.2 / design.md「機密値を Cause メッセージ本文に
+// 埋め込まない実装契約」節）。redaction は二次防御であり、本 package の各失敗パスは
+// メッセージ本文に機密値を含めない一次防御を守る。
+package auth

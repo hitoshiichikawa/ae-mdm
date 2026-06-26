@@ -11,6 +11,7 @@ import (
 	"github.com/hitoshiichikawa/ae-mdm/internal/config"
 	internalerrors "github.com/hitoshiichikawa/ae-mdm/internal/errors"
 	"github.com/hitoshiichikawa/ae-mdm/internal/logger"
+	"github.com/hitoshiichikawa/ae-mdm/internal/platform/oidc"
 )
 
 // readyzPingTimeout は `/readyz` の DB ping 上限時間。pool.Ping が長時間ブロックして
@@ -37,13 +38,28 @@ type Routers struct {
 // NewServer は chi router + middleware chain + 2 サブルータを組み立てて *http.Server と
 // Routers を返す。
 //
-// requirements.md Req 5.1 / 5.3 / 5.4 / 5.6 / design.md Components: HTTP Server Bootstrap
-// 節と整合する。配線の概要:
+// requirements.md Req 5.1 / 5.3 / 5.4 / 5.6 / 6.2 / 6.3 / design.md Components: HTTP Server
+// Bootstrap / Auth Middleware 節と整合する。配線の概要:
 //   - root chain: Recoverer → RequestID → AccessLog
 //   - `/healthz` `/readyz`: chain は通すが auth は無いため認証なしで応答する（middleware
 //     chain の **外側** = TenantContextMiddleware より前に登録 / design.md L706）
-//   - `/api`: 上記 root chain + TenantContextMiddleware
-//   - `/api/admin`: 上記 root chain + TenantContextMiddleware + RequireSuperAdmin
+//   - `/api/auth` / `/api/admin/auth`: root router 直下に Mount（TenantContextMiddleware の
+//     **外側** / 認証未確立段階で到達するため）。`authMount` が nil の場合は Mount しない
+//   - `/api`: 上記 root chain + `authMWTenant`（nil でない場合のみ）+ TenantContextMiddleware
+//   - `/api/admin`: 上記 root chain + `authMWAdmin`（nil でない場合のみ）+
+//     TenantContextMiddleware + RequireSuperAdmin
+//
+// 追加引数 `authMWTenant` / `authMWAdmin` / `authMount`（task 6.2 / Req 6.2 / 6.3）の
+// 役割と nil 許容契約:
+//   - `authMWTenant`: `expectedConsole=ConsoleTenant` で構築された tenant 用 auth.Middleware
+//     の戻り値。nil の場合 `/api/*` には auth middleware を挟まず、A2 既存挙動の default
+//     deny 401（TenantContextMiddleware の claims 不在経路）が維持される
+//   - `authMWAdmin`: `expectedConsole=ConsoleAdmin` で構築された admin 用 auth.Middleware の
+//     戻り値。nil 時の挙動は `authMWTenant` と同様（既存テスト互換のため）
+//   - `authMount`: auth.Handler の Mount 関数。nil の場合 auth エンドポイントは登録されない。
+//     非 nil の場合 `(r, "/api/auth", ConsoleTenant)` と `(r, "/api/admin/auth", ConsoleAdmin)`
+//     の 2 経路で Mount し、tenant / admin 系の OIDC ログインフローを物理的に分離する
+//     （Req 6.2 / 6.3 の cross-console reject を auth middleware 側で強制する経路に揃える）
 //
 // pool は `/readyz` の DB ping にのみ利用する（nil 許容: nil 時は `/readyz` が
 // 503 を返す経路で動作する）。後続 Issue のドメインハンドラが BeginTxFunc 経由で
@@ -52,6 +68,9 @@ func NewServer(
 	cfg config.Config,
 	log logger.Logger,
 	pool *pgxpool.Pool,
+	authMWTenant func(http.Handler) http.Handler,
+	authMWAdmin func(http.Handler) http.Handler,
+	authMount func(r chi.Router, consolePrefix string, console oidc.Console),
 ) (*http.Server, Routers, error) {
 	r := chi.NewRouter()
 
@@ -61,6 +80,15 @@ func NewServer(
 	// `/healthz` `/readyz` は TenantContext 不要で常時応答する（design.md L706）。
 	r.Get("/healthz", healthzHandler)
 	r.Get("/readyz", readyzHandler(pool))
+
+	// `/api/auth` / `/api/admin/auth` は TenantContextMiddleware の **外側** に位置する
+	// （ログイン前は claims が未確立であり、auth middleware の前段で OIDC ログインフローを
+	// 完結させる必要があるため）。`authMount` が nil の場合は本 Issue より前の A2 既存挙動
+	// （/api/auth 系は未配線で 404）を維持する。
+	if authMount != nil {
+		authMount(r, "/api/auth", oidc.ConsoleTenant)
+		authMount(r, "/api/admin/auth", oidc.ConsoleAdmin)
+	}
 
 	// `/api` と `/api/admin` をそれぞれ独立 router として構築し、root に Mount する。
 	//
@@ -80,11 +108,25 @@ func NewServer(
 	// /api/admin は /api の上に Mount するのではなく root に並列 Mount する（chi の
 	// route matching は登録順ではなく path-tree なので、より specific な /api/admin が
 	// 優先的にマッチする）。
+	//
+	// `authMWAdmin` / `authMWTenant`（task 6.2 / Req 6.2 / 6.3）は
+	// TenantContextMiddleware の **前段**として挿入する。これにより
+	//   - tenant 系 session cookie が `/api/admin/...` に提示されても `authMWAdmin` 側で
+	//     `console_mismatch` を検出し即 401 + cookie 削除（cross-console reject の物理分離強制）
+	//   - admin 系 session cookie が `/api/...` に提示されても `authMWTenant` 側で reject
+	// auth middleware が nil の場合は本 chain から除外し、A2 既存挙動の default deny 401
+	// （TenantContextMiddleware の claims 不在経路）が維持される（既存 test 互換のため）。
 	adminRouter := chi.NewRouter()
+	if authMWAdmin != nil {
+		adminRouter.Use(authMWAdmin)
+	}
 	adminRouter.Use(TenantContextMiddleware(log), RequireSuperAdmin(log))
 	adminRouter.HandleFunc("/*", notFoundHandler)
 
 	apiRouter := chi.NewRouter()
+	if authMWTenant != nil {
+		apiRouter.Use(authMWTenant)
+	}
 	apiRouter.Use(TenantContextMiddleware(log))
 	apiRouter.HandleFunc("/*", notFoundHandler)
 

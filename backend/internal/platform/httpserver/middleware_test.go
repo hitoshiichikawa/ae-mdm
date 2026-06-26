@@ -386,7 +386,7 @@ func TestTenantContextMiddleware_WithClaims_PutsTenantContextOnCtx(t *testing.T)
 	}))
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/api/foo", nil)
-	req = req.WithContext(withAuthClaims(req.Context(), authClaims{
+	req = req.WithContext(WithAuthClaims(req.Context(), AuthClaims{
 		TenantID:     tenantID,
 		AdminUserID:  adminID,
 		Roles:        []string{"TenantAdmin"},
@@ -435,7 +435,7 @@ func TestTenantContextMiddleware_SuperAdminClaims_PassesIsSuperAdmin(t *testing.
 	}))
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/api/admin/x", nil)
-	req = req.WithContext(withAuthClaims(req.Context(), authClaims{
+	req = req.WithContext(WithAuthClaims(req.Context(), AuthClaims{
 		TenantID:     uuid.Nil,
 		AdminUserID:  uuid.New(),
 		Roles:        []string{"SuperAdmin"},
@@ -471,7 +471,7 @@ func TestAccessLog_PropagatesTenantIDFromInnerMiddleware(t *testing.T) {
 	})))
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/api/foo", nil)
-	req = req.WithContext(withAuthClaims(req.Context(), authClaims{
+	req = req.WithContext(WithAuthClaims(req.Context(), AuthClaims{
 		TenantID:     tenantID,
 		AdminUserID:  adminID,
 		Roles:        []string{"TenantAdmin"},

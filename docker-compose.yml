@@ -91,6 +91,15 @@ services:
       AMAPI_PROJECT_ID: ${AMAPI_PROJECT_ID}
       GOOGLE_APPLICATION_CREDENTIALS: ${GOOGLE_APPLICATION_CREDENTIALS:-/run/secrets/amapi-sa.json}
       SESSION_SECRET: ${SESSION_SECRET:?SESSION_SECRET must be set in .env}
+      # Issue #33 (A3a): state cookie MAC 鍵 / OIDC confidential client secret は config.Load() の
+      # 必須 env。compose の `.env` は補間用で自動注入されないため、ここで明示的に api/worker
+      # へ渡す（PR #42 round-1 review 由来）。
+      STATE_MAC_SECRET: ${STATE_MAC_SECRET:?STATE_MAC_SECRET must be set in .env}
+      OIDC_TENANT_CLIENT_SECRET: ${OIDC_TENANT_CLIENT_SECRET:?OIDC_TENANT_CLIENT_SECRET must be set in .env}
+      OIDC_ADMIN_CLIENT_SECRET: ${OIDC_ADMIN_CLIENT_SECRET:?OIDC_ADMIN_CLIENT_SECRET must be set in .env}
+      SESSION_IDLE_TIMEOUT: ${SESSION_IDLE_TIMEOUT:-30m}
+      SESSION_ABSOLUTE_TIMEOUT: ${SESSION_ABSOLUTE_TIMEOUT:-8h}
+      STATE_COOKIE_TTL: ${STATE_COOKIE_TTL:-10m}
       AUDIT_LOG_RETENTION_DAYS: ${AUDIT_LOG_RETENTION_DAYS:-180}
       DEVICE_SYNC_DELAY_THRESHOLD_HOURS: ${DEVICE_SYNC_DELAY_THRESHOLD_HOURS:-24}
     ports:
@@ -138,6 +147,16 @@ services:
       AMAPI_PROJECT_ID: ${AMAPI_PROJECT_ID}
       GOOGLE_APPLICATION_CREDENTIALS: ${GOOGLE_APPLICATION_CREDENTIALS:-/run/secrets/amapi-sa.json}
       SESSION_SECRET: ${SESSION_SECRET:?SESSION_SECRET must be set in .env}
+      # Issue #33 (A3a): worker は本 Issue 時点で Pub/Sub subscriber 未配線だが、bootstrap で
+      # `config.Load()` を呼ぶため STATE_MAC_SECRET / OIDC_*_CLIENT_SECRET を含む全必須 env を
+      # 要求する（PR #42 round-1 review 由来）。compose で渡し漏れがあると worker は
+      # `config_invalid` で常に終了する。
+      STATE_MAC_SECRET: ${STATE_MAC_SECRET:?STATE_MAC_SECRET must be set in .env}
+      OIDC_TENANT_CLIENT_SECRET: ${OIDC_TENANT_CLIENT_SECRET:?OIDC_TENANT_CLIENT_SECRET must be set in .env}
+      OIDC_ADMIN_CLIENT_SECRET: ${OIDC_ADMIN_CLIENT_SECRET:?OIDC_ADMIN_CLIENT_SECRET must be set in .env}
+      SESSION_IDLE_TIMEOUT: ${SESSION_IDLE_TIMEOUT:-30m}
+      SESSION_ABSOLUTE_TIMEOUT: ${SESSION_ABSOLUTE_TIMEOUT:-8h}
+      STATE_COOKIE_TTL: ${STATE_COOKIE_TTL:-10m}
     depends_on:
       postgres:
         condition: service_healthy

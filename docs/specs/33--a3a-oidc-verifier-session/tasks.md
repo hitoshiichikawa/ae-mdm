@@ -10,8 +10,8 @@
 >
 > 並列実行可能なタスクには `(P)` を付け、`_Boundary:_` で担当 Components を明示する。
 
-- [ ] 1. config / migration / 共通公開化（後段の前提整備）
-- [ ] 1.1 Config に session timeout / state / OIDC client secret を追加 (P)
+- [x] 1. config / migration / 共通公開化（後段の前提整備）
+- [x] 1.1 Config に session timeout / state / OIDC client secret を追加 (P)
   - `backend/internal/config/config.go` に以下を追加:
     - `SessionIdleTimeout time.Duration`（env `SESSION_IDLE_TIMEOUT`, default `30m`,
       **validation: `1s <= ttl <= 24h`**。`auth.session.CookieAttributes(ttl)` および
@@ -96,7 +96,7 @@
     全フローが成立しない
   - _Requirements: 6.1, 6.2, 6.4, NFR 1.1, NFR 2.1, NFR 2.2_
   - _Boundary: Config_
-- [ ] 1.2 sessions / admin_users テーブル拡張マイグレーション (P)
+- [x] 1.2 sessions / admin_users テーブル拡張マイグレーション (P)
   - `backend/db/migrations/0013_extend_sessions.up.sql` を新規追加。`ALTER TABLE sessions ADD
     COLUMN last_seen_at timestamptz NOT NULL DEFAULT now()` → `UPDATE sessions SET last_seen_at
     = idle_at` → `ALTER TABLE sessions DROP COLUMN idle_at` → `ALTER TABLE sessions ADD
@@ -173,7 +173,7 @@
     のみ）
   - _Requirements: 2.9, 3.7, 3.9, 4.1, 4.2, 4.3, 4.8, 5.1, 6.3_
   - _Boundary: Migrations_
-- [ ] 1.3 httpserver の authClaims 関連シンボル公開化 (P)
+- [x] 1.3 httpserver の authClaims 関連シンボル公開化 (P)
   - `backend/internal/platform/httpserver/middleware.go` の private シンボルを以下に rename:
     `authClaims` → `AuthClaims`（フィールド構成は不変）、`withAuthClaims` →
     `WithAuthClaims`、`authClaimsFromContext` → `AuthClaimsFromContext`、
@@ -186,7 +186,7 @@
   - _Requirements: 5.3, 5.4_
   - _Boundary: HTTPServer_
   - _Depends: なし（A2 完了済みのため独立）_
-- [ ] 1.4 logger redaction allowlist 拡張 + ユニットテスト (P)
+- [x] 1.4 logger redaction allowlist 拡張 + ユニットテスト (P)
   - `backend/internal/logger/redact.go` の機密キー allowlist に以下 4 件を追加:
     `state_mac_secret` / `client_secret` / `state_cookie` / `session_cookie`
     （A2 既存 allowlist の `session_secret` / `id_token` / `access_token` / `refresh_token` /
@@ -211,8 +211,8 @@
   - _Boundary: Logger_
   - _Depends: なし（A2 完了済みのため独立）_
 
-- [ ] 2. OIDC Verifier（JWKS キャッシュ + 検証）
-- [ ] 2.1 oidc.Verifier 実装と単体テスト
+- [x] 2. OIDC Verifier（JWKS キャッシュ + 検証）
+- [x] 2.1 oidc.Verifier 実装と単体テスト
   - `backend/internal/platform/oidc/verifier.go` を新規追加。`coreos/go-oidc/v3` の
     `oidc.NewProvider` + `oidc.NewRemoteKeySet` を tenant / admin の 2 issuer 分構築し、
     `Verifier` interface（`VerifyIDToken(ctx, raw) (Claims, error)`）を実装。
@@ -262,8 +262,8 @@
   - _Boundary: OIDCVerifier_
   - _Depends: 1.1_
 
-- [ ] 3. auth domain: 型 + state cookie + session cookie helpers
-- [ ] 3.1 auth.types + state cookie helper + 単体テスト (P)
+- [x] 3. auth domain: 型 + state cookie + session cookie helpers
+- [x] 3.1 auth.types + state cookie helper + 単体テスト (P)
   - `backend/internal/auth/types.go` を新規追加。`Identity`（AdminUserID / OIDCSubject /
     Email / TenantID / Roles / IsSuperAdmin）と `Session`（TokenHash / AdminUserID / Console /
     IssuedAt / LastSeenAt / ExpiresAt / RevokedAt *time.Time）を定義
@@ -311,7 +311,7 @@
   - _Requirements: 2.1, 2.2, 2.3, 2.4, 2.5, 2.6, 2.7, 2.8, 2.9, NFR 4.1_
   - _Boundary: AuthTypes, StateCookie, AuthClock_
   - _Depends: 1.1_
-- [ ] 3.2 auth.session helper + 単体テスト (P)
+- [x] 3.2 auth.session helper + 単体テスト (P)
   - `backend/internal/auth/session.go` を新規追加。`New() (rawToken string, err error)`
     （`crypto/rand.Read` で 32 byte → base64url no-padding / err は呼び出し側で **必ず**
     チェックする / Req 3.5 / NFR 3.1）、`HashToken(raw) string`（SHA-256 hex）、
@@ -334,8 +334,8 @@
   - _Boundary: SessionCookie_
   - _Depends: 1.1_
 
-- [ ] 4. auth.Repository（sessions / admin_users CRUD）
-- [ ] 4.1 Repository 実装 + integration テスト
+- [x] 4. auth.Repository（sessions / admin_users CRUD）
+- [x] 4.1 Repository 実装 + integration テスト
   - `backend/internal/auth/repository.go` を新規追加。`Repository` interface
     （**`ConsumeStateNonce(ctx, nonce, console, expiresAt)`** /
     **`ResolveAdminUser(ctx, issuer, subject, email, console)`** /
@@ -397,8 +397,8 @@
   - _Boundary: AuthRepository_
   - _Depends: 1.2, 1.3, 3.1, 3.2_
 
-- [ ] 5. auth.Service（4 ユースケース）+ auth.Handler（HTTP 6 endpoints）
-- [ ] 5.1 Service 実装 + 単体テスト
+- [x] 5. auth.Service（4 ユースケース）+ auth.Handler（HTTP 6 endpoints）
+- [x] 5.1 Service 実装 + 単体テスト
   - `backend/internal/auth/service.go` を新規追加。`Service` interface（`BeginLogin` /
     `HandleCallback` / `LookupAndRefresh` / `Logout`）を提供
   - `BeginLogin(ctx, console, returnTo) (redirectURL string, stateCookie http.Cookie, err error)` —
@@ -552,7 +552,7 @@
   - _Requirements: 2.1, 2.5, 2.6, 2.7, 2.8, 2.9, 3.1, 3.5, 3.9, 4.1, 4.2, 4.3, 4.4, 4.5, 4.6, 4.8, 5.1, 5.3, 5.4, 6.2, 6.3, NFR 3.1, NFR 4.1_
   - _Boundary: AuthService_
   - _Depends: 2.1, 3.1, 3.2, 4.1_
-- [ ] 5.2 Handler 実装 + httptest 単体テスト
+- [x] 5.2 Handler 実装 + httptest 単体テスト
   - `backend/internal/auth/handler.go` を新規追加。`Handler` struct と `Mount(r chi.Router,
     consolePrefix string, console oidc.Console)` を提供。`Mount` は **内部で
     `r.Route(consolePrefix, func(sub chi.Router) { sub.Get("/login", h.login(console));
@@ -608,8 +608,8 @@
   - _Boundary: AuthHandler_
   - _Depends: 5.1_
 
-- [ ] 6. auth.Middleware + bootstrap 配線 + integration テスト
-- [ ] 6.1 Middleware 実装と単体テスト
+- [x] 6. auth.Middleware + bootstrap 配線 + integration テスト
+- [x] 6.1 Middleware 実装と単体テスト
   - `backend/internal/auth/middleware.go` を新規追加。**`NewMiddleware(svc Service,
     expectedConsole oidc.Console, log logger.Logger, clock Clock) func(http.Handler)
     http.Handler`** を提供。`expectedConsole` は tenant 系 / admin 系で **別インスタンス**を
@@ -646,7 +646,7 @@
   - _Requirements: 3.7, 4.3, 4.4, 4.5, 4.6, 4.7, 5.3, 5.4, 6.2, 6.3, NFR 3.1, NFR 4.1_
   - _Boundary: AuthMiddleware_
   - _Depends: 5.1, 1.3_
-- [ ] 6.2 httpserver.NewServer に auth middleware + auth エンドポイントを配線
+- [x] 6.2 httpserver.NewServer に auth middleware + auth エンドポイントを配線
   - `backend/internal/platform/httpserver/server.go` の `NewServer` シグネチャを変更。以下の
     追加引数を受け取る:
     - **`authMWTenant func(http.Handler) http.Handler`**（`expectedConsole=ConsoleTenant`
@@ -679,7 +679,7 @@
   - _Requirements: 5.3, 5.4, 6.2, 6.3_
   - _Boundary: HTTPServer_
   - _Depends: 6.1, 5.2_
-- [ ] 6.3 cmd/api bootstrap に OIDC Verifier / Auth 配線追加
+- [x] 6.3 cmd/api bootstrap に OIDC Verifier / Auth 配線追加
   - `backend/cmd/api/main.go` を編集。`config.Load()` の後に `oidc.NewVerifier(ctx, cfg)` を
     呼び（失敗時は exit 1 / NFR 3.2）、`auth.NewRepository(pool)` → **`auth.NewService(cfg,
     verifier, repo, oauth2Configs, clock, auth.TokenGenerator(session.New), log)`**
@@ -713,7 +713,7 @@
   - _Requirements: NFR 3.1, NFR 3.2_
   - _Boundary: cmd-api_
   - _Depends: 6.2_
-- [ ] 6.4 結合テスト（auth 全フロー）
+- [x] 6.4 結合テスト（auth 全フロー）
   - `backend/test/integration/auth_login_callback_test.go` を新規追加。`docker compose up -d
     postgres` 前提 + テスト用 RSA private key で OIDC IdP を `httptest.NewServer` で mock
     （discovery / JWKS / token endpoint を提供）。シナリオ:
@@ -750,8 +750,8 @@
   - _Boundary: AuthService, AuthHandler, AuthMiddleware, AuthRepository, OIDCVerifier, HTTPServer_
   - _Depends: 6.3_
 
-- [ ] 7. ドキュメント更新（runbook / impl-notes）
-- [ ] 7.1 runbook / impl-notes の認証配線手順を追記
+- [x] 7. ドキュメント更新（runbook / impl-notes）
+- [x] 7.1 runbook / impl-notes の認証配線手順を追記
   - `docs/runbook/local-dev.md`（A2 で新規追加済み）に「OIDC 認証フロー検証手順」節を追加。
     Keycloak realm export（`infra/keycloak/realm-export.json`、umbrella task 1.2 で作成
     済み前提）の tenant-console / admin-console 2 client が必要であることを明記し、未配置の

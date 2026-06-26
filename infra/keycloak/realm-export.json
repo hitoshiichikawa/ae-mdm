@@ -70,9 +70,11 @@
     {
       "clientId": "tenant-console",
       "name": "ae-mdm Tenant Console (顧客 IT 管理者向け SPA)",
-      "description": "TenantAdmin / Operator / Viewer 向けの SPA。PKCE による Public Client。",
+      "description": "TenantAdmin / Operator / Viewer 向け。Issue #33 (A3a) で backend BFF confidential authorization code flow に移行（redirectUris は backend の /api/auth/callback、SPA からは別オリジンの login link 経由）。",
       "enabled": true,
-      "publicClient": true,
+      "publicClient": false,
+      "secret": "<REPLACE_ME_FROM_KEYCLOAK_TENANT_CLIENT>",
+      "clientAuthenticatorType": "client-secret",
       "standardFlowEnabled": true,
       "implicitFlowEnabled": false,
       "directAccessGrantsEnabled": false,
@@ -81,15 +83,13 @@
       "rootUrl": "http://localhost:5173",
       "baseUrl": "http://localhost:5173/",
       "redirectUris": [
-        "http://localhost:5173/*",
-        "http://tenant-console/*"
+        "http://localhost:8080/api/auth/callback"
       ],
       "webOrigins": [
         "http://localhost:5173",
-        "+"
+        "http://localhost:8080"
       ],
       "attributes": {
-        "pkce.code.challenge.method": "S256",
         "post.logout.redirect.uris": "http://localhost:5173/*"
       },
       "defaultClientScopes": ["web-origins", "profile", "roles", "email"],
@@ -98,9 +98,11 @@
     {
       "clientId": "admin-console",
       "name": "ae-mdm Admin Console (SaaS 運用者向け SPA)",
-      "description": "SuperAdmin 専用 SPA。PKCE による Public Client。tenant-console とは aud / redirect URI が分離されている（NFR 2.1）。",
+      "description": "SuperAdmin 専用。Issue #33 (A3a) で backend BFF confidential authorization code flow に移行（redirectUris は backend の /api/admin/auth/callback。tenant-console とは aud / redirect URI / secret が分離されている / NFR 2.1）。",
       "enabled": true,
-      "publicClient": true,
+      "publicClient": false,
+      "secret": "<REPLACE_ME_FROM_KEYCLOAK_ADMIN_CLIENT>",
+      "clientAuthenticatorType": "client-secret",
       "standardFlowEnabled": true,
       "implicitFlowEnabled": false,
       "directAccessGrantsEnabled": false,
@@ -109,15 +111,13 @@
       "rootUrl": "http://localhost:5174",
       "baseUrl": "http://localhost:5174/",
       "redirectUris": [
-        "http://localhost:5174/*",
-        "http://admin-console/*"
+        "http://localhost:8080/api/admin/auth/callback"
       ],
       "webOrigins": [
         "http://localhost:5174",
-        "+"
+        "http://localhost:8080"
       ],
       "attributes": {
-        "pkce.code.challenge.method": "S256",
         "post.logout.redirect.uris": "http://localhost:5174/*"
       },
       "defaultClientScopes": ["web-origins", "profile", "roles", "email"],
