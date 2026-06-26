@@ -154,11 +154,17 @@ func runBootstrap(ctx context.Context) int {
 	svc := auth.NewService(cfg, verifier, repo, oauth2Configs, clock, auth.TokenGenerator(auth.New), log)
 
 	// tenant / admin 系の Auth Middleware を **別インスタンス**で構築する。
-	// `expectedConsole` を closure に固定することで、漏洩した tenant cookie が
-	// `/api/admin/...` に提示された場合に `authMWAdmin` 側で `console_mismatch` を検出して
-	// 即 401 + cookie 削除になる（Req 6.2 / 6.3 の物理分離強制）。
+	//
+	// - tenant 用は `expectedConsole=ConsoleTenant` を closure に固定し、admin cookie が
+	//   `/api/...` に提示された場合に `console_mismatch` で 401 + cookie 削除する
+	//   （Issue #33 Req 6.2 / 6.3 の cross-console reject 物理分離強制）。
+	// - admin 用は Issue #37 (#44 PR iteration round 1) で `expectedConsole=ConsoleAny` に
+	//   変更し、auth middleware が console 照合を skip する。後段の
+	//   `httpserver.RequireAdminConsoleAndSuperAdmin` ガードが Req 2.4 / 2.5 に従って
+	//   tenant-console aud を **403**、非 SuperAdmin role を **403** で拒否する
+	//   （auth middleware 側で 401 を先取りすると Req 2.4 の 403 経路に到達できないため）。
 	authMWTenant := auth.NewMiddleware(svc, oidc.ConsoleTenant, log, clock)
-	authMWAdmin := auth.NewMiddleware(svc, oidc.ConsoleAdmin, log, clock)
+	authMWAdmin := auth.NewMiddleware(svc, oidc.ConsoleAny, log, clock)
 
 	// auth.Handler.Mount を `authMount` として注入する。`httpserver.NewServer` が
 	// `(r, "/api/auth", ConsoleTenant)` と `(r, "/api/admin/auth", ConsoleAdmin)` の

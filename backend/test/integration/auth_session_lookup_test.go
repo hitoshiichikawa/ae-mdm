@@ -9,11 +9,13 @@ import (
 	"testing"
 	"time"
 
+	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/hitoshiichikawa/ae-mdm/internal/auth"
+	"github.com/hitoshiichikawa/ae-mdm/internal/platform/httpserver"
 	"github.com/hitoshiichikawa/ae-mdm/internal/platform/oidc"
 )
 
@@ -46,6 +48,53 @@ func setupLookupFixture(t *testing.T) (*e2eAuthStack, *httptest.Server, func()) 
 		cancel()
 	}
 	return stack, ts, cleanup
+}
+
+// adminGuardChainStack は `TestAdminGuard_*` 系テストが共有する dependency 配線。
+// `e2eAuthStack` を内包しつつ、admin route 専用の HTTP server（`cmd/api/main.go` の wiring
+// 相当: 認証 middleware permissive + TenantContextMiddleware + RequireAdminConsoleAndSuperAdmin）
+// を立てる。
+type adminGuardChainStack struct {
+	*e2eAuthStack
+	ts *httptest.Server
+}
+
+// setupAdminGuardChain は admin route 用の production chain を持つ test HTTP server を構築する。
+//
+// `cmd/api/main.go` と整合する wiring（Issue #37 / Req 2.4）:
+//   - auth middleware は `oidc.ConsoleAny` で構築（console 照合 skip）
+//   - TenantContextMiddleware（claims を TenantContext に転記）
+//   - RequireAdminConsoleAndSuperAdmin（audience + SuperAdmin の 2 条件 AND ガード）
+//
+// /api/admin/probe を mount し、guard を通過すると 200 を返す。
+func setupAdminGuardChain(t *testing.T) (*adminGuardChainStack, func()) {
+	t.Helper()
+	urls := requireDBURLs(t)
+	ctx, cancel := context.WithTimeout(context.Background(), connectTimeout)
+	applyMigrationsUp(t, urls.migrate)
+	truncateAll(t, ctx, urls)
+	pool := newAppPool(t, ctx, urls)
+
+	stack := newE2EAuthStack(t, ctx, pool)
+	// production と同じ wiring: ConsoleAny の auth middleware を改めて構築
+	adminMWPermissive := auth.NewMiddleware(stack.svc, oidc.ConsoleAny, stack.log, stack.clock)
+
+	r := chi.NewRouter()
+	adminRouter := chi.NewRouter()
+	adminRouter.Use(adminMWPermissive)
+	adminRouter.Use(httpserver.TenantContextMiddleware(stack.log))
+	adminRouter.Use(httpserver.RequireAdminConsoleAndSuperAdmin(stack.log))
+	adminRouter.Get("/probe", probeHandler)
+	r.Mount("/api/admin", adminRouter)
+
+	ts := httptest.NewServer(r)
+	t.Cleanup(ts.Close)
+
+	cleanup := func() {
+		pool.Close()
+		cancel()
+	}
+	return &adminGuardChainStack{e2eAuthStack: stack, ts: ts}, cleanup
 }
 
 // seedActiveSession は test 用 admin_users + tenant + sessions 1 行を seed する。
@@ -186,6 +235,14 @@ func TestAuthLookup_AbsoluteExceeded_Returns401(t *testing.T) {
 // Console=tenant-console の session を /api/admin/probe に提示すると、admin middleware の
 // expectedConsole=ConsoleAdmin に対し Session.Console が不一致 → console_mismatch (401) +
 // cookie 削除。
+//
+// 注意（Issue #37 / #44 PR iteration round 1）: 本テストの fixture は `e2eAuthStack` の
+// `adminMW`（`oidc.ConsoleAdmin` で構築された strict 版）を使うため、`Service` が
+// console 照合を行い 401 を返す経路を verify している。production の `/api/admin/*` route は
+// `cmd/api/main.go` が `oidc.ConsoleAny` で auth middleware を構築するため挙動が異なる
+// （403 + `audience_mismatch` で `RequireAdminConsoleAndSuperAdmin` ガードが拒否する。
+// 後者は [TestAdminGuard_TenantSessionOnAdminRoute_Returns403WithAudienceMismatch] が verify）。
+// 本テストは strict 版 auth middleware の挙動が後方互換で保てていることの回帰耐性として残置。
 func TestAuthLookup_TenantSessionOnAdminRoute_Returns401WithConsoleMismatch(t *testing.T) {
 	stack, ts, cleanup := setupLookupFixture(t)
 	defer cleanup()
@@ -222,6 +279,58 @@ func TestAuthLookup_TenantSessionOnAdminRoute_Returns401WithConsoleMismatch(t *t
 	// console_mismatch 経路でも repo.Revoke が呼ばれる（Req 4.6）
 	if !sessionIsRevoked(t, ctx, stack.pool, hash) {
 		t.Errorf("session の revoked_at が NULL のまま（console_mismatch 時も repo.Revoke されるべき）")
+	}
+}
+
+// TestAdminGuard_TenantSessionOnAdminRoute_Returns403WithAudienceMismatch は
+// Issue #37 Req 2.4 / 2.7 の production chain 検証。
+//
+// `cmd/api/main.go` の wiring に合わせて、admin route 用 auth middleware は
+// `oidc.ConsoleAny` で構築し（console 照合を skip）、後段の TenantContextMiddleware と
+// `httpserver.RequireAdminConsoleAndSuperAdmin` を chain に挟む。tenant-console 由来の
+// session cookie を `/api/admin/probe` に提示すると:
+//
+//   - auth middleware は console 照合を skip し、AuthClaims（Console="tenant-console"）を ctx に注入
+//   - TenantContextMiddleware は TenantContext を確立して次へ
+//   - RequireAdminConsoleAndSuperAdmin が AuthClaims.Console を見て **403 / audience_mismatch**
+//     で拒否し、body にリソース ID を露出しない
+//
+// この経路は前 implementation の `console_mismatch` 401（authMWAdmin が `ConsoleAdmin` で
+// 構築されていた時の挙動）から **意図的に変更** されたもの。同じ token が
+// `/api/admin/probe` 以外（例: tenant 側 route）には引き続き valid であるため、cookie 削除は
+// 行わない（Req 2.4 は cookie 削除を要求しない）。
+func TestAdminGuard_TenantSessionOnAdminRoute_Returns403WithAudienceMismatch(t *testing.T) {
+	stack, cleanup := setupAdminGuardChain(t)
+	defer cleanup()
+
+	ctx := context.Background()
+	baseTime := time.Now().UTC().Truncate(time.Microsecond)
+	stack.clock.Set(baseTime)
+	rawToken, _, _, _ := seedActiveSession(t, ctx, stack.pool, stack.idp.issuer, oidc.ConsoleTenant, baseTime.Add(-1*time.Minute), baseTime.Add(7*time.Hour))
+
+	req := mustNewRequest(t, http.MethodGet, stack.ts.URL+"/api/admin/probe")
+	req.AddCookie(&http.Cookie{Name: "__Host-ae_mdm_session", Value: rawToken})
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("GET /api/admin/probe: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("status = %d; want 403 (Req 2.4 audience_mismatch)", resp.StatusCode)
+	}
+	// guard が `audience_mismatch` を構造化ログに出している
+	if !stack.log.hasFieldEqual("authz_deny_reason", "audience_mismatch") {
+		t.Errorf("WARN log に authz_deny_reason=audience_mismatch が無い: %+v", stack.log.entries)
+	}
+	if !stack.log.hasFieldEqual("console", "tenant-console") {
+		t.Errorf("WARN log に console=tenant-console が無い: %+v", stack.log.entries)
+	}
+	// Req 2.4 は cookie 削除を要求しない（tenant-console 上は valid session のため）
+	expireCookie := findCookie(resp.Cookies(), "__Host-ae_mdm_session")
+	if expireCookie != nil && expireCookie.MaxAge < 0 {
+		t.Errorf("guard 経路で cookie 削除属性が発行されている（Req 2.4 はこれを要求しない）: %+v", expireCookie)
 	}
 }
 

@@ -25,6 +25,19 @@ const (
 	ConsoleTenant Console = "tenant-console"
 	// ConsoleAdmin は SaaS 運用者向け（admin-console）の OIDC client。
 	ConsoleAdmin Console = "admin-console"
+	// ConsoleAny は console 照合を skip するための sentinel 値（zero value 文字列）。
+	//
+	// Issue #37 (#44 PR iteration round 1): `/api/admin/*` 経路で auth middleware が
+	// console_mismatch を 401 で先取りすると、後段の [RequireAdminConsoleAndSuperAdmin]
+	// ガードによる 403（Req 2.4: 非 admin-console aud を 403 で拒否）に到達できないため、
+	// `cmd/api/main.go` が admin route 用 middleware を `ConsoleAny` で構築できるよう公開する。
+	// `Service.LookupAndRefresh` は expectedConsole==ConsoleAny の場合に console 照合を skip
+	// する契約（session 自体は cookie 妥当性 / 失効 / revoke 等の他チェックは通常通り通過必要）。
+	//
+	// tenant-console 経路は依然 `ConsoleTenant` で構築する（cross-console reject の物理分離強制
+	// は tenant 側で維持）。admin-console 側の cross-console reject は guard の responsibility に
+	// 移譲される（Req 2.4 / 2.7）。
+	ConsoleAny Console = ""
 )
 
 // Claims は ID トークンから抽出する検証済みクレーム。
