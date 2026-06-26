@@ -552,7 +552,7 @@
   - _Requirements: 2.1, 2.5, 2.6, 2.7, 2.8, 2.9, 3.1, 3.5, 3.9, 4.1, 4.2, 4.3, 4.4, 4.5, 4.6, 4.8, 5.1, 5.3, 5.4, 6.2, 6.3, NFR 3.1, NFR 4.1_
   - _Boundary: AuthService_
   - _Depends: 2.1, 3.1, 3.2, 4.1_
-- [ ] 5.2 Handler 実装 + httptest 単体テスト
+- [x] 5.2 Handler 実装 + httptest 単体テスト
   - `backend/internal/auth/handler.go` を新規追加。`Handler` struct と `Mount(r chi.Router,
     consolePrefix string, console oidc.Console)` を提供。`Mount` は **内部で
     `r.Route(consolePrefix, func(sub chi.Router) { sub.Get("/login", h.login(console));
