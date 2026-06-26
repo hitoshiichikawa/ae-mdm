@@ -16,7 +16,7 @@
 //   - 許可: github.com/hitoshiichikawa/ae-mdm/internal/config
 //   - 禁止: 上位 application / cmd / 他 domain への直接 import
 //
-// # 構成（task 4.1 時点）
+// # 構成（task 5.1 時点）
 //
 //   - types.go                       : Identity / Session のドメイン型
 //   - clock.go                       : Clock interface と SystemClock 実装（DI 境界）
@@ -35,6 +35,15 @@
 //   - repository_failure_kinds.go    : Repository が返す failureKind sentinel 追加定数
 //     （state_replay / admin_user_not_provisioned / session_tamper）。
 //     state.go の failureKind 型本体を再利用しつつ、責務分離のため別ファイル化。
+//   - service.go                     : Service interface（BeginLogin / HandleCallback /
+//     LookupAndRefresh / Logout）+ 本番実装。Verifier / Repository / Clock / TokenGenerator /
+//     oauth2.Config を DI で受け取り、state cookie 発行・nonce 照合・session 失効判定を集約。
+//   - service_failure_kinds.go       : Service が返す failureKind sentinel 追加定数
+//     （state_console_mismatch / invalid_aud / nonce_mismatch / csprng_failure /
+//     upstream_oidc_token / console_mismatch / session_expired / session_revoked /
+//     session_idle / return_to_invalid）。
+//   - service_test.go                : Service の単体テスト（fake Verifier / Repository /
+//     Clock / Logger / oauth2 token endpoint mock 経由）。
 //
 // # 機密値の非埋込契約
 //
