@@ -999,6 +999,89 @@ learning を `### Task <id>` 単位で追記する。`docs/specs/33--a3a-oidc-ve
   （tasks.md L716〜L750 の DB-backed verify 義務）。
 - 実行日時: 2026-06-26
 
+### Task 6.3
+
+- **採用方針**: `backend/cmd/api/main.go` の `runBootstrap` に config / logger / db pool 構築の
+  後段として OIDC Verifier / auth.Repository / auth.Service / tenant・admin 各 auth.Middleware /
+  auth.Handler.Mount の DI 配線を追加し、`httpserver.NewServer(cfg, log, pool, authMWTenant,
+  authMWAdmin, authMount)` に注入する経路を完成させた。`oauth2.Config` の構築は
+  `buildOAuth2Configs(cfg, verifier) map[oidc.Console]*oauth2.Config` helper に切り出し、tenant /
+  admin 双方で `Scopes: []string{goidc.ScopeOpenID, "email", "profile"}` を必ず含める設計を
+  関数本体側に集約した。`cmd/api/main_test.go` に `TestBuildOAuth2Configs` を追加し、
+  ClientID / ClientSecret / RedirectURL / Scopes / Endpoint の決定論的な転記を fake Verifier
+  経由で回帰的に守る形にした。
+- **重要な判断**:
+  - **discovery 失敗で fail-closed bootstrap**: tasks.md L683「失敗時は exit 1 / NFR 3.2」の
+    指示通り、`oidc.NewVerifier(ctx, cfg)` の戻り err を check し、err != nil なら
+    `log.Error(... logger.Err(err))` + `return 1` で bootstrap を中断する。`db.NewPool` /
+    `logger.NewLogger` / `config.Load` 既存経路と同じパターンを踏襲することで、起動経路全体の
+    fail-closed 挙動の一貫性を保った（NFR 3.1 / 3.2）。
+  - **`authMount` を `auth.Handler.Mount` の closure wrapper として渡す設計**: `httpserver.NewServer`
+    の `authMount func(r chi.Router, consolePrefix string, console oidc.Console)` は signature が
+    `*auth.Handler.Mount` の bound method と一致するが、Go の bound method 構文だと
+    chi import を `httpserver` package に集約する境界に従わせるのが煩雑になるため、closure 1 段
+    噛ませて bootstrap 側で chi import を握る形にした。これにより httpserver 側の依存方向は
+    そのまま、bootstrap 側の `chi.Router` 引数の見通しも改善する。
+  - **`auth.SystemClock{}` を `Service` と Middleware 両方に渡す**: 同一プロセスで wall clock を
+    共有し、Service.LookupAndRefresh と Middleware.NewMiddleware の時刻基準を同期させる。テスト
+    では fake Clock を差し込むが、本番は SystemClock 1 つで idle / absolute / state cookie TTL の
+    判定が決定論的に揃う（design.md「Auth Service」/「Auth Middleware」節の Clock DI 境界と整合）。
+  - **`auth.TokenGenerator(auth.New)` の明示キャスト**: `auth.New` は `func() (string, error)` で
+    型一致しているため Go の型推論で自動 implicit conversion は通るが、`TokenGenerator` の DI
+    境界（design.md「Auth Service」節）を読み手に示すため明示キャストを採用した。テストでは
+    fake fn を渡せる構造（impl-notes Task 5.1 の `tokenGen` 経路）。
+  - **AuthStyle 契約のテスト責務分離**: tasks.md L706〜L708 は「`cmd/api/main_test.go`（または
+    task 2.1 の `verifier_test.go`）に AuthStyle == oauth2.AuthStyleInHeader を assert する
+    ユニットテストを追加する」と指示する。既存
+    `backend/internal/platform/oidc/verifier_test.go:TestVerifier_EndpointAuthStyle_IsInHeader` が
+    Verifier の TenantEndpoint() / AdminEndpoint() 双方について `AuthStyle ==
+    oauth2.AuthStyleInHeader` を assert 済みであり、tasks.md の選言条件（「または」）を満たす。
+    `cmd/api/main_test.go` 側では更に `buildOAuth2Configs` が Endpoint を「verifier から取り出した
+    値」と byte-equal で一致させることを assertion し、bootstrap 側で偶発的に AuthStyle が
+    上書きされない（= 一次防御の verifier_test 側契約が cmd/api 側で破壊されない）ことを
+    二次的に守る形に整理した。
+  - **既存 `cmd/api/main.go` の `nil, nil, nil` 引数経路を廃止**: A2 時点の `httpserver.NewServer(...,
+    nil, nil, nil)` 呼び出しは「auth 未配線時の default deny 401 を維持する」ための暫定経路
+    だった。本 task で実 auth.Middleware / auth.Handler を注入することで暫定経路は不要になる
+    が、`httpserver.NewServer` 側の nil 許容 fallback はテスト fixture（既存
+    `server_test.go` / `http_subrouter_mount_test.go` 等）が依存しているため `server.go` 側では
+    維持する（task 6.2 で確立した nil 許容契約を bootstrap 側からは使わない / `server.go`
+    本体は変更しない）。
+- **残存課題**:
+  - 後続 task 6.4 で実 DB + 実 OIDC IdP mock + 実 auth.Middleware を end-to-end で経由する
+    integration test を `backend/test/integration/auth_login_callback_test.go` / `auth_session_lookup_test.go` /
+    `auth_logout_revoke_test.go` の 3 ファイルに追加する。`oauth2.Config.Endpoint.TokenURL` が
+    test 用 `httptest.NewServer` の token endpoint URL に置き換わる経路は、本 task の
+    `buildOAuth2Configs` を bypass する形（test 側で `auth.NewService` に test 用 Verifier +
+    test 用 oauth2.Config map を直接注入する）でセットアップされる予定（本 task で実装した
+    bootstrap の bypass を test 側で行う設計 / Service / Middleware 等の単体テスト責務とは分離）。
+  - 後続 task 7.1 で `docs/runbook/local-dev.md` に OIDC 認証フロー検証手順 + `STATE_MAC_SECRET`
+    生成手順（`openssl rand -hex 32`）+ Keycloak realm export 側 client の登録 redirect URL を
+    `.env.example` の `OIDC_TENANT_REDIRECT_URL=http://localhost:8080/api/auth/callback` /
+    `OIDC_ADMIN_REDIRECT_URL=http://localhost:8080/api/admin/auth/callback` に揃える手順を
+    追記する。本 task では runbook 側に手を入れない（task 7.1 の責務）。
+  - 後続 task 7.1 で `internal/depspin/depspin.go` の `coreos-go-oidc` blank import を削除する
+    （task 2.1 で direct dependency 化したが、本 task でも `goidc.ScopeOpenID` を直接 import する
+    形が確立した）。
+  - 確認事項: 本 task では `chi` package を `cmd/api/main.go` に新規 import した。`cmd/api` から
+    `chi.Router` 引数を受け取る関数（`authMount` の signature）を構築する必要があるため
+    避けられない依存だが、`cmd/api` の責務（依存配線）と整合する範囲に閉じている（chi
+    router の追加 mount / middleware 注入は行わず、auth.Handler.Mount への薄い委譲のみ）。
+
+### Task 6.3 — Verify 実行結果
+
+- `cd backend && go build ./...`: PASS
+- `cd backend && go vet ./...`: PASS
+- `cd backend && go test ./... -count=1`: 全 package PASS（`cmd/api` の
+  `TestBuildOAuth2Configs` を含む新規 1 関数 + sub-test 込みで PASS / 既存
+  `TestHealthcheckURL_RespectsHTTPListenAddr` 5 sub-test PASS / `internal/auth` /
+  `internal/platform/oidc` / `internal/platform/httpserver` 等の影響範囲も全件 PASS /
+  約 5 秒 / `internal/platform/oidc` の test 群 4.5 秒が支配的）
+- DB-backed verify: 本 task は bootstrap 配線の境界網羅（fake Verifier / fake Config 経由）で
+  完結し、DB を要求しない。実 DB を経由した e2e 検証は後続 task 6.4 の
+  `auth_login_callback_test.go` 等で実施される予定（tasks.md L716〜L750 の DB-backed verify 義務）。
+- 実行日時: 2026-06-26
+
 ## 確認事項
 
 本セクションは `requirements.md` / `design.md` / `tasks.md` 本文の書き換えを伴わずに、実装フェーズ
