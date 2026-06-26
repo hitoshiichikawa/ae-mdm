@@ -939,6 +939,66 @@ learning を `### Task <id>` 単位で追記する。`docs/specs/33--a3a-oidc-ve
   `auth_session_lookup_test.go` 等で実施される予定（tasks.md L716〜L750 の DB-backed verify 義務）。
 - 実行日時: 2026-06-26
 
+### Task 6.2
+
+- **採用方針**: `backend/internal/platform/httpserver/server.go` の `NewServer` シグネチャに
+  `authMWTenant func(http.Handler) http.Handler` / `authMWAdmin func(http.Handler) http.Handler` /
+  `authMount func(r chi.Router, consolePrefix string, console oidc.Console)` の 3 引数を追加し、
+  全引数を **nil 許容**として A2 既存挙動（default deny 401）の後方互換性を維持した。
+  `/api/auth` / `/api/admin/auth` は root router 直下に `oidc.ConsoleTenant` / `oidc.ConsoleAdmin`
+  でそれぞれ Mount し、`apiRouter` / `adminRouter` の `Use(...)` チェーンには
+  `TenantContextMiddleware` の **前段**として auth middleware を挿入する設計（Req 6.2 / 6.3 の
+  cross-console reject 物理分離強制）。
+- **重要な判断**:
+  - **依存方向**: httpserver から `internal/platform/oidc` を import するのは
+    `platform → platform` の横並び参照であり、`internal/platform/oidc/doc.go` の依存方向
+    ルール（oidc → errors / config / logger のみ許可、上位 / 横並び domain は禁止）に違反しない
+    （oidc が httpserver を import する方向は禁止だが、本 task は逆方向の参照）。`oidc.Console` /
+    `oidc.ConsoleTenant` / `oidc.ConsoleAdmin` を関数引数の型としてのみ参照する形に留め、
+    bootstrap 側（cmd/api/main.go）が両層を握る構造を維持した。
+  - **chain 順序**: `authMWAdmin` → `TenantContextMiddleware` → `RequireSuperAdmin` の順を
+    厳守。漏洩した tenant 系 session が `/api/admin/...` に提示された場合、最前段の
+    `authMWAdmin` が `console_mismatch` を検出して即 401 + cookie 削除を返し、後段の
+    TenantContext 確立・SuperAdmin 判定経路には到達しない（Req 6.2 / 6.3 の物理分離強制）。
+  - **既存テストとの後方互換**: 既存の `server_test.go` / `http_subrouter_mount_test.go` /
+    `cmd/api/main.go` の caller は `nil, nil, nil` を渡す形に修正することで、A2 既存挙動の
+    default deny 401 経路を維持。これにより `TestServer_APIWithoutAuth_Returns401` /
+    `TestServer_AdminWithoutAuth_Returns401` 等の既存 6 テストが regression なく PASS。
+  - **テスト fake の境界**: テスト (a) / (b) / (c) は fake `authMWTenant` / `authMount` /
+    `authMWAdmin` 関数で境界網羅を達成し、実 `auth.NewMiddleware` / `auth.Handler.Mount` に
+    依存しない（本 task の責務は **配線**であり、middleware 内部挙動の検証は task 6.1 の
+    middleware_test.go が担う / 責務 1 件のテスト構造を維持）。
+  - **機密値の非埋込**: server.go 内の godoc / error wrap 文には session cookie 生値 / OIDC
+    client secret / state MAC 鍵を一切埋め込まない。テスト (c) で提示する fixture cookie 値
+    `tenant-session-token-fixture` は **境界値テスト用の固定文字列**であり、機密ではない
+    （内部に署名情報や鍵情報を一切含まない）。
+- **残存課題**:
+  - 後続 task 6.3 で `cmd/api/main.go` に **実 OIDC Verifier / auth.Service / auth.Repository**
+    の bootstrap を組み、`auth.NewMiddleware(svc, oidc.ConsoleTenant, log, clock)` /
+    `auth.NewMiddleware(svc, oidc.ConsoleAdmin, log, clock)` で 2 インスタンスを構築し、
+    `(&authHandler).Mount` を `authMount` として `httpserver.NewServer(cfg, log, pool,
+    authMWTenant, authMWAdmin, authMount)` に渡す。
+  - 後続 task 6.4 で実 DB + 実 Service + 実 Middleware を end-to-end で経由する integration
+    test を追加し、本 task の fake 経由境界網羅では検証できない `LookupAndRefresh` 経由の
+    console_mismatch 判定 / session cookie 削除動作を担保する。
+  - 確認事項: 本 task は `authMWTenant` / `authMWAdmin` を **互いに独立な 2 関数**として受け取る
+    形を採用したが、設計上は `auth.NewMiddleware(svc, expectedConsole, ...)` を 2 回呼んだ
+    結果を bootstrap が個別 wiring する構造と整合（design.md「Auth Middleware」節の
+    `expectedConsole` 単一値の中で 1 middleware を構築する契約）。
+
+### Task 6.2 — Verify 実行結果
+
+- `cd backend && go build ./...`: PASS
+- `cd backend && go vet ./...`: PASS
+- `cd backend && go test ./... -count=1`: 全 package PASS（`internal/platform/httpserver` で
+  新規 3 テスト関数 + sub-test 2 件、計 5 ケース全 PASS / 既存 httpserver テスト 11 件 regression
+  なし / `test/integration` の `http_subrouter_mount_test.go` も 4 件全 PASS / `cmd/api` /
+  `internal/auth` / `internal/platform/oidc` 等の影響範囲も全件 PASS / 約 6 秒）
+- DB-backed verify: 本 task は配線層の境界網羅（fake middleware / httptest）で完結し、DB を
+  要求しない。実 Service + 実 Middleware を経由した e2e 検証は後続 task 6.4 で実施予定
+  （tasks.md L716〜L750 の DB-backed verify 義務）。
+- 実行日時: 2026-06-26
+
 ## 確認事項
 
 本セクションは `requirements.md` / `design.md` / `tasks.md` 本文の書き換えを伴わずに、実装フェーズ
