@@ -845,6 +845,100 @@ learning を `### Task <id>` 単位で追記する。`docs/specs/33--a3a-oidc-ve
   全完了時の親 task `6` の昇格は本 iteration で完了済みのため、auto-promotion 規約は no-op
   として扱う。
 
+### Task 6.1
+
+- **採用方針**: `backend/internal/auth/{middleware.go, middleware_test.go}` の 2 ファイルを
+  新規追加し、`doc.go` の構成リストを task 6.1 時点に更新。`NewMiddleware(svc Service,
+  expectedConsole oidc.Console, log logger.Logger, clock Clock) func(http.Handler)
+  http.Handler` は `expectedConsole` を closure に固定して tenant / admin 別インスタンスを
+  構築できる shape にし、`__Host-ae_mdm_session` cookie lookup → `Service.LookupAndRefresh`
+  → 失敗時 `SessionExpireCookieAttributes()` + `errors.WriteHTTP(401)` + 構造化ログ → 成功時
+  `httpserver.AuthClaims` ctx 注入 → next の 4 段経路に整理した。
+- **重要な判断**:
+  - **session cookie 削除 helper の使い分け契約継承**: task 3.2 / task 5.2 で確立した
+    「state cookie 削除 = `auth.ExpireCookieAttributes()`、session cookie 削除 =
+    `auth.SessionExpireCookieAttributes()`」を Middleware 経路でも厳格に守った。Middleware で
+    削除する対象は **`__Host-ae_mdm_session`** のみであり、`ExpireCookieAttributes()`（state
+    用）を呼ぶと session cookie が残置されて Req 4.7 / Req 5.1 違反になるため、
+    `SessionExpireCookieAttributes()` を必ず使う旨を関数 godoc / `deny` helper のコメントに
+    明記した。
+  - **`expectedConsole` の伝搬経路を Service 側に任せる設計**: 当初「middleware で
+    `identity.Console`（=`session.Console`）と `expectedConsole` を直接比較」する案も検討
+    したが、`Service.LookupAndRefresh` の失効判定順序（console_mismatch → session_expired →
+    session_revoked → session_idle / impl-notes task 5.1 参照）が既に
+    `FailureKindConsoleMismatch` を sentinel として返す契約になっており、その判定を middleware
+    側に二重化すると順序 invariant が壊れるリスクがある。設計通り **`expectedConsole` を引数
+    で Service に伝搬するだけ**にし、判定は Service 側に一元化した。テスト (d) で fake Service
+    が `console_mismatch` を返すケースで 401 + cookie 削除 + ログを assertion して回帰耐性を
+    確保した。
+  - **`extractFailureKind` を service.go から package-private に再利用**: service.go で定義
+    済みの `extractFailureKind(err error) string` を middleware.go から呼び出して
+    `log.Warn` の `failure_kind` field 値を抽出した。同 package 内なので可視性問題はなく、
+    failure_kind 抽出ロジックの二重実装を避けられる（DRY / NFR 4.1 の実装統一）。
+  - **panic を握りつぶさない設計（fail-closed）**: tasks.md L643〜L645「fake Service が panic
+    した場合 fail-closed で 401（recover チェーンは httpserver 側 Recoverer に委ねる前提で本
+    middleware は panic を握りつぶさず 500 にする経路でも可、本 task ではどちらでも仕様適合）」
+    の指示通り、middleware は `recover()` を呼ばず外側 `httpserver.Recoverer` に委ねる設計を
+    採用した。これにより panic ハンドリング箇所が 1 箇所に集約され、observability（ERROR ログ
+    + 500 status）も Recoverer の既存実装で統一される（NFR 3.1 fail-closed）。テスト (f)
+    `TestMiddleware_ServicePanic_NextNotInvoked` で next が呼ばれないことのみ assertion した
+    （panic は test harness 側の `defer recover()` で捕捉）。
+  - **`AuthClaims.Roles` の defensive copy**: `identity.Roles` をそのまま `claims.Roles` に
+    代入すると、後続 middleware / handler が claims.Roles を mutate した場合に上流の Identity
+    が汚染される。`append([]string(nil), identity.Roles...)` で defensive copy を行い、
+    `httpserver.TenantContextMiddleware` の既存 pattern（middleware.go L317）と一貫させた。
+  - **`session_hash_prefix` の出力は HashToken(rawToken) 経由**: cookie 不在パスでは prefix
+    field 自体を省略（cookie が無いので hash も無い）。session lookup 失敗パスでは rawToken
+    から `HashToken` → `HashPrefix` で先頭 8 文字を field 化する経路と、`logSessionFailure` /
+    `logSessionFailureWithHash` の 2 helper に分岐した（cookie 不在パスは hash 経由、Service
+    エラーパスは rawToken 経由）。生 token / 全 hash は出力しない（Req 3.8 / NFR 1.1）。
+  - **`auth → httpserver` 依存方向の確認**: `doc.go` の依存方向ルールで
+    `internal/platform/httpserver` は **許可**となっており、middleware.go が
+    `httpserver.AuthClaims` / `httpserver.WithAuthClaims` を import するのは依存方向ルールに
+    準拠する（task 1.3 で `AuthClaims` を public 化した目的そのもの）。逆方向（httpserver →
+    auth）は禁止であり、`grep -rn "internal/auth" internal/platform/httpserver/` で auth
+    package の import が無いことを確認済み（既存 doc comment 内の散文言及のみ）。
+  - **機密値非埋込契約の二重防御**: `log.Warn` の field 値に出力するのは
+    `failure_kind` / `console` / `session_hash_prefix` の 3 種のみ（生 token / 鍵 / cookie
+    生値は文字列補間しない / NFR 1.1）。`errors.WriteHTTP` の response body にも message
+    のみで cookie 生値・MAC 鍵を含めない（Service 側の error wrap で既に守られている前提に
+    依存する形）。テスト `TestMiddleware_FailurePaths_DoNotLeakSensitiveValues` で
+    response body / log field 値の双方で `testMWRawSessionToken` / `testMWStateMACSecret` が
+    含まれないことを assertion し、一次防御の回帰耐性を確保した（NFR 1.1 / NFR 4.2）。
+- **残存課題**:
+  - 後続 task 6.2 `backend/internal/platform/httpserver/server.go` で `NewServer` シグネチャを
+    拡張し、`authMWTenant func(http.Handler) http.Handler` / `authMWAdmin func(http.Handler)
+    http.Handler` / `authMount func(r chi.Router, consolePrefix string, console oidc.Console)`
+    の 3 引数を受け取れるようにする。`apiRouter` の `Use(...)` チェーンに `authMWTenant`、
+    `adminRouter` の `Use(...)` チェーンに `authMWAdmin` を `TenantContextMiddleware` の前段
+    として挿入する。本 task の `NewMiddleware` は **`expectedConsole` ごとに 2 度呼び出す**
+    形で 2 インスタンスを構築する責務を bootstrap 側に持たせる（Req 6.2 / 6.3 の物理的分離強制）。
+  - 後続 task 6.3 `backend/cmd/api/main.go` bootstrap で
+    `authMWTenant := auth.NewMiddleware(svc, oidc.ConsoleTenant, log, auth.SystemClock{})` /
+    `authMWAdmin := auth.NewMiddleware(svc, oidc.ConsoleAdmin, log, auth.SystemClock{})` を
+    構築し、`httpserver.NewServer(cfg, log, pool, authMWTenant, authMWAdmin, authMount)` に
+    注入する経路を組む。
+  - 後続 task 6.4 の integration test（`auth_session_lookup_test.go` 等）で実 DB + 実 Service +
+    実 Middleware を end-to-end で経由するシナリオを実施する。本 task の middleware test は
+    fake Service 経由の境界網羅に閉じ、`LookupAndRefresh` 内部の console 照合経路の正しさは
+    service_test.go 側で担保している（責務 1 件のテスト構造を維持）。
+  - 確認事項: 本 task では `LookupAndRefresh` の 2 番目の戻り値 `Session` を **middleware で
+    は使わない**設計とした（identity だけで AuthClaims を構築できるため）。将来 `session.IssuedAt` /
+    `session.LastSeenAt` を access log に出力する観測性改善が必要になった場合は、ctx に
+    `session` も注入する設計を再検討する余地がある（本 task 範囲外）。
+
+### Task 6.1 — Verify 実行結果
+
+- `cd backend && go build ./...`: PASS
+- `cd backend && go vet ./...`: PASS
+- `cd backend && go test ./... -count=1`: 全 package PASS（`internal/auth` で Middleware 関連
+  9 テスト関数 + sub-test 3 件、計 12 ケース全 PASS / 既存 auth テスト全件 regression なし /
+  `internal/platform/httpserver` / `internal/platform/oidc` 等の影響範囲も全件 PASS / 約 4 秒）
+- DB-backed verify: 本 task は Middleware 単体（fake Service / httptest）で完結し、DB を
+  要求しない。実 Service + 実 DB を経由した e2e 検証は後続 task 6.4 の
+  `auth_session_lookup_test.go` 等で実施される予定（tasks.md L716〜L750 の DB-backed verify 義務）。
+- 実行日時: 2026-06-26
+
 ## 確認事項
 
 本セクションは `requirements.md` / `design.md` / `tasks.md` 本文の書き換えを伴わずに、実装フェーズ
