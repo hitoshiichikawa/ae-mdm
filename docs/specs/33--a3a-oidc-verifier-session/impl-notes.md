@@ -1082,6 +1082,124 @@ learning を `### Task <id>` 単位で追記する。`docs/specs/33--a3a-oidc-ve
   `auth_login_callback_test.go` 等で実施される予定（tasks.md L716〜L750 の DB-backed verify 義務）。
 - 実行日時: 2026-06-26
 
+### Task 6.4
+
+- **採用方針**: `backend/test/integration/{auth_e2e_helpers_test.go, auth_login_callback_test.go,
+  auth_session_lookup_test.go, auth_logout_revoke_test.go}` の 4 ファイルを新規追加。
+  共通 helper（mock OIDC IdP + fakeClock + recordingLogger + e2eAuthStack + 認証付き HTTP
+  server 構築）を `auth_e2e_helpers_test.go` に集約し、3 シナリオファイルから再利用する形に
+  整理した。mock IdP は `httptest.NewServer` で discovery / JWKS / token endpoint を提供し、
+  test 側が `idp.setNextToken(e2eTokenResponse{...})` で「次の callback で IdP が返す
+  id_token の subject / aud / nonce / email / 署名鍵」を制御することで、Verifier → Service →
+  Repository → Middleware の全層を実 DB / 実 auth 配線で end-to-end 駆動できる構造を確立した。
+- **重要な判断**:
+  - **共通 helper を `auth_e2e_helpers_test.go` に分離**: tasks.md L716〜L750 が 3 ファイル
+    （login_callback / session_lookup / logout_revoke）を明示するが、mock IdP + fakeClock +
+    recordingLogger + auth stack 構築は 3 ファイル全てに共通のため、`_test.go` 命名規約上の
+    制約に従いつつ helper ファイルに分離した（Go test の package 内 helper 共有 / 既存
+    `helpers_test.go` も同パターン）。tasks.md の「3 ファイル」指定はテスト本体の責務分割
+    観点を意図しており、補助 helper の分離はその意図を損なわない（4 ファイル目は test 本体を
+    含まない / 既存 `helpers_test.go` との並列）。
+  - **token endpoint mock の設計を「次の 1 回」固定型にした理由**: callback シナリオは 1
+    request あたり token endpoint hit が 1 回（state replay の 2 回目は state nonce 消費前に
+    弾かれるので 0 回）に固定でき、queue 型より状態管理が単純になる。複数 sub-test が並列
+    実行されると干渉するリスクがあるが、各 test 関数が独自 IdP server を起動するため隔離
+    される。state replay test (f) では `setNextToken` を 2 回呼んで「2 回目も IdP は正常応答
+    する前提」を満たした上で Repository 側の UNIQUE 制約で弾かれることを assert する。
+  - **`OIDCTenantIssuerURL == OIDCAdminIssuerURL` 構成での test**: mock IdP は 1 つだけ
+    起動し、tenant / admin の issuer URL を同一に設定する（Keycloak の典型運用 / 1 realm 内
+    2 client）。aud 排他一致検証は `Claims.MatchedConsole` で確定するため、test fixture も
+    aud のみ tenant / admin client_id で切り替える。これは impl-notes task 2.1 の
+    Verifier 側「同一 issuer URL 構成への対応」と整合する。
+  - **`recordingLogger` で failure_kind field を assert**: 既存
+    `internal/logger.NewLogger` の出力先を stderr に固定すると test 出力の noise になる上、
+    field 内容の機械的検証が難しい。`logger.Logger` interface を満たす fake `recordingLogger`
+    を作り、`Warn` / `Error` の field を slice にキャプチャして `hasFailureKind` /
+    `hasFailureKindWithConsole` helper で assert する設計を採用した（NFR 4.1 の
+    failure_kind field surface を回帰的に守る）。state_invalid / invalid_aud /
+    admin_user_not_provisioned / state_replay / session_idle / session_expired /
+    console_mismatch / session_revoked / session_tamper の **9 種** の failure_kind を本
+    test 群で全て検証経路に含めることで、Service / Middleware 側の failure_kind 出力規約
+    （impl-notes task 5.1 / 6.1）を end-to-end で守る。
+  - **`fakeClock` で idle / absolute timeout の境界を test 化**: 実時刻で 31 分 / 8h+1s を待つ
+    test は実行時間が非現実的なので、`auth.Clock` interface を `fakeClock{now: ...}` で差し
+    替え、session の `last_seen_at` / `expires_at` をその基準時刻に対する相対値で seed する
+    設計を採用した。`stack.clock.Set(baseTime)` で middleware が見る「現在時刻」を制御し、
+    `seedActiveSession` で session 行を base 時刻 - 31 分 / base 時刻 - 1 秒で構築する。
+    auth.Middleware は `clock.Now()` を Service.LookupAndRefresh に渡すため、test 経路でも
+    fakeClock が一貫して効く（impl-notes task 6.3 で確立した clock DI 境界を試験的に活用）。
+  - **`seedActiveSession` は repo.Create 経由で seed**: 直接 INSERT すると pgxpool / pgx +
+    型変換の細部（`uuid.UUID` の SQL repr / `oidc.Console` の文字列化）を test に閉じ込めて
+    しまうため、本番経路と同じ `auth.NewRepository(pool).Create(...)` を使って seed する。
+    これにより本番 Repository / SuperAdmin context 確立経路の挙動と同じ前提で session 行が
+    DB に入る（NFR 2.3 の test と実装の挙動一貫性）。
+  - **`flipFirstChar` による cookie 改竄**: state cookie 改竄 (c) / session cookie 改竄 (logout
+    test の TamperedCookie) で先頭文字を別文字に置換する単純な tamper を採用。base64url
+    no-padding なので置換後も valid な base64url 文字列のままで、`state.Verify` が MAC
+    mismatch を `state_invalid` として返す経路 / `Repository.Get` が 0 行 → `session_tamper`
+    として返す経路の双方を回帰的に守る。
+  - **`probeHandler` で AuthClaims ctx 注入を end-to-end 検証**: middleware が
+    `httpserver.AuthClaims` を ctx に正しく置けたかを確認するため、protected route として
+    `/api/probe` を mount し、handler が `AuthClaimsFromContext` を読んで JSON 返却する設計
+    にした。これは impl-notes task 6.1 で middleware test に閉じていた境界を、実 Service /
+    実 Repository / 実 DB を通って ctx 注入されることまで含めて確認する（task 6.4 の e2e
+    観点）。
+  - **DB-backed verify は本 task で実施**: tasks.md L774〜L802 の指示通り、`docker run -d`
+    で postgres 16-alpine を起動 → role init script (migration_user / app_user) 適用 →
+    `INTEGRATION_TEST_DATABASE_URL` / `INTEGRATION_TEST_MIGRATE_URL` 環境変数を指定して
+    `go test ./test/integration/...` を実行し、全 12 関数（auth_login_callback の 6 関数 +
+    auth_session_lookup の 4 関数 + auth_logout_revoke の 2 関数）が PASS することを確認
+    した（実行結果は `### Task 6.4 — Verify 実行結果` 節を参照）。本 Issue の主要リスク
+    （migrations / RLS / repository UNIQUE 違反マッピング / e2e callback フロー）を DB 接続
+    経由で網羅できた。
+- **残存課題**:
+  - 後続 task 7.1 `docs/runbook/local-dev.md` で OIDC 認証フロー検証手順を追記する際、本
+    test の起動手順（`docker run` ベース / `make db-init-roles` ベース / docker compose
+    ベースの 3 経路）を runbook で参照可能にする。本 task の verify 実行は `docker run -d`
+    + 手動 psql 適用ベースの最小経路で実施したが、本番ローカル運用では `make db-init-roles`
+    + `make migrate-up` 経路が推奨される。
+  - **session_revoked シナリオの test 化**: logout 後の cookie 再提示 → 401 +
+    `failure_kind=session_revoked` を `auth_logout_revoke_test.go` の
+    `TestAuthLogout_RevokesSession_AndRePresentationReturns401` で検証している（tasks.md
+    L744 の Req 5.1 / 5.3）。本 test は session_revoked と revoked_at セットの両方を確認する
+    複合シナリオで、Service.LookupAndRefresh の失効判定順序（console → absolute → revoked →
+    idle / impl-notes task 5.1）に従って revoked 経路が反応することを e2e で守る。
+  - 確認事項: 本 task では `setNextToken` のリセット忘れに依る test 間の hidden state
+    リーク を防ぐため、各 test が `setupCallbackFixture` / `setupLookupFixture` /
+    `setupLogoutFixture` で **完全に独立した** mock IdP を起動する形に固定した。並列実行
+    （`go test -parallel`）でも IdP server は test ごとに独立しているため干渉しないが、
+    sub-test 化（`t.Run`）して 1 IdP を共有する形に拡張する場合は token endpoint mock に
+    queue / FIFO ロジックを足す必要がある（本 task では避けた / 必要があれば後続 Issue で扱う）。
+  - 確認事項: `extractQuery` helper で `net/url.Parse` + `Query().Get` を使い手書きの
+    percent decoding を避けた（NFR 2.3 / 標準 lib に委譲）。これは task 6.4 で初期に
+    add した独自 `parseQueryEscape` 等を refactor で除去した結果で、test の保守容易性を
+    優先した判断。
+
+### Task 6.4 — Verify 実行結果
+
+- `cd backend && go build ./...`: PASS
+- `cd backend && go vet ./...`: PASS
+- `cd backend && go test ./... -count=1`: 全 package PASS（既存 unit test + 新規 integration
+  test を DB 不在で skip 経路で実行 / 約 5 秒）
+- DB-backed verify:
+  - 環境: `docker run --rm -d --name ae-mdm-postgres-task-6-4 -e POSTGRES_USER=ae_mdm -e
+    POSTGRES_PASSWORD=test_task_6_4 -e POSTGRES_DB=ae_mdm -p 15434:5432 postgres:16-alpine`
+    で標準 postgres 16-alpine を起動 + `cat backend/db/roles/0001_create_app_and_migration_roles.sql
+    | sed 's/<REPLACE_ME_MIGRATION_PASSWORD>/migration_pass/; s/<REPLACE_ME_APP_PASSWORD>/app_pass/'
+    | docker exec -i ae-mdm-postgres-task-6-4 psql -U ae_mdm -d ae_mdm -v ON_ERROR_STOP=1` で
+    migration_user / app_user 作成
+  - コマンド: `INTEGRATION_TEST_DATABASE_URL="postgres://app_user:app_pass@localhost:15434/ae_mdm?sslmode=disable"
+    INTEGRATION_TEST_MIGRATE_URL="postgres://migration_user:migration_pass@localhost:15434/ae_mdm?sslmode=disable"
+    go test ./test/integration/... -count=1 -v` を実行
+  - 実行結果: **PASS**（auth_login_callback の 6 関数 + auth_session_lookup の 4 関数 +
+    auth_logout_revoke の 2 関数 = 計 12 関数すべて PASS + 既存 auth_repository_test の 8 関数
+    + db_tenant_isolation 系 + http_subrouter_mount 系 + migrations_reversible_test 系も
+    全 PASS / 約 7.5 秒 / migration up は 0001〜0015 まで一括適用 / state_nonces / sessions の
+    新 column / admin_users の `(oidc_issuer, oidc_subject)` 複合 UNIQUE / state_nonces の
+    SuperAdmin-only RLS / pgerrcode UNIQUE violation → state_replay マッピング / state cookie
+    削除 / session cookie 削除 / cross-console reject / revoked_at セット の全観点を e2e で網羅）
+- 実行日時: 2026-06-26
+
 ## 確認事項
 
 本セクションは `requirements.md` / `design.md` / `tasks.md` 本文の書き換えを伴わずに、実装フェーズ
