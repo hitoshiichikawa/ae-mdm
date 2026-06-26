@@ -335,7 +335,7 @@
   - _Depends: 1.1_
 
 - [x] 4. auth.Repository（sessions / admin_users CRUD）
-- [ ] 4.1 Repository 実装 + integration テスト
+- [x] 4.1 Repository 実装 + integration テスト
   - `backend/internal/auth/repository.go` を新規追加。`Repository` interface
     （**`ConsumeStateNonce(ctx, nonce, console, expiresAt)`** /
     **`ResolveAdminUser(ctx, issuer, subject, email, console)`** /
