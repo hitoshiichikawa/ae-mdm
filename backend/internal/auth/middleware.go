@@ -55,7 +55,7 @@ func NewMiddleware(svc Service, expectedConsole oidc.Console, log logger.Logger,
 			rawToken := c.Value
 
 			// 2. Service.LookupAndRefresh: console 照合 → absolute → revoked → idle の順で判定
-			identity, _, err := svc.LookupAndRefresh(r.Context(), rawToken, expectedConsole, clock.Now())
+			identity, session, err := svc.LookupAndRefresh(r.Context(), rawToken, expectedConsole, clock.Now())
 			if err != nil {
 				// failure_kind は err の Cause チェーンから抽出（Service が wrap 済み）
 				kind := extractFailureKind(err)
@@ -67,11 +67,15 @@ func NewMiddleware(svc Service, expectedConsole oidc.Console, log logger.Logger,
 			}
 
 			// 3. 成功 → AuthClaims を ctx に注入して next に進める
+			//    Issue #37: Console を AuthClaims に転記し、`/api/admin/*` ガードが audience
+			//    判定に使えるようにする（Req 6.2 / 2.1）。Session.Console は Service が
+			//    console_mismatch で reject 済みなので expectedConsole と一致している。
 			claims := httpserver.AuthClaims{
 				TenantID:     identity.TenantID,
 				AdminUserID:  identity.AdminUserID,
 				Roles:        append([]string(nil), identity.Roles...),
 				IsSuperAdmin: identity.IsSuperAdmin,
+				Console:      string(session.Console),
 			}
 			ctx := httpserver.WithAuthClaims(r.Context(), claims)
 			next.ServeHTTP(w, r.WithContext(ctx))

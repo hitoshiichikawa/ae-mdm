@@ -55,7 +55,13 @@ func RequestIDFromContext(ctx context.Context) string {
 // （`backend/internal/auth`）から `httpserver.WithAuthClaims(ctx, AuthClaims{...})` で
 // claims を注入できるよう、本型および関連 helper は public シンボルとして公開する
 // （A2 では同型が private（`authClaims`）であり、test 用にのみ内部 helper が露出していた）。
-// フィールド構成は不変（TenantID / AdminUserID / Roles / IsSuperAdmin）。
+//
+// Issue #37（RBAC Authorizer / A3b）で `Console` フィールドを追加した。本フィールドは
+// `internal/platform/oidc.Console` の文字列表現（"tenant-console" / "admin-console"）を
+// 保持する。oidc パッケージへの逆依存を避けるため string 型で受け、呼び出し側で型変換
+// する。zero value（空文字）は本 Issue 以前の auth middleware が注入した legacy claims を
+// 表し、`/api/admin/*` ガード（RequireAdminConsoleAndSuperAdmin）は空文字を
+// audience 不一致として 403 で reject する fail-closed 経路に倒れる。
 //
 // TenantContextMiddleware は claims が ctx に存在しない場合に **default deny** で 401 を
 // 返し、存在する場合のみ TenantContext を組み立てて next chain に進める入力契約を持つ
@@ -65,6 +71,9 @@ type AuthClaims struct {
 	AdminUserID  uuid.UUID
 	Roles        []string
 	IsSuperAdmin bool
+	// Console は OIDC ID トークンの aud から判別したコンソール種別を string で持つ
+	// （"tenant-console" / "admin-console" のいずれか）。Issue #37 で追加。
+	Console string
 }
 
 // authClaimsCtxKey は AuthClaims を request context に格納する private な key 型。
