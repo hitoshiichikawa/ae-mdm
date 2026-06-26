@@ -550,6 +550,32 @@ learning を `### Task <id>` 単位で追記する。`docs/specs/33--a3a-oidc-ve
     Get_HashMismatch_SessionTamper 1 関数 / ConsumeStateNonce 3 関数）
   - 実行日時: 2026-06-26
 
+### Task 5
+
+- **採用方針**: タスク `5` は umbrella header（`_Requirements:_` / `_Boundary:_` を持たない親 task）
+  であり、本起動では直接の実装は無く、子 task 5.1（auth.Service 4 ユースケース + 単体テスト）/
+  5.2（auth.Handler HTTP 6 endpoints + httptest 単体テスト）が後続 fresh iteration で順次実装
+  される前提として `## Implementation Notes` 構造のみ整備する（先行する `### Task 1` /
+  `### Task 2` / `### Task 3` / `### Task 4` の umbrella 処理パターンを踏襲）。
+- **重要な判断**:
+  - 親 task は `tasks.md` 上で `### Task 5` の learning スロットを成立させるためのプレースホルダ
+    に留め、`backend/internal/auth/{service.go, handler.go}` 等のコード追加・テスト追加は本
+    iteration では行わない（実装本体は 5.1 / 5.2 の fresh iteration が担当する設計 /
+    `### Task 1` / `### Task 2` / `### Task 3` / `### Task 4` と同パターン）。
+  - per-task ループ規約「1 commit = 1 task ID」に従い、本 iteration の marker commit は
+    `docs(tasks): mark 5 as done` 単一の subject で `tasks.md` のみを含める。impl-notes.md への
+    `### Task 5` 追加は marker commit と分離した別 commit に積む。
+- **残存課題**: 子 task 5.1（`backend/internal/auth/service.go` の新規追加、`Service` interface
+  `BeginLogin` / `HandleCallback` / `LookupAndRefresh` / `Logout` の 4 ユースケース実装、
+  `returnTo` 正規化 + `Nonce` / `OIDCNonce` 独立 16 byte 生成 + state cookie 発行 +
+  `ConsumeStateNonce` を token 交換**前**に実行する replay 防御 + OIDC nonce 一致確認 +
+  `ResolveAdminUser` 403 マッピング + idle / absolute timeout 判定 + Logout 経路）/ 5.2
+  （`backend/internal/auth/handler.go` の新規追加、HTTP 6 endpoints `GET /api/auth/login` /
+  `GET /api/auth/callback` / `GET /api/auth/me` / `POST /api/auth/logout` + tenant / admin
+  console の 2 系統対応 + httptest による单体テスト + Service interface のモック注入）は
+  後続 fresh iteration で消化する。子 task 全完了時の親 task `5` の昇格は本 iteration で
+  完了済みのため、auto-promotion 規約は no-op として扱う。
+
 ## 確認事項
 
 本セクションは `requirements.md` / `design.md` / `tasks.md` 本文の書き換えを伴わずに、実装フェーズ
