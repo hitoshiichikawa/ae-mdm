@@ -16,7 +16,7 @@
 //   - 許可: github.com/hitoshiichikawa/ae-mdm/internal/config
 //   - 禁止: 上位 application / cmd / 他 domain への直接 import
 //
-// # 構成（task 5.2 時点）
+// # 構成（task 6.1 時点）
 //
 //   - types.go                       : Identity / Session のドメイン型
 //   - clock.go                       : Clock interface と SystemClock 実装（DI 境界）
@@ -52,6 +52,16 @@
 //   - handler_test.go                : Handler の httptest 単体テスト（fake Service 経由で
 //     login 302 / callback 302+cookie / state mismatch 401 / code/state 欠落 400 /
 //     logout 204+cookie 不在 401 を tenant + admin 両系統で網羅）。
+//   - middleware.go                  : Auth Middleware（`NewMiddleware(svc, expectedConsole,
+//     log, clock)`）。session cookie lookup + console 照合 + 失効時 cookie 削除 + ctx への
+//     `httpserver.AuthClaims` 注入を担う。`expectedConsole` を closure に固定することで
+//     tenant 系 / admin 系の 2 インスタンスを構築し、漏洩した tenant cookie が admin route に
+//     提示された場合に Service 側で `console_mismatch` で即拒否される経路（Req 6.2 / 6.3）を
+//     物理的に成立させる。失効時の cookie 削除には `SessionExpireCookieAttributes()`（session
+//     用）を必ず使い、`ExpireCookieAttributes()`（state 用）と取り違えない命名規約を継承。
+//   - middleware_test.go             : Middleware の単体テスト（fake Service + httptest 経由で
+//     cookie 不在 / session_idle / session_expired / session_revoked / session_tamper /
+//     console_mismatch / 成功時の AuthClaims ctx 注入 / next 到達 / 機密値非埋込 を網羅）。
 //
 // # 機密値の非埋込契約
 //
