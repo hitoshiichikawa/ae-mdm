@@ -750,7 +750,7 @@
   - _Boundary: AuthService, AuthHandler, AuthMiddleware, AuthRepository, OIDCVerifier, HTTPServer_
   - _Depends: 6.3_
 
-- [ ] 7. ドキュメント更新（runbook / impl-notes）
+- [x] 7. ドキュメント更新（runbook / impl-notes）
 - [ ] 7.1 runbook / impl-notes の認証配線手順を追記
   - `docs/runbook/local-dev.md`（A2 で新規追加済み）に「OIDC 認証フロー検証手順」節を追加。
     Keycloak realm export（`infra/keycloak/realm-export.json`、umbrella task 1.2 で作成
