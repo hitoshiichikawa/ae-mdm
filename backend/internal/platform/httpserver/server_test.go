@@ -133,8 +133,8 @@ func TestServer_AdminWithoutAuth_Returns401(t *testing.T) {
 
 // TestServer_AdminWithTenantContextNotSuperAdmin_Returns403 はテスト (e) 対応。
 // auth スタブ経由で TenantContext を put した状態（IsSuperAdmin=false）で
-// `/api/admin/*` に到達した場合、TenantContextMiddleware は通過し RequireSuperAdmin が
-// 403 を返すことを確認する。
+// `/api/admin/*` に到達した場合、TenantContextMiddleware は通過し
+// RequireAdminConsoleAndSuperAdmin が 403 を返すことを確認する（Issue #37 / Req 2.5）。
 //
 // 本テストでは [WithAuthClaims] で claims を ctx に注入し、
 // TenantContextMiddleware を通過させる経路を成立させる。
@@ -148,6 +148,7 @@ func TestServer_AdminWithTenantContextNotSuperAdmin_Returns403(t *testing.T) {
 		AdminUserID:  uuid.New(),
 		Roles:        []string{"TenantAdmin"},
 		IsSuperAdmin: false,
+		Console:      "admin-console", // Issue #37: admin chain の本ガードが Console も見るため明示
 	}))
 
 	// Act
@@ -178,6 +179,7 @@ func TestServer_AdminWithSuperAdminTenantContext_ReachesMountedHandler(t *testin
 		AdminUserID:  uuid.New(),
 		Roles:        []string{"SuperAdmin"},
 		IsSuperAdmin: true,
+		Console:      "admin-console", // Issue #37: admin chain は audience も判定する
 	}))
 
 	// Act
