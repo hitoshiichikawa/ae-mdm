@@ -181,6 +181,7 @@ func loadFrom(get envGetter) (Config, error) {
 		cfg.MigrateDatabaseURL = cfg.DatabaseURL
 	}
 	optionalStr("PUBSUB_EMULATOR_HOST", &cfg.PubSubEmulatorHost, "")
+	optionalStr("PUBSUB_DEAD_LETTER_TOPIC", &cfg.PubSubDeadLetterTopic, "")
 	intWithDefault("AUDIT_LOG_RETENTION_DAYS", &cfg.AuditLogRetentionDays, defaultAuditLogRetentionDays)
 	intWithDefault("DEVICE_SYNC_DELAY_THRESHOLD_HOURS", &cfg.DeviceSyncDelayThresholdHours, defaultDeviceSyncDelayThresholdHours)
 	optionalStr("LOG_LEVEL", &cfg.LogLevel, defaultLogLevel)

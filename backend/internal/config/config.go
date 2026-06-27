@@ -41,6 +41,10 @@ type Config struct {
 	PubSubTopic        string
 	PubSubSubscription string
 	PubSubEmulatorHost string // optional: 本番では空文字
+	// PubSubDeadLetterTopic は処理不能メッセージの送出先 dead-letter topic 名（optional）。
+	// 未設定（空文字）の場合、dead-letter 送出 IF は構造化エラーを返して当該メッセージを
+	// ack しない（Issue #35 requirements 5.4。送出先が無いまま喪失することを防ぐ）。
+	PubSubDeadLetterTopic string
 
 	// AMAPI（Android Management API）
 	AMAPIProjectID               string

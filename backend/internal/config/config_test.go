@@ -268,6 +268,44 @@ func TestLoad_OverridesDefaults_WhenOptionalEnvSet(t *testing.T) {
 	}
 }
 
+// TestLoad_PubSubDeadLetterTopic_OptionalDefaultEmpty は Issue #35 の新規 optional config を検証する。
+// 未設定なら default ""、設定なら値が読み込まれること（requirements 5.4 の前提となる設定源）。
+func TestLoad_PubSubDeadLetterTopic_OptionalDefaultEmpty(t *testing.T) {
+	t.Run("未設定なら空文字", func(t *testing.T) {
+		// Arrange
+		env := validEnv()
+		delete(env, "PUBSUB_DEAD_LETTER_TOPIC")
+
+		// Act
+		cfg, err := loadFrom(envGetterFromMap(env))
+
+		// Assert
+		if err != nil {
+			t.Fatalf("loadFrom returned error: %v", err)
+		}
+		if cfg.PubSubDeadLetterTopic != "" {
+			t.Errorf("PubSubDeadLetterTopic = %q, want empty string", cfg.PubSubDeadLetterTopic)
+		}
+	})
+
+	t.Run("設定値が読み込まれる", func(t *testing.T) {
+		// Arrange
+		env := validEnv()
+		env["PUBSUB_DEAD_LETTER_TOPIC"] = "amapi-notifications-deadletter"
+
+		// Act
+		cfg, err := loadFrom(envGetterFromMap(env))
+
+		// Assert
+		if err != nil {
+			t.Fatalf("loadFrom returned error: %v", err)
+		}
+		if cfg.PubSubDeadLetterTopic != "amapi-notifications-deadletter" {
+			t.Errorf("PubSubDeadLetterTopic = %q, want amapi-notifications-deadletter", cfg.PubSubDeadLetterTopic)
+		}
+	})
+}
+
 // TestLoad_FromOSEnv_Smoke は os.LookupEnv を使う公開 API Load を t.Setenv で動かす smoke test。
 // 主要な分岐は loadFrom テストで検証済みのため、ここでは Load -> loadFrom の配線確認のみ。
 func TestLoad_FromOSEnv_Smoke(t *testing.T) {
