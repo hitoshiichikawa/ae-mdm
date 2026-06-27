@@ -12,8 +12,10 @@ const (
 	MaxAppCount = 3000
 
 	// MinPasswordLength はパスワード最小桁数の許容下限。
-	// AMAPI passwordMinimumLength（PasswordRequirements）の妥当範囲 1〜16 に整合させた下限。
-	MinPasswordLength = 1
+	// AMAPI passwordMinimumLength（PasswordRequirements）は SDK v0.186.0 の field doc
+	// （"A value of 0 means there is no restriction."）の通り 0 を「制限なし」を表す
+	// 有効値として扱う。したがって下限は 0 とし、0 を受理して負値のみを範囲外として拒否する。
+	MinPasswordLength = 0
 	// MaxPasswordLength はパスワード最小桁数の許容上限（AMAPI passwordMinimumLength の上限 16）。
 	MaxPasswordLength = 16
 
@@ -137,7 +139,7 @@ func checkPasswordLength(in PolicyInput, result *ValidationResult) {
 			Domain:  DomainPassword,
 			Field:   "MinimumLength",
 			Kind:    KindInvalidField,
-			Message: "パスワード最小桁数が許容範囲（1〜16）外です",
+			Message: "パスワード最小桁数が許容範囲（0〜16）外です",
 		})
 	}
 }

@@ -82,7 +82,8 @@ type AppPolicy struct {
 // 最小桁数を保持する。
 type PasswordPolicy struct {
 	// MinimumLength はパスワード最小桁数。許容範囲は
-	// [MinPasswordLength, MaxPasswordLength]（AMAPI passwordMinimumLength の 1〜16）。
+	// [MinPasswordLength, MaxPasswordLength]（AMAPI passwordMinimumLength の 0〜16。
+	// 0 は AMAPI 仕様上「制限なし」を表す有効値）。
 	MinimumLength int
 }
 

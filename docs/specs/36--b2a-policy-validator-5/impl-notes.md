@@ -18,10 +18,13 @@
 
 ## Open Questions の確定値と根拠
 
-1. **パスワード最小桁数の許容範囲**: `MinPasswordLength=1` / `MaxPasswordLength=16`
-   （`validator.go`）。AMAPI `PasswordRequirements.passwordMinimumLength` の妥当範囲（1〜16）に
-   整合させた保守的なデフォルト。WebSearch 不可のため一次情報の再確認はできず、requirements.md が
-   許容する「合理的なデフォルト」として採用（後述「確認事項」参照）。
+1. **パスワード最小桁数の許容範囲**: `MinPasswordLength=0` / `MaxPasswordLength=16`
+   （`validator.go`）。同梱 AMAPI SDK（`google.golang.org/api@v0.186.0`
+   `androidmanagement/v1` `PasswordRequirements.PasswordMinimumLength`）の field doc
+   "The minimum allowed password length. A value of 0 means there is no restriction." を
+   一次情報として確認し、`0` を「制限なし」を表す有効値として受理する下限 0 を採用。負値のみを
+   範囲外として拒否する。上限 16 は AMAPI 公式 schema に明示上限が無いためアプリ層の保守的
+   上限として据え置き（requirements.md Open Question の latitude 内 / Policy Service 統合時に再確認）。
 2. **セキュリティ領域の検証フィールド**:
    - 必須 + enum: `EncryptionPolicy`（AMAPI `encryptionPolicy` 相当。許容値
      `ENABLED_WITHOUT_PASSWORD` / `ENABLED_WITH_PASSWORD`）。空文字を欠落として拒否（Req 3.2）。
@@ -35,7 +38,7 @@
 | AC | 担保テスト |
 |---|---|
 | Req 1.1/1.2/1.3/1.4 | `TestValidate_App_CountLimit`（0/1/2999/3000=受理, 3001=拒否+business rule） |
-| Req 2.1/2.2/2.3/2.4 | `TestValidate_Password_LengthRange`（8=受理, 0/-1/17=拒否, 1/16=境界受理） |
+| Req 2.1/2.2/2.3/2.4 | `TestValidate_Password_LengthRange`（8/1=受理, -1/-5/17=拒否, 0=境界下受理(AMAPI 制限なし)/16=境界上受理） |
 | Req 3.1/3.2/3.3 | `TestValidate_Security_RequiredAndEnum`（充足受理 / 欠落・許容値外拒否） |
 | Req 4.1/4.2/4.3 | `TestValidate_SystemUpdate_RequiredAndRange`（受理 / 欠落・enum外・範囲外拒否） |
 | Req 5.1/5.2/5.3/5.4 | `TestValidate_Kiosk_PackageNameFormat`（妥当受理 / 1seg・数字始まり・ハイフン・末尾dot・空文字拒否） |
@@ -60,10 +63,12 @@
 
 ## 確認事項
 
-- パスワード桁数の許容範囲（1〜16）と各領域の enum 許容値集合は、本エージェントが WebSearch/WebFetch
-  を使えないため AMAPI 公式仕様の一次確認ができていない。保守的なデフォルトとして採用したが、
-  Policy Service 統合時（task 8.2）に AMAPI 公式 schema と突き合わせて確定値を再確認することを推奨。
-  値は `validator.go` の定数 / `allowed*` map に集約しており、変更は局所的に可能。
+- パスワード桁数の **下限** は同梱 AMAPI SDK（`google.golang.org/api@v0.186.0`）の
+  `PasswordRequirements.PasswordMinimumLength` field doc を一次情報として確認し、`0`=「制限なし」を
+  受理する下限 0 に確定した（PR #48 round 2 レビュー反映）。**上限 16** は AMAPI 公式 schema に明示
+  上限が無く、各領域の enum 許容値集合と併せて Policy Service 統合時（task 8.2）に AMAPI 公式
+  schema と突き合わせて再確認することを推奨。値は `validator.go` の定数 / `allowed*` map に集約して
+  おり、変更は局所的に可能。
 - `EncryptionPolicy` の許容値に `ENCRYPTION_POLICY_UNSPECIFIED` を含めていない（明示指定を必須と
   みなす保守的判断）。AMAPI 仕様で UNSPECIFIED を有効値として扱う場合は `allowedEncryptionPolicies`
   への追加で対応可能。

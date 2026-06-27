@@ -69,12 +69,14 @@ func TestValidate_Password_LengthRange(t *testing.T) {
 		// Req 2.1: 許容範囲内を受理
 		{name: "桁数が範囲中央(8)のとき受理する(Req2.1 正常系)", length: 8, wantReject: false},
 		// Req 2.4: 下限直下 / 下限ちょうど / 上限ちょうど / 上限直上
-		{name: "桁数が下限直下(0)のとき範囲外で拒否する(Req2.2/2.4 境界下異常)", length: 0, wantReject: true},
-		{name: "桁数が下限ちょうど(1)のとき受理する(Req2.4 境界下)", length: 1, wantReject: false},
+		// AMAPI passwordMinimumLength 仕様で 0 は「制限なし」を表す有効値のため、下限は 0。
+		{name: "桁数が下限ちょうど(0=制限なし)のとき受理する(Req2.4 境界下/AMAPI 0=制限なし)", length: 0, wantReject: false},
+		{name: "桁数が下限直下(-1)のとき範囲外で拒否する(Req2.2/2.4 境界下異常)", length: -1, wantReject: true},
+		{name: "桁数が範囲内(1)のとき受理する(Req2.1 正常系)", length: 1, wantReject: false},
 		{name: "桁数が上限ちょうど(16)のとき受理する(Req2.4 境界上)", length: 16, wantReject: false},
 		{name: "桁数が上限直上(17)のとき範囲外で拒否する(Req2.3/2.4 境界上異常)", length: 17, wantReject: true},
-		// Req 2.2: 負値も下限未満として拒否
-		{name: "桁数が負値(-1)のとき範囲外で拒否する(Req2.2 異常系)", length: -1, wantReject: true},
+		// Req 2.2: 下限を更に下回る負値も範囲外として拒否
+		{name: "桁数が負値(-5)のとき範囲外で拒否する(Req2.2 異常系)", length: -5, wantReject: true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -331,7 +333,7 @@ func TestValidate_CollectsAllErrors(t *testing.T) {
 	// security 必須欠落 / kiosk 形式不正）
 	in := PolicyInput{
 		App:          &AppPolicy{AppCount: 3001},
-		Password:     &PasswordPolicy{MinimumLength: 0},
+		Password:     &PasswordPolicy{MinimumLength: -1}, // 範囲外（0 は AMAPI 仕様で「制限なし」の有効値のため -1 を使う）
 		Security:     &SecurityPolicy{EncryptionPolicy: ""},
 		SystemUpdate: &SystemUpdatePolicy{Type: "AUTOMATIC"}, // 妥当（収集対象外）
 		Kiosk:        &KioskPolicy{PackageNames: []string{"invalid"}},
@@ -425,7 +427,7 @@ func TestValidate_Deterministic(t *testing.T) {
 	in := PolicyInput{
 		App:      &AppPolicy{AppCount: 3001},
 		Kiosk:    &KioskPolicy{PackageNames: []string{"bad", "com.ok"}},
-		Password: &PasswordPolicy{MinimumLength: 0},
+		Password: &PasswordPolicy{MinimumLength: -1}, // 範囲外（0 は AMAPI 仕様で「制限なし」の有効値のため -1 を使う）
 	}
 
 	// Act: 2 回呼び出す
