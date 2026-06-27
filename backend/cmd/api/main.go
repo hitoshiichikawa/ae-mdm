@@ -31,9 +31,11 @@ import (
 	"github.com/hitoshiichikawa/ae-mdm/internal/auth"
 	"github.com/hitoshiichikawa/ae-mdm/internal/config"
 	"github.com/hitoshiichikawa/ae-mdm/internal/logger"
+	"github.com/hitoshiichikawa/ae-mdm/internal/platform/amapi"
 	"github.com/hitoshiichikawa/ae-mdm/internal/platform/db"
 	"github.com/hitoshiichikawa/ae-mdm/internal/platform/httpserver"
 	"github.com/hitoshiichikawa/ae-mdm/internal/platform/oidc"
+	"github.com/hitoshiichikawa/ae-mdm/internal/tenant"
 )
 
 const (
@@ -97,7 +99,9 @@ func healthcheckURL(listenAddr string) string {
 //     auth.NewMiddleware(...) を構築（Req 6.2 / 6.3 の物理分離強制）
 //  6. httpserver.NewServer(cfg, log, pool, authMWTenant, authMWAdmin, authMount) …
 //     2 サブルータ mount + auth エンドポイント mount
-//  7. ListenAndServe goroutine + signal.NotifyContext で graceful shutdown
+//  7. tenant domain（Repository / Service / Handler）の DI 配線 +
+//     Routers.Admin への `/tenants` Mount（Issue #38 / A4b）
+//  8. ListenAndServe goroutine + signal.NotifyContext で graceful shutdown
 //
 // いずれかの初期化失敗で exit code 1 + 構造化 ERROR ログを出す（NFR 3.1 / 3.2）。
 // pool は defer で Close する（shutdown 順序: HTTP server.Shutdown → pool.Close）。
@@ -175,7 +179,10 @@ func runBootstrap(ctx context.Context) int {
 	}
 
 	// (6) http server
-	srv, _, err := httpserver.NewServer(cfg, log, pool, authMWTenant, authMWAdmin, authMount)
+	//
+	// 戻り値 routers（`Routers.Admin` = /api/admin 配下）を受け取り、後段 (7) で tenant domain の
+	// Handler を Mount する公開ポイントとして使う。
+	srv, routers, err := httpserver.NewServer(cfg, log, pool, authMWTenant, authMWAdmin, authMount)
 	if err != nil {
 		log.Error("ae-mdm api: httpserver.NewServer failed",
 			logger.Err(err),
@@ -183,7 +190,30 @@ func runBootstrap(ctx context.Context) int {
 		return 1
 	}
 
-	// (7) ListenAndServe + graceful shutdown
+	// (7) tenant domain（A4b / Issue #38）の DI 配線 + Mount
+	//
+	// cfg / pool / log は既存 bootstrap で構築済みのものを再利用する。Repository は pgxpool 経由で
+	// SuperAdmin context 下に tenants へアクセスし、Service は AMAPI Client（#34）と監査記録ポート
+	// （Audit Service 未実装のため interim の logger 実装）をオーケストレーションする。Handler を
+	// `routers.Admin`（/api/admin chain + RequireAdminConsoleAndSuperAdmin ガード継承）へ Mount し、
+	// `/api/admin/tenants` 配下 5 endpoint を稼働させる（Req 6.1）。
+	//
+	// AMAPI Client は service account credentials（GOOGLE_APPLICATION_CREDENTIALS / required env）
+	// から構築する。構築失敗（資格情報不正等）は他の初期化失敗と同様に exit code 1 で fail-fast する。
+	amapiClient, err := amapi.NewClient(ctx, cfg, log, nil)
+	if err != nil {
+		log.Error("ae-mdm api: amapi.NewClient failed",
+			logger.Err(err),
+		)
+		return 1
+	}
+	tenantRepo := tenant.NewRepository(pool)
+	tenantRecorder := tenant.NewLoggerRecorder(log)
+	tenantSvc := tenant.NewService(tenantRepo, amapiClient, tenantRecorder, cfg, log)
+	tenantHandler := tenant.NewHandler(tenantSvc, log)
+	tenantHandler.Mount(routers.Admin)
+
+	// (8) ListenAndServe + graceful shutdown
 	return runHTTPServer(ctx, srv, log)
 }
 
