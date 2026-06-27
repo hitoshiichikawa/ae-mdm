@@ -12,13 +12,12 @@ import (
 	"github.com/hitoshiichikawa/ae-mdm/internal/platform/amapi"
 )
 
-// Service は Tenant ライフサイクル（作成 / 参照 / 前提ガード）と状態機械の単一所有者
-// （design.md「tenant.Service」節 / tasks.md task 4.1）。
+// Service は Tenant ライフサイクル（作成 / バインド / 無効化 / 参照 / 前提ガード）と
+// 状態機械の単一所有者（design.md「tenant.Service」節 / tasks.md task 4.1 / 5.1）。
 //
-// 本 task（4）では Create / Get / List / EnterpriseNameForTenant の 4 メソッドを実装する。
-// Bind / Disable（状態機械の遷移系）は後続 task 5 で本 interface に追記・実装するため、
-// 本 task では interface に宣言しない（「task 4 では実装しない」スコープと一致させ、本番実装
-// struct にスタブを置かずに済む選択。詳細は impl-notes.md Task 4 learning 参照）。
+// Create / Get / List / EnterpriseNameForTenant（task 4）に加え、状態機械の遷移系である
+// Bind / Disable（task 5）を実装する。状態遷移は定義済み遷移のみ成功し（NFR 1.2）、未定義
+// 状態は fail-closed で拒否する。
 //
 // 主責務はユースケース単位で「前提状態判定（状態機械）→ AMAPI オーケストレーション →
 // Repository 永続化 → 監査記録」を行うこと。actor（操作実行者の admin_users.id）は Handler が
@@ -38,6 +37,35 @@ type Service interface {
 	//
 	// actor は監査イベントの実行者識別子（admin_users.id）。
 	Create(ctx context.Context, actor uuid.UUID, in CreateInput) (TenantView, SignupURL, error)
+
+	// Bind は pending_bind テナントへ Enterprise をバインドする（Req 2.x / NFR 1.3）。
+	//
+	//   - Repository.Get で現状態を取得する。pending_bind 以外は永続化も AMAPI 呼び出しも
+	//     せず拒否する: bound への再 bind は CodeConflict（Req 2.5、新規 Enterprise を作らない）、
+	//     disabled への bind は CodeBusinessRule（Req 2.6）、定義外 status は fail-closed で
+	//     CodeBusinessRule（NFR 1.2）、不在は CodeNotFound。
+	//   - pending_bind のときのみ amapi.CreateEnterprise を呼ぶ。失敗時は永続化せずエラーを
+	//     伝達し行を pending_bind に保つ（Req 2.4 / NFR 1.3）。AMAPI error は再分類しない。
+	//   - 成功時 Repository.UpdateBound で bound 確定する。affected=0 は競合とみなし CodeConflict
+	//     （Req 2.1 / 2.2 / 2.5）。
+	//   - 成否を EventRecorder.Record に渡す（Req 2.7）。拒否経路は構造化ログを出す（NFR 2.2）。
+	//
+	// actor は監査イベントの実行者識別子（admin_users.id）。
+	Bind(ctx context.Context, actor uuid.UUID, id uuid.UUID, in BindInput) (TenantView, error)
+
+	// Disable はテナントを無効化する（Req 3.x）。disabled は終端状態（再有効化遷移なし）。
+	//
+	//   - Repository.Get で対象を取得する。不在は CodeNotFound、既に disabled は二重無効化
+	//     として CodeConflict（Req 3.4）。
+	//   - 二段階確認テキスト方式（design.md API Contract）: in.Confirmation が対象 row.Name と
+	//     完全一致しなければ確認未完了として CodeBusinessRule（Req 3.2）。
+	//   - 確認 OK で Repository.UpdateDisabled する。affected=0 は二重無効化競合として CodeConflict
+	//     （Req 3.4）。
+	//   - 成否を EventRecorder.Record に渡す（成功時 ConfirmationCompleted=true / Req 3.1 / 3.3 / 3.5）。
+	//     拒否経路は構造化ログを出す（NFR 2.2）。
+	//
+	// actor は監査イベントの実行者識別子であり、無効化監査列（disabled_by）にも記録される。
+	Disable(ctx context.Context, actor uuid.UUID, id uuid.UUID, in DisableInput) (TenantView, error)
 
 	// Get は id でテナント詳細を取得し TenantView に変換する（Req 4.2）。
 	// 不在は Repository 由来の CodeNotFound を伝達する（Req 4.3）。
@@ -144,6 +172,121 @@ func (s *service) Create(ctx context.Context, actor uuid.UUID, in CreateInput) (
 		Name: signupURLName,
 	}
 	return view, su, nil
+}
+
+// Bind は Service.Bind の実装（Req 2.x / NFR 1.2 / 1.3）。
+//
+// 状態遷移は「Get で現状態確認 → pending_bind のみ CreateEnterprise → 成功時のみ条件付き
+// UpdateBound で bound 確定」の順で行い、AMAPI I/O は tx の外に置く（design.md Bind シーケンス）。
+func (s *service) Bind(ctx context.Context, actor uuid.UUID, id uuid.UUID, in BindInput) (TenantView, error) {
+	// 1. 現状態を取得（不在は CodeNotFound をそのまま伝達 → 404 / Req 4.3）。
+	row, err := s.repo.Get(ctx, id)
+	if err != nil {
+		return TenantView{}, err
+	}
+
+	// 2. 前提状態判定（状態機械）。pending_bind 以外は永続化も AMAPI も呼ばず拒否する。
+	switch row.Status {
+	case StatusPendingBind:
+		// 正常な遷移可能状態。以降の AMAPI → UpdateBound へ進む。
+	case StatusBound:
+		// bound 済みテナントへの再 bind は競合。新規 Enterprise を作らない（Req 2.5）。
+		s.logDeny(actor, id, "tenant is already bound")
+		s.record(ctx, actor, id, OperationBind, ResultFailure, false, "tenant already bound")
+		return TenantView{}, ErrConflict
+	case StatusDisabled:
+		// 無効化テナントへの bind は前提状態違反（Req 2.6）。
+		s.logDeny(actor, id, "tenant is disabled")
+		s.record(ctx, actor, id, OperationBind, ResultFailure, false, "tenant disabled")
+		return TenantView{}, ErrInvalidState
+	default:
+		// 定義外 status は fail-closed で不正状態として拒否（NFR 1.2）。
+		s.logDeny(actor, id, "tenant state is invalid")
+		s.record(ctx, actor, id, OperationBind, ResultFailure, false, "tenant state invalid")
+		return TenantView{}, ErrInvalidState
+	}
+
+	// 3. Enterprise を作成（AMAPI）。失敗時は永続化せずエラーを伝達し pending_bind を保つ
+	//    （Req 2.4 / NFR 1.3）。AMAPI 由来 error は #34 が Code 正規化済みのため再分類しない。
+	enterpriseName, err := s.amapi.CreateEnterprise(ctx, in.SignupURLName, s.cfg.AMAPIProjectID)
+	if err != nil {
+		s.record(ctx, actor, id, OperationBind, ResultFailure, false, "enterprise creation failed")
+		return TenantView{}, err
+	}
+
+	// 4. 条件付き UPDATE（WHERE status='pending_bind'）で bound 確定（Req 2.1 / 2.2）。
+	affected, err := s.repo.UpdateBound(ctx, id, enterpriseName)
+	if err != nil {
+		// 部分一意 index 違反（23505）は Repository が CodeConflict へ写像済み。そのまま伝達する。
+		s.record(ctx, actor, id, OperationBind, ResultFailure, false, "bind persistence failed")
+		return TenantView{}, err
+	}
+	if affected == 0 {
+		// 他要求との競合（既に bound 等）。新規 Enterprise を作っても行は更新されない（Req 2.5）。
+		s.logDeny(actor, id, "tenant bind conflicts with current state")
+		s.record(ctx, actor, id, OperationBind, ResultFailure, false, "bind conflict")
+		return TenantView{}, ErrConflict
+	}
+
+	// 5. バインド成功を監査記録（Req 2.7 / NFR 2.1）。
+	s.record(ctx, actor, id, OperationBind, ResultSuccess, false, "")
+
+	return TenantView{
+		ID:             id,
+		Name:           row.Name,
+		Status:         StatusBound,
+		EnterpriseName: enterpriseName,
+	}, nil
+}
+
+// Disable は Service.Disable の実装（Req 3.x）。
+//
+// 二段階確認テキスト方式で対象テナント名の再入力一致を検証し、条件付き UPDATE
+// （WHERE status!='disabled'）で disabled へ遷移させる。disabled は終端状態。
+func (s *service) Disable(ctx context.Context, actor uuid.UUID, id uuid.UUID, in DisableInput) (TenantView, error) {
+	// 1. 対象を取得（不在は CodeNotFound → 404）。確認テキスト比較のため name が必要。
+	row, err := s.repo.Get(ctx, id)
+	if err != nil {
+		return TenantView{}, err
+	}
+
+	// 2. 既に disabled なら二重無効化として拒否（Req 3.4）。disabled は終端で再遷移しない。
+	if row.Status == StatusDisabled {
+		s.logDeny(actor, id, "tenant is already disabled")
+		s.record(ctx, actor, id, OperationDisable, ResultFailure, false, "tenant already disabled")
+		return TenantView{}, ErrConflict
+	}
+
+	// 3. 二段階確認テキスト検証（対象テナント name との完全一致 / Req 3.2）。
+	//    不一致は確認未完了として拒否し、永続化しない。
+	if in.Confirmation != row.Name {
+		s.logDeny(actor, id, "two-step confirmation text does not match")
+		s.record(ctx, actor, id, OperationDisable, ResultFailure, false, "confirmation required")
+		return TenantView{}, ErrConfirmationRequired
+	}
+
+	// 4. 条件付き UPDATE（WHERE status!='disabled'）で無効化 + 監査列記録（Req 3.1）。
+	affected, err := s.repo.UpdateDisabled(ctx, id, actor)
+	if err != nil {
+		s.record(ctx, actor, id, OperationDisable, ResultFailure, true, "disable persistence failed")
+		return TenantView{}, err
+	}
+	if affected == 0 {
+		// 確認後に他要求が先に無効化した競合（二重無効化 / Req 3.4）。
+		s.logDeny(actor, id, "tenant disable conflicts with current state")
+		s.record(ctx, actor, id, OperationDisable, ResultFailure, true, "disable conflict")
+		return TenantView{}, ErrConflict
+	}
+
+	// 5. 無効化成功を監査記録（確認完了済みのため ConfirmationCompleted=true / Req 3.1 / 3.3 / 3.5）。
+	s.record(ctx, actor, id, OperationDisable, ResultSuccess, true, "")
+
+	// disabled view を返す。enterprise_name は disabled では露出しない（omitempty で省略 / Req 6.5）。
+	return TenantView{
+		ID:     id,
+		Name:   row.Name,
+		Status: StatusDisabled,
+	}, nil
 }
 
 // Get は Service.Get の実装。Repository へ委譲し TenantView へ変換する（Req 4.2 / 4.3）。
