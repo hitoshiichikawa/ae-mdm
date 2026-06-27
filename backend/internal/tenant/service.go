@@ -10,6 +10,7 @@ import (
 	pkgerrors "github.com/hitoshiichikawa/ae-mdm/internal/errors"
 	"github.com/hitoshiichikawa/ae-mdm/internal/logger"
 	"github.com/hitoshiichikawa/ae-mdm/internal/platform/amapi"
+	"github.com/hitoshiichikawa/ae-mdm/internal/platform/db"
 )
 
 // Service は Tenant ライフサイクル（作成 / バインド / 無効化 / 参照 / 前提ガード）と
@@ -29,9 +30,10 @@ type Service interface {
 	//
 	//   - in.Name を空白 trim 後に空なら CodeInvalidRequest を返し、永続化も AMAPI 呼び出しも
 	//     行わない（Req 1.3）。
-	//   - amapi.CreateSignupURL でサインアップ URL を発行し、非 transient error なら永続化せず
-	//     エラーを伝達する（Req 1.4）。
-	//   - Repository.Insert で pending_bind 行を作成し、SignupURL を返す（Req 1.1 / 1.2）。
+	//   - Repository.Insert で pending_bind 行を先に作成する（Req 1.1）。続いて
+	//     amapi.CreateSignupURL でサインアップ URL を発行する（Req 1.2）。URL 生成が失敗（または
+	//     空応答）してもテナントを pending_bind のまま保持し、当該エラーを伝達する（Req 1.4）。
+	//   - 成功時は SignupURL（URL と後続 bind 用の signupURLName）を返す。
 	//   - 成否を EventRecorder.Record に渡す（Req 1.5 / NFR 2.1）。拒否経路は構造化ログを出す
 	//     （NFR 2.2）。
 	//
@@ -82,6 +84,8 @@ type Service interface {
 	//   - disabled: 無効化として CodeBusinessRule（ErrTenantDisabled）を返す（Req 5.3）。
 	//   - 不在: CodeNotFound（ErrTenantNotFound）を返す（Req 5.1）。
 	//
+	// tenant-scoped な呼び出し元（ctx の TenantContext が IsSuperAdmin=false）が自テナント以外の
+	// id を要求した場合は、存在差を露出しない ErrTenantNotFound で拒否する（テナント分離 / Req 6.5）。
 	// 拒否時は構造化ログを出す（NFR 2.2）。
 	EnterpriseNameForTenant(ctx context.Context, id uuid.UUID) (string, error)
 }
@@ -133,21 +137,15 @@ func (s *service) Create(ctx context.Context, actor uuid.UUID, in CreateInput) (
 	name := strings.TrimSpace(in.Name)
 	if name == "" {
 		err := pkgerrors.New(pkgerrors.CodeInvalidRequest, "tenant name is required")
-		// 拒否経路の構造化ログ（NFR 2.2）。実行者・対象テナント（未採番のため Nil）・拒否理由を出す。
+		// 拒否経路の構造化ログ（NFR 2.2）+ 失敗監査（Req 1.5 / NFR 2.1）。対象テナントは未採番のため Nil。
 		s.logDeny(actor, uuid.Nil, "tenant name is empty")
+		s.record(ctx, actor, uuid.Nil, OperationCreate, ResultFailure, false, "tenant name is empty")
 		return TenantView{}, SignupURL{}, err
 	}
 
-	// 2. サインアップ URL を発行（Req 1.2）。非 transient error は永続化せずに伝達（Req 1.4）。
-	//    AMAPI 由来 error は #34 が Code 正規化済みのためそのまま伝播する（再分類しない）。
-	signupURL, signupURLName, err := s.amapi.CreateSignupURL(ctx)
-	if err != nil {
-		// 作成失敗を監査記録（Req 1.5 / NFR 2.1）。tenant は未採番のため Nil。
-		s.record(ctx, actor, uuid.Nil, OperationCreate, ResultFailure, false, "signup url creation failed")
-		return TenantView{}, SignupURL{}, err
-	}
-
-	// 3. pending_bind 行を採番して永続化（Req 1.1 / NFR 1.1 / 3.1）。
+	// 2. pending_bind 行を先に採番して永続化（Req 1.1 / NFR 1.1 / 3.1）。
+	//    サインアップ URL 生成が失敗してもテナントを pending_bind のまま保持する Req 1.4 を満たすため、
+	//    AMAPI 呼び出しの前に Insert する（永続化済みであれば URL 生成失敗後も pending_bind 行が残る）。
 	id := uuid.New()
 	row := TenantRow{
 		ID:     id,
@@ -156,6 +154,24 @@ func (s *service) Create(ctx context.Context, actor uuid.UUID, in CreateInput) (
 	}
 	if err := s.repo.Insert(ctx, row); err != nil {
 		s.record(ctx, actor, id, OperationCreate, ResultFailure, false, "tenant persistence failed")
+		return TenantView{}, SignupURL{}, err
+	}
+
+	// 3. サインアップ URL を発行（Req 1.2）。失敗時はテナントを pending_bind のまま保持し、当該
+	//    エラーを伝達する（Req 1.4）。AMAPI 由来 error は #34 が Code 正規化済みのため再分類しない。
+	signupURL, signupURLName, err := s.amapi.CreateSignupURL(ctx)
+	if err != nil {
+		s.record(ctx, actor, id, OperationCreate, ResultFailure, false, "signup url creation failed")
+		return TenantView{}, SignupURL{}, err
+	}
+
+	// 3b. AMAPI が成功扱い（err=nil）で空の URL / signup url name を返した場合は後続 bind の前提
+	//     （Req 2.1 の signup_url_name 入力）が壊れるため、上流の異常応答として CodeUpstream（502）を
+	//     返しテナントを pending_bind に保つ（Req 1.2 / 1.4。bind 側の空 enterprise_name ガードと対称）。
+	if strings.TrimSpace(signupURL) == "" || strings.TrimSpace(signupURLName) == "" {
+		err := pkgerrors.New(pkgerrors.CodeUpstream, "amapi returned an empty signup url")
+		s.logDeny(actor, id, "amapi returned empty signup url")
+		s.record(ctx, actor, id, OperationCreate, ResultFailure, false, "empty signup url from amapi")
 		return TenantView{}, SignupURL{}, err
 	}
 
@@ -190,9 +206,11 @@ func (s *service) Bind(ctx context.Context, actor uuid.UUID, id uuid.UUID, in Bi
 		return TenantView{}, err
 	}
 
-	// 1. 現状態を取得（不在は CodeNotFound をそのまま伝達 → 404 / Req 4.3）。
+	// 1. 現状態を取得（不在は CodeNotFound をそのまま伝達 → 404 / Req 4.3）。取得失敗も bind の
+	//    失敗経路として監査記録する（Req 2.7 / NFR 2.1）。
 	row, err := s.repo.Get(ctx, id)
 	if err != nil {
+		s.record(ctx, actor, id, OperationBind, ResultFailure, false, "tenant lookup failed")
 		return TenantView{}, err
 	}
 
@@ -266,9 +284,11 @@ func (s *service) Bind(ctx context.Context, actor uuid.UUID, id uuid.UUID, in Bi
 // 二段階確認テキスト方式で対象テナント名の再入力一致を検証し、条件付き UPDATE
 // （WHERE status!='disabled'）で disabled へ遷移させる。disabled は終端状態。
 func (s *service) Disable(ctx context.Context, actor uuid.UUID, id uuid.UUID, in DisableInput) (TenantView, error) {
-	// 1. 対象を取得（不在は CodeNotFound → 404）。確認テキスト比較のため name が必要。
+	// 1. 対象を取得（不在は CodeNotFound → 404）。確認テキスト比較のため name が必要。取得失敗も
+	//    disable の失敗経路として監査記録する（Req 3.5 / NFR 2.1）。
 	row, err := s.repo.Get(ctx, id)
 	if err != nil {
+		s.record(ctx, actor, id, OperationDisable, ResultFailure, false, "tenant lookup failed")
 		return TenantView{}, err
 	}
 
@@ -340,6 +360,16 @@ func (s *service) List(ctx context.Context) ([]TenantView, error) {
 // 他ドメインの業務操作前提ガード。bound のみ enterprise_name を返し、pending_bind / disabled は
 // 拒否、不在は CodeNotFound を返す。拒否時は構造化ログを出す（NFR 2.2）。
 func (s *service) EnterpriseNameForTenant(ctx context.Context, id uuid.UUID) (string, error) {
+	// テナント分離ガード（Req 6.5 / テナント分離）: 本 IF は他ドメインの tenant-scoped 文脈から
+	// 呼ばれる。Repository は全メソッドで SuperAdmin context へ昇格し全 tenants 行を可視化するため、
+	// tenant-scoped な呼び出し元（IsSuperAdmin=false）が自テナント以外の id を要求した場合は
+	// enterprise 識別子を返さず、存在差を露出しない ErrTenantNotFound（404）で拒否する。
+	// TenantContext 未確立（SuperAdmin の内部経路 / 単体テスト等）では本ガードを適用しない。
+	if tc, ctxErr := db.FromContext(ctx); ctxErr == nil && !tc.IsSuperAdmin && tc.TenantID != id {
+		s.logDeny(tc.AdminUserID, id, "cross-tenant enterprise name access denied")
+		return "", ErrTenantNotFound
+	}
+
 	row, err := s.repo.Get(ctx, id)
 	if err != nil {
 		// 不在は CodeNotFound（Req 5.1）。Repository が ErrTenantNotFound 相当を wrap 済み。

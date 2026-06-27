@@ -257,9 +257,10 @@ func TestCreate_Success_ReturnsPendingBindAndSignupURL(t *testing.T) {
 	if resp["id"] != id.String() {
 		t.Errorf("id: want %q, got %v", id.String(), resp["id"])
 	}
-	// signup_url_name（後続 Bind 用識別子）は body に出さない（json:"-" / NFR 2.3）。
-	if strings.Contains(rec.Body.String(), testHandlerSignupURLName) {
-		t.Errorf("response body should NOT contain signup_url_name, got: %s", rec.Body.String())
+	// signup_url_name（後続 Bind の入力 / CreateEnterprise の引数）は応答に含める。DB に保存
+	// しないため、ここで返さないと利用者が `POST /tenants/{id}/bind` を実行できない（Req 2.1）。
+	if resp["signup_url_name"] != testHandlerSignupURLName {
+		t.Errorf("signup_url_name: want %q, got %v", testHandlerSignupURLName, resp["signup_url_name"])
 	}
 	// actor が AuthClaims.AdminUserID から Service へ伝播していること。
 	if fake.lastActor != actor {
@@ -412,6 +413,57 @@ func TestDisable_ConfirmationMissing_Returns422(t *testing.T) {
 	}
 	if fake.calls.disable != 1 {
 		t.Errorf("Disable call count: want 1, got %d", fake.calls.disable)
+	}
+}
+
+// ============================================================================
+// DELETE /tenants/{id}: 空 body（確認テキスト未入力）→ Handler 入口で 400 にせず
+// Service の確認未完了判定（422）へ委ねる（Req 3.2 / 境界値）
+// ============================================================================
+
+func TestDisable_EmptyBody_Returns422NotBadRequest(t *testing.T) {
+	// Arrange: Service は確認未完了で ErrConfirmationRequired（422）を返す。
+	fake := &fakeTenantService{
+		disableErr: ErrConfirmationRequired,
+	}
+	r := newTestHandlerRouter(t, fake)
+	id := uuid.New()
+
+	// Act: body 無し（nil）。Handler は空 body を 400 にせず Service へ委譲する。
+	req := httptest.NewRequest(http.MethodDelete, "/tenants/"+id.String(), nil)
+	rec := httptest.NewRecorder()
+	r.ServeHTTP(rec, req)
+
+	// Assert: 400 ではなく 422（Service の確認未完了判定）。
+	if rec.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("status: want 422, got %d (body=%s)", rec.Code, rec.Body.String())
+	}
+	if fake.calls.disable != 1 {
+		t.Errorf("Disable must be called once on empty body, got %d", fake.calls.disable)
+	}
+}
+
+// ============================================================================
+// DELETE /tenants/{id}: malformed JSON → Handler 入口で 400（Service を呼ばない）
+// ============================================================================
+
+func TestDisable_MalformedJSON_Returns400AndDoesNotCallService(t *testing.T) {
+	// Arrange
+	fake := &fakeTenantService{}
+	r := newTestHandlerRouter(t, fake)
+	id := uuid.New()
+
+	// Act: 壊れた JSON は空 body と区別され 400 となる。
+	req := httptest.NewRequest(http.MethodDelete, "/tenants/"+id.String(), strings.NewReader(`{"confirmation":`))
+	rec := httptest.NewRecorder()
+	r.ServeHTTP(rec, req)
+
+	// Assert
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status: want 400, got %d", rec.Code)
+	}
+	if fake.calls.disable != 0 {
+		t.Errorf("Disable should NOT be called on malformed JSON, but called %d times", fake.calls.disable)
 	}
 }
 

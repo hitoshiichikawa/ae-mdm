@@ -2,6 +2,8 @@ package tenant
 
 import (
 	"encoding/json"
+	stderrors "errors"
+	"io"
 	"net/http"
 
 	"github.com/go-chi/chi/v5"
@@ -69,13 +71,17 @@ func (h *Handler) Mount(r chi.Router) {
 // createResponse は `POST /tenants` のレスポンス body。
 //
 // Service の `Create` が返す `(TenantView, SignupURL, error)` を合成し、
-// `{id, name, status, signup_url}` を返す。`SignupURL.Name`（`json:"-"`）は body に出さない
-// （後続 Bind 用の識別子であり、機密値非ログの NFR 2.3 と整合）。
+// `{id, name, status, signup_url, signup_url_name}` を返す。`signup_url_name` は後続
+// `POST /tenants/{id}/bind` の入力（`CreateEnterprise` の引数）として呼び出し側が必要とする
+// 識別子であり、DB には保存しないため作成応答で返さないと bind フロー（Req 2.1）が成立しない。
+// NFR 2.3（機密値の非ログ）はログ出力に対する制約であり、API レスポンスへの本識別子の露出は
+// 対象外（より機微な `signup_url` 本体も応答 body に載せている）。
 type createResponse struct {
-	ID        uuid.UUID `json:"id"`
-	Name      string    `json:"name"`
-	Status    Status    `json:"status"`
-	SignupURL string    `json:"signup_url"`
+	ID            uuid.UUID `json:"id"`
+	Name          string    `json:"name"`
+	Status        Status    `json:"status"`
+	SignupURL     string    `json:"signup_url"`
+	SignupURLName string    `json:"signup_url_name"`
 }
 
 // create は `POST /tenants` の HTTP handler（Req 1.1 / 1.3）。
@@ -99,10 +105,11 @@ func (h *Handler) create(w http.ResponseWriter, r *http.Request) {
 	}
 
 	resp := createResponse{
-		ID:        view.ID,
-		Name:      view.Name,
-		Status:    view.Status,
-		SignupURL: su.URL,
+		ID:            view.ID,
+		Name:          view.Name,
+		Status:        view.Status,
+		SignupURL:     su.URL,
+		SignupURLName: su.Name,
 	}
 	writeJSON(w, http.StatusCreated, resp)
 }
@@ -139,8 +146,9 @@ func (h *Handler) bind(w http.ResponseWriter, r *http.Request) {
 // disable は `DELETE /tenants/{id}` の HTTP handler（Req 3.x）。
 //
 //  1. path param {id} を UUID parse（失敗は 400）
-//  2. request body を DisableInput に decode（JSON 不正は 400）。確認テキスト欠落は Service が
-//     対象 name と不一致として 422（確認未完了 / Req 3.2）
+//  2. request body を DisableInput に decode（malformed JSON は 400 / 空 body は確認テキスト
+//     未入力として decode を許容）。確認テキスト欠落（空 body / `{}`）は Service が対象 name と
+//     不一致として扱い 422（確認未完了 / Req 3.2）を返す。Handler 入口で 400 にしない
 //  3. Service.Disable を呼ぶ。二重無効化は 409 / 不在は 404 を Service の写像に委ねる
 //  4. 成功時は body 無しで 204 No Content を返す（design.md API Contract）
 func (h *Handler) disable(w http.ResponseWriter, r *http.Request) {
@@ -151,7 +159,7 @@ func (h *Handler) disable(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var in DisableInput
-	if err := decodeJSON(r, &in); err != nil {
+	if err := decodeJSONAllowEmpty(r, &in); err != nil {
 		pkgerrors.WriteHTTP(w, r, err, h.log)
 		return
 	}
@@ -224,6 +232,20 @@ func parseID(r *http.Request) (uuid.UUID, error) {
 // body が空（EOF）の場合も不正入力として 400 を返す。
 func decodeJSON(r *http.Request, v any) error {
 	if err := json.NewDecoder(r.Body).Decode(v); err != nil {
+		return pkgerrors.New(pkgerrors.CodeInvalidRequest, "invalid request body")
+	}
+	return nil
+}
+
+// decodeJSONAllowEmpty は request body を v へ JSON decode するが、空 body（EOF）は
+// エラーとせず v を zero value のまま残す。`DELETE /tenants/{id}` のように body が無い
+// （= 二段階確認テキスト未入力）リクエストを Handler 入口の 400 ではなく、Service の確認未完了
+// 判定（422 / Req 3.2）へ委ねるために用いる。malformed JSON / 型不一致は通常どおり 400 を返す。
+func decodeJSONAllowEmpty(r *http.Request, v any) error {
+	if err := json.NewDecoder(r.Body).Decode(v); err != nil {
+		if stderrors.Is(err, io.EOF) {
+			return nil
+		}
 		return pkgerrors.New(pkgerrors.CodeInvalidRequest, "invalid request body")
 	}
 	return nil

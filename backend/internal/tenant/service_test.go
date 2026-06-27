@@ -12,6 +12,7 @@ import (
 	pkgerrors "github.com/hitoshiichikawa/ae-mdm/internal/errors"
 	"github.com/hitoshiichikawa/ae-mdm/internal/logger"
 	"github.com/hitoshiichikawa/ae-mdm/internal/platform/amapi"
+	"github.com/hitoshiichikawa/ae-mdm/internal/platform/db"
 )
 
 // ---- 機密値漏洩 assertion 用の固定文字列（NFR 2.2 / 2.3 観点） ----
@@ -255,6 +256,11 @@ func TestService_Create(t *testing.T) {
 		if h.repo.calls.insert != 0 {
 			t.Errorf("Insert must not be called on empty name, got %d", h.repo.calls.insert)
 		}
+		// 空 name の拒否も create の失敗監査として記録する（Req 1.5 / NFR 2.1）。
+		events := h.recorder.recorded()
+		if len(events) != 1 || events[0].Operation != OperationCreate || events[0].Result != ResultFailure {
+			t.Errorf("expected a create/failure audit event on empty name, got %+v", events)
+		}
 	})
 
 	t.Run("name が空のとき拒否経路の構造化ログ field（deny_reason）を出す", func(t *testing.T) {
@@ -342,7 +348,7 @@ func TestService_Create(t *testing.T) {
 		}
 	})
 
-	t.Run("CreateSignupURL が非 transient error のとき永続化せずエラーを伝達し Record(create,failure) を行う", func(t *testing.T) {
+	t.Run("CreateSignupURL が失敗したとき tenant を pending_bind のまま保持しエラーを伝達し Record(create,failure) を行う（Req 1.4）", func(t *testing.T) {
 		// Arrange
 		h := newServiceHarness()
 		actor := uuid.New()
@@ -358,8 +364,12 @@ func TestService_Create(t *testing.T) {
 		if !stderrors.Is(err, amapiErr) {
 			t.Fatalf("expected the amapi error to be propagated, got %v", err)
 		}
-		if h.repo.calls.insert != 0 {
-			t.Errorf("Insert must not be called when signup url creation fails, got %d", h.repo.calls.insert)
+		// Req 1.4: URL 生成失敗時もテナントは pending_bind として既に永続化済みであること。
+		if h.repo.calls.insert != 1 {
+			t.Errorf("Insert must be called once so the tenant remains pending_bind on signup url failure (Req 1.4), got %d", h.repo.calls.insert)
+		}
+		if h.repo.lastInsertRow.Status != StatusPendingBind {
+			t.Errorf("inserted row status must be pending_bind, got %s", h.repo.lastInsertRow.Status)
 		}
 		events := h.recorder.recorded()
 		if len(events) != 1 {
@@ -367,6 +377,46 @@ func TestService_Create(t *testing.T) {
 		}
 		if events[0].Operation != OperationCreate || events[0].Result != ResultFailure {
 			t.Errorf("expected create/failure event, got %s/%s", events[0].Operation, events[0].Result)
+		}
+	})
+
+	t.Run("CreateSignupURL が err=nil で空の signup_url を返すとき 502 を返し pending_bind を保つ（Req 1.2 / 1.4）", func(t *testing.T) {
+		// Arrange: AMAPI が成功扱い（err=nil）で空の URL を返す異常応答を模擬する。
+		h := newServiceHarness()
+		h.stub.OnCreateSignupURL = func(_ context.Context) (string, string, error) {
+			return "   ", testSignupURLName, nil
+		}
+
+		// Act
+		_, _, err := h.svc.Create(context.Background(), uuid.New(), CreateInput{Name: testTenantNameValue})
+
+		// Assert
+		if got := codeOf(t, err); got != pkgerrors.CodeUpstream {
+			t.Fatalf("expected CodeUpstream on empty signup url, got %s", got)
+		}
+		// テナントは pending_bind として永続化済みであること（Req 1.4）。
+		if h.repo.calls.insert != 1 {
+			t.Errorf("Insert must be called once, got %d", h.repo.calls.insert)
+		}
+		events := h.recorder.recorded()
+		if len(events) != 1 || events[0].Result != ResultFailure {
+			t.Errorf("expected a create/failure audit event, got %+v", events)
+		}
+	})
+
+	t.Run("CreateSignupURL が err=nil で空の signup_url_name を返すとき 502 を返す（Req 2.1 の bind 入力前提）", func(t *testing.T) {
+		// Arrange: URL は返るが後続 bind に必要な signup_url_name が空の異常応答を模擬する。
+		h := newServiceHarness()
+		h.stub.OnCreateSignupURL = func(_ context.Context) (string, string, error) {
+			return testSignupURLSecret, "  ", nil
+		}
+
+		// Act
+		_, _, err := h.svc.Create(context.Background(), uuid.New(), CreateInput{Name: testTenantNameValue})
+
+		// Assert
+		if got := codeOf(t, err); got != pkgerrors.CodeUpstream {
+			t.Fatalf("expected CodeUpstream on empty signup_url_name, got %s", got)
 		}
 	})
 
@@ -601,6 +651,66 @@ func TestService_EnterpriseNameForTenant(t *testing.T) {
 			t.Errorf("expected ErrNotBound sentinel, got %v", err)
 		}
 	})
+
+	t.Run("tenant-scoped 呼び出しが自テナント以外の id を要求したとき ErrTenantNotFound で拒否し repo.Get を呼ばない（テナント分離）", func(t *testing.T) {
+		// Arrange: 呼び出し元は tenant-scoped（IsSuperAdmin=false, TenantID=caller）。
+		h := newServiceHarness()
+		caller := uuid.New()
+		other := uuid.New()
+		ctx := db.WithTenantContext(context.Background(), db.TenantContext{TenantID: caller, IsSuperAdmin: false})
+
+		// Act: 自テナント（caller）以外の other を要求する。
+		_, err := h.svc.EnterpriseNameForTenant(ctx, other)
+
+		// Assert
+		if !stderrors.Is(err, ErrTenantNotFound) {
+			t.Fatalf("expected ErrTenantNotFound on cross-tenant access, got %v", err)
+		}
+		if h.repo.calls.get != 0 {
+			t.Errorf("repo.Get must not be called on cross-tenant access (no existence leak), got %d", h.repo.calls.get)
+		}
+		if _, ok := h.log.warnWithDenyReason(); !ok {
+			t.Errorf("expected a WARN log entry with deny_reason field (NFR 2.2)")
+		}
+	})
+
+	t.Run("tenant-scoped 呼び出しが自テナントの id を要求したとき enterprise_name を返す（テナント分離）", func(t *testing.T) {
+		// Arrange
+		h := newServiceHarness()
+		caller := uuid.New()
+		h.repo.getRow = TenantRow{ID: caller, Name: testTenantNameValue, Status: StatusBound, EnterpriseName: testEnterpriseName}
+		ctx := db.WithTenantContext(context.Background(), db.TenantContext{TenantID: caller, IsSuperAdmin: false})
+
+		// Act
+		name, err := h.svc.EnterpriseNameForTenant(ctx, caller)
+
+		// Assert
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if name != testEnterpriseName {
+			t.Errorf("expected %q for own tenant, got %q", testEnterpriseName, name)
+		}
+	})
+
+	t.Run("SuperAdmin context は任意 id を参照できる（admin 経路はテナント分離ガード対象外）", func(t *testing.T) {
+		// Arrange
+		h := newServiceHarness()
+		target := uuid.New()
+		h.repo.getRow = TenantRow{ID: target, Name: testTenantNameValue, Status: StatusBound, EnterpriseName: testEnterpriseName}
+		ctx := db.WithTenantContext(context.Background(), db.TenantContext{TenantID: uuid.Nil, IsSuperAdmin: true})
+
+		// Act
+		name, err := h.svc.EnterpriseNameForTenant(ctx, target)
+
+		// Assert
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if name != testEnterpriseName {
+			t.Errorf("expected %q for SuperAdmin cross-tenant read, got %q", testEnterpriseName, name)
+		}
+	})
 }
 
 // ===== Bind =====
@@ -785,6 +895,11 @@ func TestService_Bind(t *testing.T) {
 		}
 		if h.stub.CallCount("CreateEnterprise") != 0 {
 			t.Errorf("CreateEnterprise must not be called when tenant is absent, got %d", h.stub.CallCount("CreateEnterprise"))
+		}
+		// 取得失敗（不在）も bind の失敗監査として記録する（Req 2.7 / NFR 2.1）。
+		events := h.recorder.recorded()
+		if len(events) != 1 || events[0].Operation != OperationBind || events[0].Result != ResultFailure {
+			t.Errorf("expected a bind/failure audit event on lookup failure, got %+v", events)
 		}
 	})
 
@@ -1022,6 +1137,11 @@ func TestService_Disable(t *testing.T) {
 		}
 		if h.repo.calls.updateDisabled != 0 {
 			t.Errorf("UpdateDisabled must not be called when tenant is absent, got %d", h.repo.calls.updateDisabled)
+		}
+		// 取得失敗（不在）も disable の失敗監査として記録する（Req 3.5 / NFR 2.1）。
+		events := h.recorder.recorded()
+		if len(events) != 1 || events[0].Operation != OperationDisable || events[0].Result != ResultFailure {
+			t.Errorf("expected a disable/failure audit event on lookup failure, got %+v", events)
 		}
 	})
 
