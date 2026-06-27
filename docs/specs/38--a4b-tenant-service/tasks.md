@@ -5,7 +5,7 @@
 テストを同タスク内に含める（per-task Reviewer 運用での `missing test` reject 回避）。
 
 - [ ] 1. ドメイン型と監査記録ポート（`internal/tenant` パッケージ scaffold）
-- [ ] 1.1 `internal/tenant/types.go` と `internal/tenant/audit_log.go` を追加 (P)
+- [x] 1.1 `internal/tenant/types.go` と `internal/tenant/audit_log.go` を追加 (P)
   - `Status` enum（`pending_bind` / `bound` / `disabled`）と 3 値以外を弾く `ParseStatus`/`Valid` を定義（NFR 1.1）
   - `TenantRow`（DB 行）/ `TenantView`（API 応答）/ `CreateInput` / `BindInput` / `DisableInput` / `SignupURL` DTO を定義
   - `EventRecorder` interface（`Record(ctx, Event)`）と `Event{Actor,TenantID,Operation,Result,ConfirmationCompleted,DenyReason}` を定義（NFR 2.1）
