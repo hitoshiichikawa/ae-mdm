@@ -90,6 +90,29 @@
   adminHandler)` 配線（cmd/api / 実 path `/api/admin/audit-logs`）、実 DB + RLS の cross-tenant 可視
   （全テナント + NULL 行の物理可視 / Req 3.1 / 3.5）は task 6（integration）で実 DB 検証する。それ以外なし。
 
+### Task 5
+
+- **採用方針**: 新規ファイルを作らず `cmd/api/main.go` の既存 bootstrap（runBootstrap）に
+  audit domain の DI 配線のみを追加。`httpserver.NewServer` の戻り値 routers（従来 `_` で破棄）を
+  受け取り、(6) http server 構築直後・(8) runHTTPServer 呼び出し前に Repository / Service /
+  Handler / AdminHandler を構築して 2 サブルータへ Mount した（Req 4.2 / 4.4）。
+- **重要な判断**:
+  - `srv, _, err :=` を `srv, routers, err :=` に変更し routers を捕捉。Mount は
+    `routers.API.Mount("/audit-logs", auditHandler)`（実 path `/api/audit-logs`）と
+    `routers.Admin.Mount("/audit-logs", auditAdminHandler)`（実 path `/api/admin/audit-logs` /
+    固定ガード RequireAdminConsoleAndSuperAdmin 配下）の 2 経路。
+  - `cfg` / `pool` / `log`（`logger.Logger`）は既存 bootstrap 構築済みのものを再利用し新規構築しない。
+    Clock は `audit.SystemClock{}`、authorizer は `authz.New()`（`audit_log read` 許可マトリクス内包）を
+    handler/admin_handler 共通で 1 インスタンス渡す。import に `internal/audit` と
+    `internal/platform/authz` を追加。
+  - bootstrap step 番号付きコメント慣習に合わせ、新規 audit 配線を (7) として godoc に追記
+    （既存 (7) ListenAndServe を (8) に繰り下げ）。本 task は wiring のみで挙動分岐は追加しない。
+- **残存課題（次 task=6 への影響）**: 本 task は wiring であり、wiring 起因の 401/403 ガード回帰
+  （Req 4.2 / 4.4 = `_Requirements_partial:_` 明示済み）と routing スモークは test server を要するため
+  task 6（integration / `audit_test.go` の routing スモーク (i)）へ deferred。本 task 単体の検証は
+  `go build ./... && go vet ./... && go test ./...`（コンパイル整合 + 既存テスト非破壊）で完結する。
+  実 DB + RLS / append-only / 保持下限の DB-backed verify も task 6 の責務。それ以外の残存課題はなし。
+
 ## AC Traceability（task 1 で担保した範囲）
 
 | AC | 担保テスト（`internal/audit/service_test.go`） |
