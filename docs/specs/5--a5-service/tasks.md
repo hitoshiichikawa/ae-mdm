@@ -128,7 +128,7 @@
   - _Boundary: AuditHandler_
   - _Depends: 1.2_
 
-- [ ] 4. admin-console Handler（cross-tenant 閲覧）+ 単体テスト
+- [x] 4. admin-console Handler（cross-tenant 閲覧）+ 単体テスト
 - [x] 4.1 AdminHandler 実装 + httptest 単体テスト
   - `backend/internal/audit/admin_handler.go` を新規追加。`AdminHandler`（chi.Router 互換）と
     `NewAdminHandler(svc Service, authorizer *authz.Authorizer, log logger.Logger) *AdminHandler` を実装。
