@@ -57,6 +57,16 @@ per-task ループで各 task の learning を追記する補足ノート。`req
   - actor の明示引数化は Bind/Disable でも踏襲すること。
   - `config.Config.AMAPIProjectID` は本 task では未使用だが Service struct の deps に含めた（Bind/task 5 が `CreateEnterprise(signupURLName, cfg.AMAPIProjectID)` で使用 / design.md L209）。
 
+### Task 5
+
+- **採用方針**: `internal/tenant/service.go` の `Service` interface に `Bind(ctx, actor, id, in)` / `Disable(ctx, actor, id, in)` を追記し、`service` struct へ状態機械の遷移系を実装した（task 4 と同パターン）。同 commit で `service_test.go` の `fakeRepository` に `UpdateBound`/`UpdateDisabled` の affected 行数・error・呼出記録の制御を追加し、Bind/Disable の単体テストを拡充した。
+- **重要な判断**:
+  - **actor 引数順は Create と一貫**（`ctx, actor, id, in`）。design.md L221-222 の疑似シグネチャは actor を持たないが、task 4 で actor 明示引数化が確定済み（`httpserver` import 禁止の依存方向ルールのため ctx 経由不可）。本 task もそれを踏襲した。新たな逸脱ではないため確認事項は追記しない。
+  - **Bind は AMAPI I/O を tx 外**: `Get`(現状態) → pending_bind のみ `CreateEnterprise` → `UpdateBound`(WHERE status='pending_bind') の順。CreateEnterprise 失敗時は永続化前に return し pending_bind を維持（NFR 1.3）。pending_bind 以外（bound→409 / disabled→422 / 定義外→fail-closed 422）は AMAPI を一切呼ばず拒否し、`CreateEnterprise` 未呼出を保証（Req 2.5 / 2.6 / NFR 1.2）。`UpdateBound` affected=0 は競合として 409 に写像（Req 2.5）、Repository 由来の 23505→CodeConflict はそのまま伝達。
+  - **Disable の確認テキスト比較は `in.Confirmation == row.Name` の完全一致**。name 取得のため不一致でも先に `Get` が必要。既に disabled は Get 直後に二重無効化 409、確認不一致は永続化前に 422（`ErrConfirmationRequired`）で拒否。`UpdateDisabled` affected=0 も二重無効化競合として 409（Req 3.4）。成功時 View は `Status=disabled` で enterprise_name を露出しない（TenantView の omitempty / Req 6.5）。
+  - **監査 Event の confirmed 意味付け**: Disable のみ `ConfirmationCompleted` を渡す（成功・competition 失敗とも確認テキストを通過した経路では true、確認未完了拒否では false）。Bind は confirmed=false 固定。失敗/拒否経路でも `record` + `logDeny` を Create の前例に合わせて出力。
+- **残存課題（後続 task 6 Handler への申し送り）**: Handler は `httpserver.AuthClaimsFromContext` で actor を取得し `Bind(ctx, actor, id, in)` / `Disable(ctx, actor, id, in)` に渡す（Create と同様）。`POST /tenants/{id}/bind` の body は `{signup_url_name}`、`DELETE /tenants/{id}` の body は `{confirmation}`（対象 name 再入力）。Disable 成功時の HTTP 応答は 204（design.md API Contract）であり、Service が返す disabled TenantView は Handler が必要に応じて利用する。
+
 ## 確認事項
 
 - **Task 4: Service の actor 受け渡しが design 疑似シグネチャから逸脱（実装上の判断）**: design.md L218-226 の `Service` 疑似シグネチャは `Create(ctx, in CreateInput)` のように actor 引数を持たず、L228 Preconditions で「ctx に AuthClaims が確立済み」と記す。しかし `tenant` package の doc.go 依存方向ルールは `httpserver` import を禁止（許可: amapi/db/logger/errors/config）しており、Service が ctx から `httpserver.AuthClaimsFromContext` で actor を取り出すことができない。本実装は監査 Event の実行者を **`Create(ctx, actor uuid.UUID, in CreateInput)` の明示引数**で受け取る形に確定した（Repository の `UpdateDisabled(ctx, id, actor)` が既に explicit actor を取る前例と整合し、最小の逸脱）。Handler（task 6）が `AuthClaimsFromContext` で actor を取得して Service へ渡す。design.md / tasks.md は書き換えていない（実装 PR では spec を書き換えない規約に準拠）。Architect 判断が必要なら本点を差し戻し対象として検討されたい。
