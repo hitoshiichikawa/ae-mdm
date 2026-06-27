@@ -29,6 +29,10 @@ const (
 	defaultLogFormat                     = "json"
 	defaultLogOutput                     = "stderr"
 	defaultHTTPListenAddr                = ":8080"
+	// defaultPubSubMaxOutstandingMessages は PUBSUB_MAX_OUTSTANDING_MESSAGES 未設定時の既定値。
+	// pubsub パッケージの defaultMaxOutstandingMessages（SDK の DefaultReceiveSettings 相当）と
+	// 揃える（Issue #35 requirements 4.1）。
+	defaultPubSubMaxOutstandingMessages = 1000
 )
 
 // セッション / state cookie の duration 既定値および境界値（Issue #33 tasks.md 1.1）。
@@ -181,6 +185,8 @@ func loadFrom(get envGetter) (Config, error) {
 		cfg.MigrateDatabaseURL = cfg.DatabaseURL
 	}
 	optionalStr("PUBSUB_EMULATOR_HOST", &cfg.PubSubEmulatorHost, "")
+	optionalStr("PUBSUB_DEAD_LETTER_TOPIC", &cfg.PubSubDeadLetterTopic, "")
+	intWithDefault("PUBSUB_MAX_OUTSTANDING_MESSAGES", &cfg.PubSubMaxOutstandingMessages, defaultPubSubMaxOutstandingMessages)
 	intWithDefault("AUDIT_LOG_RETENTION_DAYS", &cfg.AuditLogRetentionDays, defaultAuditLogRetentionDays)
 	intWithDefault("DEVICE_SYNC_DELAY_THRESHOLD_HOURS", &cfg.DeviceSyncDelayThresholdHours, defaultDeviceSyncDelayThresholdHours)
 	optionalStr("LOG_LEVEL", &cfg.LogLevel, defaultLogLevel)
