@@ -65,6 +65,31 @@
   `Filter.TenantID` を設定、SuperAdmin TenantContext を `db.WithTenantContext` で確立する点が
   本 handler と異なる。それ以外の残存課題はなし。
 
+### Task 4
+
+- **採用方針**: `admin_handler.go` に admin-console `AdminHandler`（chi.Router 内包で http.Handler /
+  chi.Router 双方を満たす）と `NewAdminHandler(svc, authorizer, log)` を実装。handler.go の
+  共通資産（`AuditLogDTO` / `toAuditLogDTO` / `writeAuditLogs` / `parseFilter` / `parseRFC3339Query`）を
+  再宣言せず流用し、admin 固有の `tenant_id` 任意 parse（`parseTenantIDQuery`）と SuperAdmin
+  TenantContext 確立のみを追加した。
+- **重要な判断**:
+  - **authz↔design 不整合の解決**: design.md は authz を「常に claims.TenantID fallback で
+    TargetTenantID 指定」と書くが、authz.Authorize は TargetTenantID が uuid.Nil（SuperAdmin の
+    claims.TenantID）に正規化されると role/aud に関わらず無条件 deny する（authz.go:156-159 /
+    Req 4.4 fail-closed）。これを全テナント横断ビュー（tenant_id query 無し）に適用すると 403 に
+    なり AC Req 3.1 と矛盾するため、cross-tenant authz matrix 判定は **tenant_id query 指定時のみ**
+    実施する（target=その tenant_id / SuperAdmin × admin-console × cross-tenant → allow）。tenant_id
+    無しの全テナントビューは `RequireAdminConsoleAndSuperAdmin` 固定ガード（Req 4.4）に依拠して保護
+    （詳細は下記「確認事項」）。
+  - SuperAdmin TenantContext（`TenantID=uuid.Nil, IsSuperAdmin=true`）を `db.WithTenantContext` で
+    handler 境界で確立してから `svc.List` を呼ぶ（RLS の is_superadmin 句で全テナント + NULL 可視 /
+    Req 3.1 / 3.5）。`Filter.TenantID` は tenant_id query 指定時のみ `*uuid.UUID` で設定（Req 3.2）。
+  - `warnFailure` は `*Handler` のメソッドで admin から呼べないため、`*AdminHandler` 専用に同等の
+    小メソッドを持たせ handler.go を触らずに boundary（AuditAdminHandler）を保った（軽微な重複を許容）。
+- **残存課題（次 task への影響）**: admin_handler は task 5 で `routers.Admin.Mount("/audit-logs",
+  adminHandler)` 配線（cmd/api / 実 path `/api/admin/audit-logs`）、実 DB + RLS の cross-tenant 可視
+  （全テナント + NULL 行の物理可視 / Req 3.1 / 3.5）は task 6（integration）で実 DB 検証する。それ以外なし。
+
 ## AC Traceability（task 1 で担保した範囲）
 
 | AC | 担保テスト（`internal/audit/service_test.go`） |
@@ -112,6 +137,25 @@
 > `TestHandler_List_TenantAdmin_OwnTenant_Returns200` が「own-tenant 経路で Filter.TenantID を
 > 設定しない（RLS に委ねる）」ことを assert することで構造的に担保した。
 
+## AC Traceability（task 4 で担保した範囲 / `internal/audit/admin_handler_test.go`）
+
+| AC | 担保テスト |
+|---|---|
+| 3.1 | `TestAdminHandler_List_SuperAdmin_NoTenantID_Returns200AndEstablishesSuperAdminContext`（tenant_id 無しで 200 + SuperAdmin TenantContext 確立を assert / 全テナント + NULL 行を含む） |
+| 3.2 | `TestAdminHandler_List_TenantIDQuery_SetsFilterTenantID`（指定で Filter.TenantID）/ `..._NoTenantIDQuery_FilterTenantIDNil`（無指定で nil）/ `..._InvalidQuery_Returns400`（非 uuid は 400） |
+| 3.3 | `TestAdminHandler_List_MapsAllFilterFields`（event_type / actor_id / resource_id / from / to を Filter へ写像） |
+| 3.4 | `TestAdminHandler_List_EmptyResult_Returns200EmptyArray`（空は `[]` で 200） |
+| 3.5 | `TestAdminHandler_List_SuperAdmin_NoTenantID_..._EstablishesSuperAdminContext`（TenantContext.IsSuperAdmin=true / TenantID=uuid.Nil を assert）/ `..._TenantIDQuery_SetsFilterTenantID`（tenant 絞り込み写像） |
+| 4.4 | 固定ガード `RequireAdminConsoleAndSuperAdmin` 配下の前提（claims 不在は防御的に 401）+ tenant_id 無しビューは固定ガード依拠（下記「確認事項」/ 実ガード検証は httpserver パッケージ責務） |
+| 4.6 | `TestAdminHandler_List_TenantIDQuery_SetsFilterTenantID`（実 `authz.New()` で SuperAdmin × admin-console × cross-tenant が allow → 200。tenant_id 指定時のみ matrix 判定） |
+| NFR 3.1 | `TestAdminHandler_List_EmptyResult_Returns200EmptyArray`（DTO は `[]AuditLogDTO` のみ）/ parse 失敗 WARN に query 生値非補間（実装で `warnFailure` が固定 field のみ） |
+| NFR 3.2 | `TestAdminHandler_List_InvalidQuery_Returns400`（`failure_kind=parse_invalid` を WARN に出力 / tenant_id・actor_id 非 uuid・from・to 非 RFC3339 の 4 ケース） |
+
+> 注: 4.4（admin aud + SuperAdmin 強制）の実ガード判定は `RequireAdminConsoleAndSuperAdmin`
+> （httpserver パッケージ・#37 で検証済み）の責務。admin handler は固定ガード配下前提で claims
+> 不在を防御的に 401 にする補完のみ担う。実 RLS の cross-tenant 物理可視（3.1 / 3.5）は task 6
+> （integration）が実 DB で検証する。
+
 ## 確認事項
 
 ### Repository interface の宣言場所（設計乖離 / task 2.1 実装者への申し送り）
@@ -135,6 +179,28 @@
 - task 2 以降（repository.go の concrete 実装 / handler.go / admin_handler.go / cmd/api 配線 /
   integration test）には着手していない。本 task は types / clock / failure_kinds / doc / service と
   その単体テストのみ。
+
+### authz↔design 不整合の解決（設計乖離 / task 4 / spec 本文は書き換えず）
+
+- **乖離内容**: design.md「Audit Admin Handler」L435 および tasks.md task 4 step 3 は、authz を
+  「`TargetTenantID = <tenant_id query があればその値 / 無ければ claims.TenantID.String()>`」で
+  常に呼ぶ記述になっている。しかし `internal/platform/authz/authz.go:156-159`（`Authorize` /
+  `AuthorizeAndLog`）は **TargetTenantID が空文字 / uuid.Nil に正規化されると role/aud に関わらず
+  無条件 deny**（Req 4.4 fail-closed）する。SuperAdmin の admin-console claims は
+  `claims.TenantID == uuid.Nil` のため、design 字義どおり「tenant_id 無し → claims.TenantID
+  fallback」で authorize すると TargetTenantID=uuid.Nil → authz deny → 403 となり、**AC Req 3.1
+  （tenant_id 無しの全テナント横断ビューは 200）と矛盾**する。
+- **解決方針（実装済み）**: cross-tenant authz matrix 判定（Req 4.6）は **具体的な `tenant_id`
+  query が指定されたときのみ** 行う（target=その tenant_id / SuperAdmin × admin-console ×
+  cross-tenant → allow / deny なら 403 + `failure_kind=authz_denied`）。tenant_id query 無し
+  （全テナント横断ビュー）は、`RequireAdminConsoleAndSuperAdmin` 固定ガードが既に admin-console +
+  SuperAdmin を強制済み（Req 4.4）であることに依拠し、authz の uuid.Nil deny を発火させない
+  （authz モデルは「全テナント」を表す target を持たないため、ここを matrix 判定に通すと正当な
+  全件ビューが fail-close する）。claims 不在は防御的に 401。
+- **位置付け**: この「authz matrix 判定は tenant_id 指定時のみ」は design.md の字義（常に
+  claims.TenantID fallback で authorize）からの **意図的な乖離**。理由（authz Req 4.4 の uuid.Nil
+  fail-closed と AC Req 3.1 の両立）を本項に明記し、spec 本文（design.md / tasks.md /
+  requirements.md）は書き換えていない。PM / Architect の判断が必要なら本項を起点に差し戻し可能。
 
 ## 検証結果（サマリ）
 
