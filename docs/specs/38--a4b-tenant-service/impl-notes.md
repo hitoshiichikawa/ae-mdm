@@ -76,6 +76,15 @@ per-task ループで各 task の learning を追記する補足ノート。`req
   - **`tenant` package が初めて `httpserver` を import**（doc.go の依存方向ルールで `httpserver` は許可リスト外）。design.md L327-328 が「Handler は presentation 層なので `AuthClaimsFromContext` を使う」と明示しているため設計指示を優先して実装し、確認事項に追記した（下記）。
 - **残存課題（後続 task 7 への申し送り）**: 認可ガード継承（未認証 401 / tenant-console aud 403 / 非 SuperAdmin 403 / admin-console+SuperAdmin 2xx）の検証は task 7 の `test/integration` 結合テスト（admin chain 経由）の責務。本 task の handler_test.go は Mount 後の route 解決と Handler 入出力契約のみを検証しており、guard 継承は未カバー（design.md「テスト配置の根拠」と整合）。
 
+### Task 7
+
+- **採用方針**: `backend/test/integration/tenant_admin_guard_test.go`（`package integration_test`）に、`NewServer`（`authMWAdmin=nil` で admin chain を `[TenantContextMiddleware, RequireAdminConsoleAndSuperAdmin]` の 2 段のみ）+ `tenant.Handler.Mount(routers.Admin)` を実物で組み立て、`/api/admin/tenants` に対する認可ガード継承を `httptest.NewRecorder` + `srv.Handler.ServeHTTP` + `WithAuthClaims` 直接注入で検証した（既存 `http_subrouter_mount_test.go` test (j) 方式を AuthClaims 注入版に拡張）。
+- **重要な判断**:
+  - **claims 注入は HTTP 境界越えできないため `httptest.NewServer` + `http.Get` を使わず `ServeHTTP` 直叩き**にした。401（Req 6.4）は TenantContextMiddleware の default deny、403（Req 6.2 audience 不一致 / Req 6.3 非 SuperAdmin）は RequireAdminConsoleAndSuperAdmin が担い、各ケースが意図した middleware 段で止まることを status の差（401/403/200）で識別している。
+  - **fake Service 到達の検証**: integration_test は別パッケージで `tenant` 内 unexported fake を再利用できないため、`tenant.Service`（6 メソッド）を満たす最小 fake をファイル内に定義。正常系は `GET /api/admin/tenants`（→ `Service.List`）で 200 を assert し、`listCalls()` 呼出数でガード通過後の Handler 到達を確認。拒否系は `listCalls()==0` で Service が一切呼ばれないこと（認可は guard 層で完結 / 存在露出防止）も併せて検証した。DB 不要（pool=nil + fake）で無条件に走る。
+  - ガード継承の一様性確認のため、別 endpoint（`POST /api/admin/tenants` = create）でも 401/403 が一様に継承されることを table 駆動 subtests で補完した（過剰にせず拒否系のみ）。
+- **残存課題**: なし（task 7 完了。Req 6.2 / 6.3 / 6.4 の正常系・拒否系を結合テストで担保）。
+
 ## 確認事項
 
 - **Task 4: Service の actor 受け渡しが design 疑似シグネチャから逸脱（実装上の判断）**: design.md L218-226 の `Service` 疑似シグネチャは `Create(ctx, in CreateInput)` のように actor 引数を持たず、L228 Preconditions で「ctx に AuthClaims が確立済み」と記す。しかし `tenant` package の doc.go 依存方向ルールは `httpserver` import を禁止（許可: amapi/db/logger/errors/config）しており、Service が ctx から `httpserver.AuthClaimsFromContext` で actor を取り出すことができない。本実装は監査 Event の実行者を **`Create(ctx, actor uuid.UUID, in CreateInput)` の明示引数**で受け取る形に確定した（Repository の `UpdateDisabled(ctx, id, actor)` が既に explicit actor を取る前例と整合し、最小の逸脱）。Handler（task 6）が `AuthClaimsFromContext` で actor を取得して Service へ渡す。design.md / tasks.md は書き換えていない（実装 PR では spec を書き換えない規約に準拠）。Architect 判断が必要なら本点を差し戻し対象として検討されたい。
