@@ -58,7 +58,7 @@
   - _Depends: 4.1_
 
 - [ ] 6. Tenant Handler（`/api/admin/tenants` 5 endpoint + Mount）
-- [ ] 6.1 `internal/tenant/handler.go` を実装
+- [x] 6.1 `internal/tenant/handler.go` を実装
   - `Handler` struct（deps: `Service` / `logger.Logger`）+ `NewHandler` + `Mount(r chi.Router)`（`internal/auth/handler.go:52` と同方式で `Routers.Admin` 配下へ sub-route 登録 / Req 6.1）
   - 5 endpoint: `POST /tenants`（name 空 JSON → 400 / Req 1.3）/ `POST /tenants/{id}/bind` / `DELETE /tenants/{id}`（確認テキスト欠落 → Service で 422 / Req 3.2）/ `GET /tenants`（Req 4.1）/ `GET /tenants/{id}`（Req 4.2 / 4.3）
   - actor_id を `httpserver.AuthClaimsFromContext`（`middleware.go:104`）で取得し Service に渡す
