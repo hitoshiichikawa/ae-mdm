@@ -15,7 +15,7 @@
   - _Requirements: NFR 1.1, NFR 2.1, NFR 2.3_
   - _Boundary: tenant.types, tenant.EventRecorder_
 
-- [ ] 2. マイグレーション 0016（enterprise_name 一意制約 + 無効化監査列）
+- [x] 2. マイグレーション 0016（enterprise_name 一意制約 + 無効化監査列）
 - [x] 2.1 `db/migrations/0016_tenants_bind_disable_metadata.{up,down}.sql` を追加 (P)
   - up: `tenants` に `disabled_at timestamptz NULL` / `disabled_by uuid NULL` を `ADD COLUMN IF NOT EXISTS` で追加
   - up: `CREATE UNIQUE INDEX IF NOT EXISTS uq_tenants_enterprise_name ON tenants (enterprise_name) WHERE enterprise_name IS NOT NULL`（同一 Enterprise の二重バインド防止 / Req 2.1 invariant 補強）
