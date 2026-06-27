@@ -16,7 +16,7 @@
   - _Boundary: tenant.types, tenant.EventRecorder_
 
 - [ ] 2. マイグレーション 0016（enterprise_name 一意制約 + 無効化監査列）
-- [ ] 2.1 `db/migrations/0016_tenants_bind_disable_metadata.{up,down}.sql` を追加 (P)
+- [x] 2.1 `db/migrations/0016_tenants_bind_disable_metadata.{up,down}.sql` を追加 (P)
   - up: `tenants` に `disabled_at timestamptz NULL` / `disabled_by uuid NULL` を `ADD COLUMN IF NOT EXISTS` で追加
   - up: `CREATE UNIQUE INDEX IF NOT EXISTS uq_tenants_enterprise_name ON tenants (enterprise_name) WHERE enterprise_name IS NOT NULL`（同一 Enterprise の二重バインド防止 / Req 2.1 invariant 補強）
   - down: 上記 index と 2 列を `DROP ... IF EXISTS` で逆操作（既存 `migrations_reversible_test.go` の up→down 往復検証に乗る）
