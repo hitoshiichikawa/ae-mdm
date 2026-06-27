@@ -24,14 +24,20 @@ func TestValidate_App_CountLimit(t *testing.T) {
 		name       string // <条件>のとき<期待結果>
 		count      int
 		wantReject bool
+		wantKind   ErrorKind // wantReject=true のときに期待する種別
 	}{
-		// Req 1.1: 3,000 件以下を受理
+		// Req 1.4: 0 件は下限境界として受理（アプリ件数上限の観点）
 		{name: "件数が0件のとき受理する(Req1.4 境界 空入力)", count: 0, wantReject: false},
+		// 負の「件数」は成立しない不正入力。下限直下 / 負値を invalid field で拒否する
+		// （上限超過の business rule とは区別する。Req 6.4）。
+		{name: "件数が-1件のとき範囲外で拒否する(下限直下/invalid field)", count: -1, wantReject: true, wantKind: KindInvalidField},
+		{name: "件数が-100件のとき範囲外で拒否する(負値/invalid field)", count: -100, wantReject: true, wantKind: KindInvalidField},
+		// Req 1.1: 3,000 件以下を受理
 		{name: "件数が1件のとき受理する(Req1.1 正常系)", count: 1, wantReject: false},
 		// Req 1.3: 境界値 2,999 / 3,000 / 3,001
 		{name: "件数が2999件のとき受理する(Req1.3 境界下)", count: 2999, wantReject: false},
 		{name: "件数が3000件ちょうどのとき受理する(Req1.3 境界)", count: 3000, wantReject: false},
-		{name: "件数が3001件のとき上限超過で拒否する(Req1.2/1.3 異常系)", count: 3001, wantReject: true},
+		{name: "件数が3001件のとき上限超過で拒否する(Req1.2/1.3 異常系)", count: 3001, wantReject: true, wantKind: KindBusinessRule},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -47,9 +53,9 @@ func TestValidate_App_CountLimit(t *testing.T) {
 				if !found {
 					t.Fatalf("AppCount=%d: 拒否を期待したが検証エラーが無い (result=%+v)", tt.count, got)
 				}
-				// Req 6.3: 上限超過はビジネスルール違反種別で識別される
-				if e.Kind != KindBusinessRule {
-					t.Errorf("AppCount=%d: Kind=%s, want %s", tt.count, e.Kind, KindBusinessRule)
+				// Req 6.3 / 6.4: 上限超過は business rule、負値（範囲外）は invalid field で識別される
+				if e.Kind != tt.wantKind {
+					t.Errorf("AppCount=%d: Kind=%s, want %s", tt.count, e.Kind, tt.wantKind)
 				}
 			} else if found {
 				t.Fatalf("AppCount=%d: 受理を期待したが検証エラーが返った (err=%+v)", tt.count, e)

@@ -11,6 +11,10 @@ const (
 	// 3,000 件「以下」を妥当とし、超過（3,001 以上）を上限超過として拒否する。
 	MaxAppCount = 3000
 
+	// MinAppCount はアプリ件数の下限（0 件）。アプリ「件数」は負値を取り得ないため、
+	// 0 未満は成立しない不正入力（範囲外）として拒否する。Req 1.4 で 0 件は受理する。
+	MinAppCount = 0
+
 	// MinPasswordLength はパスワード最小桁数の許容下限。
 	// AMAPI passwordMinimumLength（PasswordRequirements）は SDK v0.186.0 の field doc
 	// （"A value of 0 means there is no restriction."）の通り 0 を「制限なし」を表す
@@ -117,10 +121,21 @@ func Validate(in PolicyInput) ValidationResult {
 	return result
 }
 
-// checkAppCount はアプリ件数が上限を超えていないか検証する（Req 1）。
-// 上限超過はビジネスルール違反（KindBusinessRule / Req 6.3）として識別する。
+// checkAppCount はアプリ件数が許容範囲（下限 0・上限 MaxAppCount）に収まるか検証する（Req 1）。
+// 上限超過はビジネスルール違反（KindBusinessRule / Req 6.3）、負の件数（下限未満）は
+// 件数として成立しない不正入力（KindInvalidField / Req 6.4）として、両者を区別して識別する。
 func checkAppCount(in PolicyInput, result *ValidationResult) {
-	if in.App.AppCount > MaxAppCount {
+	n := in.App.AppCount
+	if n < MinAppCount {
+		result.add(ValidationError{
+			Domain:  DomainApp,
+			Field:   "AppCount",
+			Kind:    KindInvalidField,
+			Message: "アプリ件数が負の値です（0 以上を指定してください）",
+		})
+		return
+	}
+	if n > MaxAppCount {
 		result.add(ValidationError{
 			Domain:  DomainApp,
 			Field:   "AppCount",
