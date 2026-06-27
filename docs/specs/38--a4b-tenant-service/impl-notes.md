@@ -67,10 +67,21 @@ per-task ループで各 task の learning を追記する補足ノート。`req
   - **監査 Event の confirmed 意味付け**: Disable のみ `ConfirmationCompleted` を渡す（成功・competition 失敗とも確認テキストを通過した経路では true、確認未完了拒否では false）。Bind は confirmed=false 固定。失敗/拒否経路でも `record` + `logDeny` を Create の前例に合わせて出力。
 - **残存課題（後続 task 6 Handler への申し送り）**: Handler は `httpserver.AuthClaimsFromContext` で actor を取得し `Bind(ctx, actor, id, in)` / `Disable(ctx, actor, id, in)` に渡す（Create と同様）。`POST /tenants/{id}/bind` の body は `{signup_url_name}`、`DELETE /tenants/{id}` の body は `{confirmation}`（対象 name 再入力）。Disable 成功時の HTTP 応答は 204（design.md API Contract）であり、Service が返す disabled TenantView は Handler が必要に応じて利用する。
 
+### Task 6
+
+- **採用方針**: `internal/tenant/handler.go` に `Handler` struct（deps: `Service` / `logger.Logger`）+ `NewHandler` + `Mount(r chi.Router)` を `internal/auth/handler.go` の sub-route 方式で実装し、`/tenants` プレフィックス配下に 5 endpoint（POST `/` / GET `/` / GET `/{id}` / POST `/{id}/bind` / DELETE `/{id}`）を登録した。in-package の httptest + fake Service（`fakeTenantService`）による単体テストを同 commit に含めた。
+- **重要な判断**:
+  - **actor 取得は `httpserver.AuthClaimsFromContext(r.Context()).AdminUserID`**。Task 4/5 申し送りどおり Handler が actor を明示引数で Service へ渡す。claims 不在（guard 未適用の異常経路）は `uuid.Nil` を渡し、認可は guard 層の責務として Handler 本体は止めない（fail-safe）。
+  - **HTTP status の組み立てを Handler に持たせない**: 入口の path param UUID parse 失敗 / JSON decode 失敗のみ Handler が `CodeInvalidRequest`(400) を生成し、それ以外は Service/Repository が返す `*errors.Error` を `errors.WriteHTTP` で写像する。404/競合 body は sentinel error の固定 message に委ね、対象 ID を露出しない（Req 6.5）。DELETE 成功は 204、POST `/tenants` 成功は 201（`{id,name,status,signup_url}` 合成、`signup_url_name` は `json:"-"` で body 非露出 / NFR 2.3）。
+  - **`tenant` package が初めて `httpserver` を import**（doc.go の依存方向ルールで `httpserver` は許可リスト外）。design.md L327-328 が「Handler は presentation 層なので `AuthClaimsFromContext` を使う」と明示しているため設計指示を優先して実装し、確認事項に追記した（下記）。
+- **残存課題（後続 task 7 への申し送り）**: 認可ガード継承（未認証 401 / tenant-console aud 403 / 非 SuperAdmin 403 / admin-console+SuperAdmin 2xx）の検証は task 7 の `test/integration` 結合テスト（admin chain 経由）の責務。本 task の handler_test.go は Mount 後の route 解決と Handler 入出力契約のみを検証しており、guard 継承は未カバー（design.md「テスト配置の根拠」と整合）。
+
 ## 確認事項
 
 - **Task 4: Service の actor 受け渡しが design 疑似シグネチャから逸脱（実装上の判断）**: design.md L218-226 の `Service` 疑似シグネチャは `Create(ctx, in CreateInput)` のように actor 引数を持たず、L228 Preconditions で「ctx に AuthClaims が確立済み」と記す。しかし `tenant` package の doc.go 依存方向ルールは `httpserver` import を禁止（許可: amapi/db/logger/errors/config）しており、Service が ctx から `httpserver.AuthClaimsFromContext` で actor を取り出すことができない。本実装は監査 Event の実行者を **`Create(ctx, actor uuid.UUID, in CreateInput)` の明示引数**で受け取る形に確定した（Repository の `UpdateDisabled(ctx, id, actor)` が既に explicit actor を取る前例と整合し、最小の逸脱）。Handler（task 6）が `AuthClaimsFromContext` で actor を取得して Service へ渡す。design.md / tasks.md は書き換えていない（実装 PR では spec を書き換えない規約に準拠）。Architect 判断が必要なら本点を差し戻し対象として検討されたい。
 
 - **design.md「Modified Files」と現状の差異（task 1 では影響なし）**: design.md は「本 Issue 時点で `cmd/api/main.go` は未存在のため bootstrap 配線は行わない」と記すが、現コードベースには既に `cmd/api` パッケージが存在する（`go build ./...` / `go test ./...` 緑）。task 1 の scaffold（types + audit port）には影響しないが、後続 task 6（`Handler.Mount`）で DI bootstrap の既存状況を再確認すること。`design.md` / `tasks.md` の書き換えは行っていない（実装 PR では spec を書き換えない規約に準拠）。
+
+- **Task 6: Handler が `httpserver` を import（doc.go 依存方向ルールとの不整合 / 設計指示を優先）**: `internal/tenant/doc.go` の「# 依存方向ルール」は許可 import を amapi / db / logger / errors / config の 5 つに限定し、`httpserver` を含まない（明示はされていないが許可リスト外）。一方 design.md L327-328 は「actor_id は `httpserver.AuthClaimsFromContext`（`middleware.go:104`）で取得し Service の監査イベントに渡す」「Handler は presentation 層」と明示しており、Handler が actor を取得するには `httpserver` import が必須となる。本実装は design.md の指示を優先し `handler.go` で `internal/platform/httpserver` を import した（`go build` / `go vet` / `go test` 緑、import cycle なし＝ httpserver は tenant を import しないため一方向）。これは Service 層の `httpserver` import 禁止（task 4 で actor 明示引数化した理由）とは別レイヤの判断であり、Service は引き続き httpserver 非依存を維持している。doc.go の許可 import リストは Handler（presentation 層）も含む形に将来更新するのが整合的だが、`doc.go` / `design.md` / `tasks.md` の書き換えは行っていない（実装 PR では spec / doc を書き換えない規約に準拠）。Architect 判断が必要なら doc.go の許可 import リスト更新を差し戻し対象として検討されたい。
 
 STATUS: complete
