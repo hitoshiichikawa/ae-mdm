@@ -37,7 +37,7 @@
   - _Depends: 1.1, 2.1_
 
 - [ ] 4. Tenant Service: 作成・参照・前提ガード
-- [ ] 4.1 `internal/tenant/service.go` に Create / Get / List / EnterpriseNameForTenant を実装
+- [x] 4.1 `internal/tenant/service.go` に Create / Get / List / EnterpriseNameForTenant を実装
   - `Service` interface 定義 + 本番実装 struct（deps: `Repository` / `amapi.Client` / `EventRecorder` / `config.Config`）
   - `Create`: name 空白 trim 後空なら `CodeInvalidRequest`（Req 1.3）→ `amapi.CreateSignupURL` → `Repository.Insert`(pending_bind) → `signup_url` 返却（Req 1.1 / 1.2）。`CreateSignupURL` が非 transient error なら永続化せずエラー伝達（Req 1.4）。成功/失敗を `EventRecorder.Record`（Req 1.5 / NFR 2.1）。拒否経路（不正入力等）は構造化ログを出力（NFR 2.2）
   - `Get`/`List`: Repository へ委譲し `TenantView` に変換（Req 4.1 / 4.2 / 4.3 / 4.4）
