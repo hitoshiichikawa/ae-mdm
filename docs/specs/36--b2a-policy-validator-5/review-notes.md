@@ -5,11 +5,14 @@
 ## Reviewed Scope
 
 - Branch: claude/issue-36-impl--b2a-policy-validator-5
-- HEAD commit: ece807efbcc8fe537abea2179ad3238138b74c26
-- Compared to: develop..HEAD
-- 変更構成: 全 6 ファイル / 1057 insertions / 0 deletions（新規追加のみ。既存コード改変なし）
+- Round 1 review HEAD: ece807efbcc8fe537abea2179ad3238138b74c26（この commit 時点の検証記録）
+- Compared to: develop...HEAD（merge-base 基準の追加分のみ。develop 先行分は除外）
+- 変更構成（現在のブランチ）: 全 7 ファイル / 約 1,200 insertions / 0 deletions（新規追加のみ。既存コード改変なし）
   - `backend/internal/policy/{doc.go,types.go,validator.go,validator_test.go}`（新規 package）
-  - `docs/specs/36--b2a-policy-validator-5/{requirements.md,impl-notes.md}`
+  - `docs/specs/36--b2a-policy-validator-5/{requirements.md,impl-notes.md,review-notes.md}`（本 review-notes.md 自身も差分に含まれるため 6→7 ファイル）
+- Round 1 以降の follow-up commit（PR iteration で適用、本検証記録もこれらに整合させて更新）:
+  - `fbecf46` / `344cba1` — AMAPI passwordQuality enum 補完・Kiosk エラー機械可読化・パスワード最小桁数の下限を AMAPI 仕様準拠で 0 に修正
+  - `5118447` — アプリ件数の負値を invalid field として拒否（Req 1 の下限検証追加）
 - 注記: 本 Issue は `tasks.md` / `design.md` 不在の単一実装パス（Architect 非起動）。
   `_Boundary:_` アノテーションは存在しないが、差分は新規隔離 package と spec docs に限定され
   既存コンポーネントへの変更が 0 のため boundary 観点の懸念なし。
@@ -17,14 +20,14 @@
 
 ## Verified Requirements
 
-- 1.1 — `checkAppCount`（>MaxAppCount のみ拒否、3000 以下は受理） / `TestValidate_App_CountLimit`（count=1 受理）
+- 1.1 — `checkAppCount`（範囲 0〜MaxAppCount を受理、>3000 は business rule 拒否・<0 は invalid field 拒否） / `TestValidate_App_CountLimit`（count=1 受理）
 - 1.2 — `checkAppCount`（3001 拒否 + `KindBusinessRule`） / `TestValidate_App_CountLimit`（3001 拒否 + Kind 検証）
 - 1.3 — `TestValidate_App_CountLimit`（2999 受理 / 3000 受理 / 3001 拒否の境界網羅）
-- 1.4 — `TestValidate_App_CountLimit`（count=0 受理）
+- 1.4 — `TestValidate_App_CountLimit`（count=0 受理 / 下限直下 -1・負値 -100 を invalid field 拒否）
 - 2.1 — `checkPasswordLength`（範囲内受理） / `TestValidate_Password_LengthRange`（length=8 受理）
-- 2.2 — `checkPasswordLength`（下限未満拒否 + `KindInvalidField`） / 同テスト（0, -1 拒否 + Kind 検証）
+- 2.2 — `checkPasswordLength`（下限未満拒否 + `KindInvalidField`） / 同テスト（-1 拒否 + Kind 検証。0 は AMAPI 仕様で「制限なし」のため受理、下限直下は -1）
 - 2.3 — `checkPasswordLength`（上限超過拒否） / 同テスト（17 拒否）
-- 2.4 — `TestValidate_Password_LengthRange`（下限ちょうど 1・上限ちょうど 16 受理 / 下限直下 0・上限直上 17 拒否）
+- 2.4 — `TestValidate_Password_LengthRange`（下限ちょうど 0・上限ちょうど 16 受理 / 下限直下 -1・上限直上 17 拒否）
 - 3.1 — `checkSecurity`（必須充足 + enum 許容値で受理） / `TestValidate_Security_RequiredAndEnum`（正常系）
 - 3.2 — `checkSecurity`（EncryptionPolicy 空文字を欠落拒否 + Field 識別） / 同テスト（欠落異常系）
 - 3.3 — `checkSecurity`（EncryptionPolicy / PasswordQuality 許容値外拒否） / 同テスト（許容値外 2 ケース）
