@@ -113,6 +113,71 @@
   `go build ./... && go vet ./... && go test ./...`（コンパイル整合 + 既存テスト非破壊）で完結する。
   実 DB + RLS / append-only / 保持下限の DB-backed verify も task 6 の責務。それ以外の残存課題はなし。
 
+### Task 6
+
+- **採用方針**: `backend/test/integration/audit_test.go` を新設し、実 `audit.NewRepository(pool)` /
+  `audit.NewService(cfg, repo, fixedClock)` + `db.WithTenantContext` で task 2/5 の
+  `_Requirements_partial:_`（実 DB INSERT・NULL bind・cross-tenant 可視 / wiring 起因 401）を
+  実 Postgres で解消。DATABASE_URL 未設定は `requireDBURLs` で `t.Skip`（既存作法踏襲）。
+- **重要な判断**:
+  - 厳密件数を検証するテスト（a/b/c/f/g）は本テスト固有の `EventType` で `Filter` 絞り込みし、
+    `seedDummyData` が事前投入する `seed.event.A/B` 行に影響されないようにした（test-side の
+    入力絞り込みであり assertion 緩和ではない）。
+  - **本番バグを DB-backed verify で検出・修正**: `internal/audit/repository.go` の `scanEvent` が
+    nullable な `resource_id`（0009 で NOT NULL 制約なし）の NULL を `var resourceID string` で
+    受けられず `cannot scan NULL into *string` で落ちていた。列省略 INSERT 行（`seedDummyData`
+    等）が NULL を持つため SuperAdmin List 等が失敗。`*string` 受け + NULL→空文字写像に修正
+    （tenant_id NULL→uuid.Nil と同イディオム / types.go の "対象なし=空文字" 規約と整合）。
+    `t.Skip` 経路では露見しない appendix 層のバグで、DB-backed verify 必須工程の有効性を実証。
+  - routing スモーク (i) は `httpserver.NewServer` + task5 同配線（audit handler を 2 サブルータへ
+    Mount）した test server で `/api/audit-logs` / `/api/admin/audit-logs` が認証なし 401 を確認。
+    svc=nil でも先行ガードで handler 本体に到達しないため DB 不要（DB 不在でも PASS）。
+- **残存課題（次への影響）**: なし（全タスク完了）。Reviewer は本ファイル「DB-backed verify
+  実行結果」節で DB-backed 検証の成否を確認できる。
+
+## AC Traceability（task 6 で担保した範囲 / `backend/test/integration/audit_test.go`）
+
+| AC | 担保テスト（シナリオ） |
+|---|---|
+| 1.1 | `..._SuperAdminSeesAllDesc` 他（実 Service.Record→Insert で全フィールド追記が取得側で確認） |
+| 1.2 | `..._AppendOnly_NullTenantRowImmutable`（NULL bind 後の List で TenantID=uuid.Nil を確認） |
+| 2.8 | `..._EmptyResult_ReturnsEmptySliceNilError`（0 件は空 slice + nil） |
+| 2.9 | `..._TenantContextIsolation_OtherTenantAndNullInvisible`（tenant A で B/NULL 不可視） |
+| 3.1 | `..._SuperAdminSeesAllDesc`（A+B+NULL を occurred_at 降順で全件） |
+| 3.2 | `..._SuperAdminFilterByTenant`（Filter.TenantID=A で A 行のみ） |
+| 3.4 | `..._EmptyResult_ReturnsEmptySliceNilError`（横断経路も Service 層は同一） |
+| 3.5 | `..._SuperAdminSeesAllDesc`（SuperAdmin 文脈で NULL 行含む全テナント可視 + 降順） |
+| 4.2 | `..._RoutingSmoke_UnauthenticatedReturns401`（/api/audit-logs 認証なし 401） |
+| 4.3 | `..._TenantContextIsolation_OtherTenantAndNullInvisible`（他テナント行の存在を露出しない） |
+| 4.4 | `..._RoutingSmoke_UnauthenticatedReturns401`（/api/admin/audit-logs 認証なし 401） |
+| 5.2 | `..._RetentionFloor_ExcludesOlderRows`（retentionFloor=-180 日で -200 日行を除外） |
+| 5.3 | `..._RetentionFloor_ExcludesOlderRows`（from 未指定 → 起点に丸め保持期間外を除外） |
+| 6.1/6.2/6.3 | `..._AppendOnly_UpdateDeleteRejected`（tenant/SuperAdmin 両文脈で UPDATE/DELETE が 42501） |
+| 6.4 | `..._AppendOnly_NullTenantRowImmutable`（NULL テナント行への UPDATE/DELETE も 42501） |
+| NFR 1.2 | `..._NormalTenant_CrossTenantInsertRejectedAndInTenantRetained`（保持期間内行を欠損なく取得） |
+| NFR 2.1 | `..._TenantContextIsolation_OtherTenantAndNullInvisible`（A の自テナント分離を恒常担保） |
+| NFR 2.2 | `..._NormalTenant_CrossTenantInsertRejectedAndInTenantRetained`（tenant A で tenant_id=B Insert が WITH CHECK 拒否） |
+
+## DB-backed verify 実行結果
+
+- **DB 起動**: 環境に `.env` / `psql` CLI が無いため、ephemeral Postgres 16 コンテナを起動
+  （`docker run -d --name ae-mdm-audit-itest -e POSTGRES_USER=ae_mdm -e POSTGRES_PASSWORD=testpass
+  -e POSTGRES_DB=ae_mdm -p 55439:5432 postgres:16-alpine`）。
+- **roles**: `db/roles/0001_create_app_and_migration_roles.sql` のパスワード placeholder を実値に
+  置換し `docker exec ... psql` で適用（app_user / migration_user 作成）。
+- **migrate**: `go run -tags postgres .../migrate -path db/migrations -database <migration_user DSN> up`
+  で 15 migration 全適用。
+- **実行コマンド**: `DATABASE_URL=<app_user DSN> MIGRATE_DATABASE_URL=<migration_user DSN>
+  GOTOOLCHAIN=local go test ./... -count=1`
+- **結果（DB-backed）**: 全パッケージ `ok`。`test/integration` の audit 9 テスト（サブ含む）
+  すべて PASS。`internal/audit` 単体テストも PASS（scanEvent 修正の非破壊を確認）。
+- **`t.Skip` 個数（DB 不在時）**: `audit_test.go` の DB-backed テスト 8 件が `t.Skip`、
+  routing スモーク (i) 1 件は DB 不要のため DB 不在でも PASS（計 9 関数）。
+  stage-a-verify コマンド `cd backend && go build ./... && go vet ./... && go test ./...` を
+  DATABASE_URL 未設定で実行し全 `ok`（false-fail なし）を確認済み。
+- **検出した不具合**: DB-backed verify により nullable `resource_id` の scan バグを検出し本番
+  コード（`scanEvent`）を修正（上記 Task 6 learnings 参照）。本 commit に同梱。
+
 ## AC Traceability（task 1 で担保した範囲）
 
 | AC | 担保テスト（`internal/audit/service_test.go`） |
