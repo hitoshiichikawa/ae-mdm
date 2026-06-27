@@ -68,7 +68,7 @@
   - _Boundary: tenant.Handler_
   - _Depends: 5.1_
 
-- [ ] 7. `/api/admin` 認可ガード継承の結合テスト
+- [x] 7. `/api/admin` 認可ガード継承の結合テスト
 - [x] 7.1 `backend/test/integration/` に Tenant エンドポイントのガード継承テストを追加
   - 既存 `http_subrouter_mount_test.go` / admin chain 構築（`server.go` の `NewServer` + `Routers.Admin`）を流用し、`tenant.Handler.Mount` 済みルータを構築
   - 未認証（AuthClaims 不在）で `/api/admin/tenants` 系 → 401（Req 6.4）
