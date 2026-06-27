@@ -2,8 +2,9 @@
 // 提供する。SaaS 運用者（SuperAdmin）が admin-console から顧客企業ごとのテナントを
 // 作成・Enterprise バインド・無効化・参照する Tenant ライフサイクルを所有する。
 //
-// 本ファイル時点（task 1.1）では、後続 task（Repository / Service / Handler）が共有する
-// ドメイン型（types.go）と監査記録ポート（audit_log.go）の scaffold のみを提供する。
+// 本 package は Tenant ドメイン層一式を提供する: ドメイン型・DTO・監査記録ポート（types.go /
+// audit_log.go）、永続化（repository.go）、状態機械を所有する Service（service.go）、
+// `/api/admin/tenants` の HTTP Handler（handler.go）。
 //
 // # 依存方向ルール
 //
@@ -16,9 +17,12 @@
 //   - 許可: github.com/hitoshiichikawa/ae-mdm/internal/logger（監査ポートの interim 実装）
 //   - 許可: github.com/hitoshiichikawa/ae-mdm/internal/errors（sentinel error / Code 写像）
 //   - 許可: github.com/hitoshiichikawa/ae-mdm/internal/config（AMAPIProjectID）
+//   - 許可: github.com/hitoshiichikawa/ae-mdm/internal/platform/httpserver（presentation 層の
+//     handler.go のみ。`AuthClaimsFromContext` で actor を取得し Service へ明示引数で渡す。
+//     Service / Repository 層は httpserver を import しない / design.md L327-328）
 //   - 禁止: 上位 application / cmd / 他 domain への直接 import
 //
-// # 構成（task 1.1 時点）
+// # 構成
 //
 //   - doc.go         : 本 package ドキュメント（依存方向ルール / 機密値の非埋込契約）
 //   - types.go       : Status enum（pending_bind / bound / disabled）と ParseStatus / Valid /
@@ -28,9 +32,12 @@
 //     ErrTenantDisabled / ErrTenantNotFound）
 //   - audit_log.go   : EventRecorder の `internal/logger` 実装（LoggerRecorder）。Audit
 //     Service 実装後に差し替える interim binding。Event の安全フィールドのみ構造化出力する
-//   - types_test.go  : Status の正常 / 異常値判定の in-package 単体テスト（NFR 1.1）
-//   - audit_log_test.go : LoggerRecorder が秘密値を出力しないこと（redact 観点 / NFR 2.3）と
-//     監査項目を field 化すること（NFR 2.1）の in-package 単体テスト
+//   - repository.go  : `Repository`（Insert / Get / List / UpdateBound / UpdateDisabled）の
+//     pgxpool 実装。SuperAdmin context 昇格 + 条件付き UPDATE の affected で競合を表現する
+//   - service.go     : 状態機械を所有する `Service`（Create / Bind / Disable / Get / List /
+//     EnterpriseNameForTenant）。AMAPI オーケストレーション → 永続化 → 監査記録を担う
+//   - handler.go     : `/api/admin/tenants` 配下 5 endpoint の HTTP Handler（presentation 層）
+//   - *_test.go      : 各層の in-package 単体テスト（types / audit_log / service / handler）
 //
 // # 機密値の非埋込契約（NFR 2.3）
 //
