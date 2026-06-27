@@ -48,7 +48,7 @@
   - _Depends: 3.1_
 
 - [ ] 5. Tenant Service: Enterprise バインド・無効化（状態機械）
-- [ ] 5.1 `internal/tenant/service.go` に Bind / Disable を追加実装
+- [x] 5.1 `internal/tenant/service.go` に Bind / Disable を追加実装
   - `Bind`: `Repository.Get` で現状態判定 → pending_bind 以外は 409(bound 重複 / Req 2.5) / 422(disabled / Req 2.6) / 404(不在) → pending_bind なら `amapi.CreateEnterprise(signupURLName, cfg.AMAPIProjectID)` → 失敗時は永続化せずエラー伝達 + 行を pending_bind 維持（Req 2.4 / NFR 1.3）→ 成功時 `Repository.UpdateBound`、affected=0 は 409（Req 2.1 / 2.2 / 2.5）。成否を Record（Req 2.7）
   - `Disable`: 二段階確認テキスト（`DisableInput.Confirmation` が対象 `tenants.name` と完全一致）を検証、不一致は `CodeBusinessRule`(確認未完了 / Req 3.2)。確認 OK で `Repository.UpdateDisabled`、affected=0 は 409(二重無効化 / Req 3.4)。disabled は終端で再有効化遷移を持たない。成否を Record（Req 3.1 / 3.3 / 3.5）
   - 未定義状態遷移は前提判定で拒否し `CodeBusinessRule` を返す（NFR 1.2）。全拒否経路（不正遷移 / 確認未完了 / 競合）で構造化ログを出力（NFR 2.2）
