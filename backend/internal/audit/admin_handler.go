@@ -37,6 +37,18 @@ type AdminHandler struct {
 	log        logger.Logger
 }
 
+// crossTenantAuthzProbeTenantID は tenant_id query 無し（全テナント横断ビュー）の cross-tenant
+// `audit_log read` 認可を許可マトリクスで実際に gate するための代表 TargetTenantID。
+//
+// SuperAdmin セッションの SessionTenantID は uuid.Nil であり、任意の **非 nil** UUID は
+// authz.Authorize の cross-tenant 分岐（SessionTenantID != target かつ target != uuid.Nil）へ
+// 確実に落ちる。これにより「admin-console + SuperAdmin が cross-tenant audit_log read を許可
+// されているか」を許可マトリクスで判定でき、将来 matrix 側で当該許可を変更した場合に全テナント
+// 横断ビューにも反映される（Req 4.6 を main path で満たす）。固定の sentinel 値で判定を決定的に
+// する。本値は **authz 判定専用** であり Filter.TenantID には設定しない（Filter は nil のままで
+// RLS の SuperAdmin 句が全テナント + NULL を可視にする / Req 3.1 / 3.5）。
+var crossTenantAuthzProbeTenantID = uuid.MustParse("ffffffff-ffff-ffff-ffff-ffffffffffff")
+
 // NewAdminHandler は本番用 admin-console AdminHandler を構築する。
 //
 // svc は cross-tenant 閲覧の List を、authorizer は cross-tenant `audit_log read` の認可判定を
@@ -66,22 +78,25 @@ func (h *AdminHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 //     防御的に claims 不在は 401 / Req 4.4）
 //  2. query parse: 共通絞り込み（parseFilter）＋ tenant_id の任意 uuid parse（不正は 400 +
 //     failure_kind=parse_invalid / Req 3.2 / 3.3）
-//  3. tenant_id 指定時のみ cross-tenant authz matrix 判定（SuperAdmin × admin-console ×
-//     cross-tenant → allow / deny は 403 / Req 4.6）。tenant_id 無し（全テナント横断ビュー）は
-//     authz の uuid.Nil fail-closed を回避する（下記「authz↔design 不整合の解決方針」参照）
+//  3. cross-tenant authz matrix 判定を **常に** 行う（二重防御 / Req 4.4 / 4.6）。TargetTenantID は
+//     tenant_id query 指定時は当該テナント、無指定（全テナント横断ビュー）は代表 probe テナントを
+//     渡す（下記「全テナント横断ビューの authz 判定」参照）。deny は 403
 //  4. SuperAdmin TenantContext（TenantID=uuid.Nil, IsSuperAdmin=true）を db.WithTenantContext で
 //     確立（RLS の is_superadmin 句で全テナント + NULL 可視 / Req 3.1 / 3.5）
 //  5. svc.List（DB 失敗は CodeUnavailable → 503 + failure_kind=query_error / NFR 3.2）
 //  6. []AuditLogDTO に写像して JSON encode（空は [] で 200 / Req 3.4 / NFR 3.1）
 //
-// authz↔design 不整合の解決方針（impl-notes.md「確認事項」参照）: design.md は authz を
-// 「常に claims.TenantID fallback で TargetTenantID 指定」と書くが、authz.Authorize は
-// TargetTenantID が uuid.Nil（SuperAdmin claims.TenantID）に正規化されると role/aud に関わらず
-// 無条件 deny する（authz.go Req 4.4 fail-closed）。これをそのまま全テナント横断ビュー
-// （tenant_id query 無し）に適用すると 403 になり AC Req 3.1 と矛盾するため、cross-tenant の
-// authz matrix 判定は **具体的な tenant_id query が指定されたときのみ** 行う。tenant_id 無しの
-// 全テナントビューは `RequireAdminConsoleAndSuperAdmin` 固定ガードが既に admin-console +
-// SuperAdmin を強制済み（Req 4.4）であることに依拠して保護する。
+// 全テナント横断ビューの authz 判定（impl-notes.md「確認事項」参照）: design.md は admin 経路で
+// authz を **常に** 呼んで cross-tenant read を判定する（二重防御 / Req 4.6）ことを意図するが、
+// authz.Authorize は TargetTenantID が uuid.Nil に正規化されると role/aud に関わらず無条件
+// deny する（authz.go Req 4.4 fail-closed）。SuperAdmin の claims.TenantID は uuid.Nil のため、
+// design の字面どおり TargetTenantID=claims.TenantID を渡すと全テナント横断ビューが 403 に化け
+// AC Req 3.1 と矛盾する。これを解消するため、tenant_id query 無しの全テナントビューでは
+// 代表 probe テナント（crossTenantAuthzProbeTenantID / 非 nil）を TargetTenantID として渡す。
+// SuperAdmin session（SessionTenantID=uuid.Nil）に対し任意の非 nil target は authz の cross-tenant
+// 分岐へ落ちるため、許可マトリクスの `audit_log read`（cross-tenant = SuperAdmin のみ）が main path
+// でも実際に gate する（Req 4.6）。probe は authz 判定専用で Filter には設定しない（Filter.TenantID は
+// nil のままで RLS の SuperAdmin 句が全テナント + NULL を可視にする / Req 3.1 / 3.5）。
 func (h *AdminHandler) list(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 
@@ -112,30 +127,33 @@ func (h *AdminHandler) list(w http.ResponseWriter, r *http.Request) {
 	}
 	filter.TenantID = tenantID
 
-	// tenant_id 指定時のみ cross-tenant authz matrix 判定（二重防御 / Req 4.6）。
-	// tenant_id 無し（全テナント横断ビュー）は authz の uuid.Nil fail-closed を回避する
-	// （上記 godoc「authz↔design 不整合の解決方針」参照）。
+	// cross-tenant authz matrix 判定を **常に** 行う（二重防御 / Req 4.4 / 4.6）。
+	// tenant_id 指定時は当該テナントを、無指定（全テナント横断ビュー）は代表 probe テナントを
+	// TargetTenantID に渡し、いずれの経路でも許可マトリクスが cross-tenant `audit_log read` を
+	// gate する（上記 godoc「全テナント横断ビューの authz 判定」参照）。
+	targetTenantID := crossTenantAuthzProbeTenantID.String()
 	if filter.TenantID != nil {
-		decision := h.authorizer.AuthorizeAndLog(ctx, h.log, authz.LogContext{
-			RequestID:         httpserver.RequestIDFromContext(ctx),
-			ActorID:           claims.AdminUserID.String(),
-			SessionHashPrefix: claims.SessionHashPrefix,
-		}, authz.Request{
-			Roles:           claims.Roles,
-			SessionTenantID: claims.TenantID,
-			Audience:        authz.AudienceAdminConsole,
-			Action:          authz.ActionRead,
-			Resource:        authz.ResourceAuditLog,
-			TargetTenantID:  filter.TenantID.String(),
-		})
-		if !decision.Allowed {
-			// AuthorizeAndLog が authz の構造化 WARN を出すため、ここでは status 写像のみ行う（Req 4.6）。
-			pkgerrors.WriteHTTP(w, r, pkgerrors.New(
-				pkgerrors.CodeForbidden,
-				"audit log read forbidden",
-			), h.log)
-			return
-		}
+		targetTenantID = filter.TenantID.String()
+	}
+	decision := h.authorizer.AuthorizeAndLog(ctx, h.log, authz.LogContext{
+		RequestID:         httpserver.RequestIDFromContext(ctx),
+		ActorID:           claims.AdminUserID.String(),
+		SessionHashPrefix: claims.SessionHashPrefix,
+	}, authz.Request{
+		Roles:           claims.Roles,
+		SessionTenantID: claims.TenantID,
+		Audience:        authz.AudienceAdminConsole,
+		Action:          authz.ActionRead,
+		Resource:        authz.ResourceAuditLog,
+		TargetTenantID:  targetTenantID,
+	})
+	if !decision.Allowed {
+		// AuthorizeAndLog が authz の構造化 WARN を出すため、ここでは status 写像のみ行う（Req 4.6）。
+		pkgerrors.WriteHTTP(w, r, pkgerrors.New(
+			pkgerrors.CodeForbidden,
+			"audit log read forbidden",
+		), h.log)
+		return
 	}
 
 	// SuperAdmin TenantContext を確立してから Service へ。RLS の is_superadmin 句で全テナント +

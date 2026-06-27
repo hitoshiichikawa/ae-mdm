@@ -223,6 +223,45 @@ func TestAdminHandler_List_InvalidQuery_Returns400(t *testing.T) {
 	}
 }
 
+// ---- (f) tenant_id 無しの全テナント横断ビューでも cross-tenant authz matrix が gate する（Req 4.6） ----
+
+// TestAdminHandler_List_NoTenantID_NonSuperAdmin_Returns403 は、tenant_id 無し（全テナント横断
+// ビュー）の経路でも許可マトリクスが cross-tenant `audit_log read` を判定し、SuperAdmin 以外を
+// 403 で拒否することを回帰検証する（Req 4.4 / 4.6）。
+//
+// 修正前は tenant_id 無しのとき authz 判定を skip していたため、固定ガードを外れた非 SuperAdmin の
+// admin-console claims が handler 本体まで到達すると 200 に倒れていた（許可マトリクスの bypass）。
+// 本テストは all-tenant 経路でも authz が main path で発火することを担保する。
+func TestAdminHandler_List_NoTenantID_NonSuperAdmin_Returns403(t *testing.T) {
+	// Arrange: admin-console aud だが SuperAdmin ロールを持たない claims
+	// （RequireAdminConsoleAndSuperAdmin 固定ガードは unit では不在のため handler 本体まで到達する）。
+	svc := &fakeService{listOut: []Event{}}
+	log := &fakeLogger{}
+	h := NewAdminHandler(svc, authz.New(), log)
+	claims := httpserver.AuthClaims{
+		TenantID:          uuid.Nil,
+		AdminUserID:       uuid.New(),
+		Roles:             []string{"TenantAdmin"}, // SuperAdmin ではない
+		IsSuperAdmin:      false,
+		Console:           "admin-console",
+		SessionHashPrefix: "abc12345",
+	}
+
+	// Act: tenant_id 無し（全テナント横断ビュー）。
+	rec := doAdminRequest(t, h, "", &claims)
+
+	// Assert: cross-tenant authz matrix の判定で 403（Req 4.6）。svc.List には到達しない。
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("status = %d; want 403（all-tenant view も authz matrix が gate する / Req 4.6） body=%q", rec.Code, rec.Body.String())
+	}
+	if svc.listCalls != 0 {
+		t.Errorf("403 で svc.List が呼ばれてはならない（呼び出し回数=%d）", svc.listCalls)
+	}
+	if code := decodeErrCode(t, rec); code != string(internalerrors.CodeForbidden) {
+		t.Errorf("body.Code = %q; want %q", code, internalerrors.CodeForbidden)
+	}
+}
+
 // ---- (e) fake Service が空 slice を返したら 200 + [] （Req 3.4） ----
 
 func TestAdminHandler_List_EmptyResult_Returns200EmptyArray(t *testing.T) {
