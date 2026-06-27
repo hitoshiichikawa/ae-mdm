@@ -31,7 +31,7 @@
     platform/authz / platform/httpserver / config / logger / errors のみ import 可）を godoc に記載
   - _Requirements: 1.1, 1.2, 1.3, 1.4, 2.2, 2.3, 2.4, 2.5, 3.2_
   - _Boundary: AuditTypes_
-- [ ] 1.2 Audit Service 実装 + 単体テスト
+- [x] 1.2 Audit Service 実装 + 単体テスト
   - `backend/internal/audit/service.go` を新規追加。`Service interface { Record(ctx, Event) error;
     List(ctx, Filter) ([]Event, error) }`（update/delete IF は **公開しない** / Req 1.5）と
     `NewService(cfg config.Config, repo Repository, clock Clock) Service` を実装
