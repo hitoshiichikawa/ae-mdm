@@ -89,7 +89,7 @@
   - _Boundary: AuditRepository_
   - _Depends: 1.1_
 
-- [ ] 3. tenant-console Handler（own-tenant 閲覧 + Authorizer 連携）+ 単体テスト
+- [x] 3. tenant-console Handler（own-tenant 閲覧 + Authorizer 連携）+ 単体テスト
 - [x] 3.1 Handler 実装 + httptest 単体テスト
   - `backend/internal/audit/handler.go` を新規追加。`Handler`（chi.Router 互換 / `ServeHTTP`）と
     `NewHandler(svc Service, authorizer *authz.Authorizer, log logger.Logger) *Handler` を実装。
