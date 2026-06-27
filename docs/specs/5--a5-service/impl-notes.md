@@ -39,6 +39,32 @@
   （Req 1.1/1.2/3.5）は `_Requirements_partial:_` 明示済みで task 6（integration）へ deferred。
   task 3/4（handler）は本 Repository ではなく Service interface に依存するため本 task の影響なし。
 
+### Task 3
+
+- **採用方針**: `handler.go` に tenant-console `Handler`（chi.Router 内包で http.Handler /
+  chi.Router 双方を満たす）と `NewHandler(svc, authorizer, log)` を実装。query parse を純粋関数
+  `parseFilter` / `parseRFC3339Query` に切り出し、両 handler 共通の `AuditLogDTO` /
+  `toAuditLogDTO` / `writeAuditLogs` を handler.go に置いた（task 4 admin handler が再利用）。
+- **重要な判断**:
+  - `Handler` は chi.Router を内包し root 相対 `GET /` を登録。本番は
+    `routers.API.Mount("/audit-logs", h)` で chi が prefix を strip するため `/api/audit-logs`
+    で成立する。handler_test も本番同様に親 chi router へ Mount してから request する
+    （直接 ServeHTTP に `/api/audit-logs` を渡すと route 不一致で 404 になるため。test 側の
+    弱体化ではなく production 経路の忠実再現）。
+  - own-tenant 固定のため `Filter.TenantID = nil` を明示し RLS に分離を委ねる（Req 2.9 /
+    4.3 / NFR 2.1）。`AuthorizeAndLog` を `Audience=AudienceTenantConsole` /
+    `TargetTenantID=claims.TenantID.String()`（same-tenant）で呼ぶことで Operator/Viewer は
+    matrix で deny → 403、TenantAdmin/SuperAdmin は allow（実 `authz.New()` で検証）。
+  - DTO の `tenant_id` は NULL テナント（uuid.Nil）を JSON `null` にするため `*string`。0 件は
+    `make([]AuditLogDTO, 0)` を encode して `[]`（`null` ではなく空配列）で 200（Req 2.8）。
+    parse 失敗は 400 + `failure_kind=parse_invalid`、DB 失敗は `svc.List` の `CodeUnavailable`
+    →503 で `failure_kind=query_error` を WARN（query 生値は補間しない / NFR 3.1 / 3.2）。
+- **残存課題（次 task=4/5 への影響）**: `AuditLogDTO` / `toAuditLogDTO` / `writeAuditLogs` /
+  `parseFilter` / `parseRFC3339Query` は handler.go 済みで admin handler（task 4）から再利用
+  できる（再宣言しないこと）。admin handler は `tenant_id` query の uuid parse を追加し
+  `Filter.TenantID` を設定、SuperAdmin TenantContext を `db.WithTenantContext` で確立する点が
+  本 handler と異なる。それ以外の残存課題はなし。
+
 ## AC Traceability（task 1 で担保した範囲）
 
 | AC | 担保テスト（`internal/audit/service_test.go`） |
@@ -61,6 +87,30 @@
 
 > 注: 1.2（DB への実 NULL bind）の永続層検証は task 2.1 / task 6（integration）の責務。
 > task 1 では「Service が TenantID を改変せず素通しする」ことまでを担保した。
+
+## AC Traceability（task 3 で担保した範囲 / `internal/audit/handler_test.go`）
+
+| AC | 担保テスト |
+|---|---|
+| 2.1 | `TestHandler_List_TenantAdmin_OwnTenant_Returns200`（own-tenant Filter で 200 + JSON 配列。occurred_at desc は Service/Repository 責務） |
+| 2.2 | `TestHandler_List_MapsAllFilterFields`（event_type → Filter.EventType 写像） |
+| 2.3 | `TestHandler_List_MapsAllFilterFields`（actor_id uuid → Filter.ActorID 写像） |
+| 2.4 | `TestHandler_List_MapsAllFilterFields`（resource_id → Filter.ResourceID 写像） |
+| 2.5 | `TestHandler_List_MapsAllFilterFields`（from/to RFC3339 → Filter.From/To 写像） |
+| 2.6 | `TestHandler_List_FromOnly_ReflectedInFilter`（from のみ指定 / to は nil） |
+| 2.7 | `TestHandler_List_ToOnly_ReflectedInFilter`（to のみ指定 / from は nil） |
+| 2.8 | `TestHandler_List_EmptyResult_Returns200EmptyArray`（空は `[]` で 200）/ `TestHandler_List_InvalidQuery_Returns400`（不正入力は 400 で区別） |
+| 4.1 | `TestHandler_List_Operator_Returns403`（Operator は 403 / svc.List 未呼出） |
+| 4.2 | `TestHandler_List_NoClaims_Returns401`（claims 不在は 401 / svc.List 未呼出） |
+| 4.5 | `TestHandler_List_Viewer_Returns403`（Viewer は 403 / svc.List 未呼出） |
+| 4.6 | `TestHandler_List_TenantAdmin_OwnTenant_Returns200` + `..._Operator/Viewer_Returns403`（実 `authz.New()` の `audit_log read` matrix で TenantAdmin allow / Operator・Viewer deny を担保） |
+| NFR 3.1 | `TestHandler_List_EmptyResult_Returns200EmptyArray`（DTO は `[]AuditLogDTO` のみ・追加機密値なし）/ parse 失敗 WARN に query 生値非補間（実装で `warnFailure` が固定 field のみ） |
+| NFR 3.2 | `TestHandler_List_InvalidQuery_Returns400`（`failure_kind=parse_invalid` を WARN に出力） |
+
+> 注: 2.9（他テナント / NULL 行を含めない）は本 handler が `Filter.TenantID=nil` 固定で RLS に
+> 委ねる設計であり、実 RLS 分離の検証は task 6（integration）の責務。本 task では
+> `TestHandler_List_TenantAdmin_OwnTenant_Returns200` が「own-tenant 経路で Filter.TenantID を
+> 設定しない（RLS に委ねる）」ことを assert することで構造的に担保した。
 
 ## 確認事項
 
