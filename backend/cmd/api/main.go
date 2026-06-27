@@ -28,9 +28,11 @@ import (
 	"github.com/go-chi/chi/v5"
 	"golang.org/x/oauth2"
 
+	"github.com/hitoshiichikawa/ae-mdm/internal/audit"
 	"github.com/hitoshiichikawa/ae-mdm/internal/auth"
 	"github.com/hitoshiichikawa/ae-mdm/internal/config"
 	"github.com/hitoshiichikawa/ae-mdm/internal/logger"
+	"github.com/hitoshiichikawa/ae-mdm/internal/platform/authz"
 	"github.com/hitoshiichikawa/ae-mdm/internal/platform/db"
 	"github.com/hitoshiichikawa/ae-mdm/internal/platform/httpserver"
 	"github.com/hitoshiichikawa/ae-mdm/internal/platform/oidc"
@@ -97,7 +99,9 @@ func healthcheckURL(listenAddr string) string {
 //     auth.NewMiddleware(...) を構築（Req 6.2 / 6.3 の物理分離強制）
 //  6. httpserver.NewServer(cfg, log, pool, authMWTenant, authMWAdmin, authMount) …
 //     2 サブルータ mount + auth エンドポイント mount
-//  7. ListenAndServe goroutine + signal.NotifyContext で graceful shutdown
+//  7. audit domain（Repository / Service / Handler / AdminHandler）の DI 配線 +
+//     Routers.API / Routers.Admin への `/audit-logs` Mount（Issue #5 / A5）
+//  8. ListenAndServe goroutine + signal.NotifyContext で graceful shutdown
 //
 // いずれかの初期化失敗で exit code 1 + 構造化 ERROR ログを出す（NFR 3.1 / 3.2）。
 // pool は defer で Close する（shutdown 順序: HTTP server.Shutdown → pool.Close）。
@@ -175,7 +179,10 @@ func runBootstrap(ctx context.Context) int {
 	}
 
 	// (6) http server
-	srv, _, err := httpserver.NewServer(cfg, log, pool, authMWTenant, authMWAdmin, authMount)
+	//
+	// 戻り値 routers（`Routers.API` = /api 配下 / `Routers.Admin` = /api/admin 配下）を
+	// 受け取り、後段 (7) で audit domain の Handler を Mount する公開ポイントとして使う。
+	srv, routers, err := httpserver.NewServer(cfg, log, pool, authMWTenant, authMWAdmin, authMount)
 	if err != nil {
 		log.Error("ae-mdm api: httpserver.NewServer failed",
 			logger.Err(err),
@@ -183,7 +190,27 @@ func runBootstrap(ctx context.Context) int {
 		return 1
 	}
 
-	// (7) ListenAndServe + graceful shutdown
+	// (7) audit domain（A5 / Issue #5）の DI 配線 + Mount
+	//
+	// cfg / pool / log は既存 bootstrap で構築済みのものを再利用する（新規構築しない）。
+	// Repository は pgxpool 経由で audit_logs へ append-only INSERT / 保持下限付き SELECT を
+	// 行い、Service が記録時の ID/OccurredAt 補完と閲覧時の保持期間下限算出を担う。
+	// 閲覧 Handler / AdminHandler は authz.Authorizer の `audit_log read` 許可マトリクスで
+	// RBAC / テナント分離を判定する（Req 4.1 / 4.4 / 4.6）。
+	//   - tenant-console 経路: `routers.API.Mount("/audit-logs", auditHandler)`
+	//     → 実 path `/api/audit-logs`（own-tenant 閲覧 / Req 2.x）
+	//   - admin-console 経路: `routers.Admin.Mount("/audit-logs", auditAdminHandler)`
+	//     → 実 path `/api/admin/audit-logs`（cross-tenant 閲覧 / 固定ガード
+	//       RequireAdminConsoleAndSuperAdmin 配下 / Req 3.x / 4.4）
+	auditRepo := audit.NewRepository(pool)
+	auditSvc := audit.NewService(cfg, auditRepo, audit.SystemClock{}, log)
+	authorizer := authz.New()
+	auditHandler := audit.NewHandler(auditSvc, authorizer, log)
+	auditAdminHandler := audit.NewAdminHandler(auditSvc, authorizer, log)
+	routers.API.Mount("/audit-logs", auditHandler)
+	routers.Admin.Mount("/audit-logs", auditAdminHandler)
+
+	// (8) ListenAndServe + graceful shutdown
 	return runHTTPServer(ctx, srv, log)
 }
 
