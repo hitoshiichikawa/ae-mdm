@@ -194,13 +194,16 @@ type rowScanner interface {
 // scanEvent は audit_logs の 1 行を Event に写像する。
 //
 // tenant_id が NULL の行は Event.TenantID = uuid.Nil に戻す（NULL テナント / Req 1.2）。
-// detail(jsonb) は map[string]any に unmarshal する。
+// resource_id は nullable text 列（0009_create_audit_logs.up.sql で NOT NULL 制約なし）であり、
+// 列を省略して INSERT された行は NULL を持つため *string で受けて NULL → 空文字（"対象なし" /
+// types.go の Filter.ResourceID 規約）に写像する（NULL を空文字に倒すことで Event.ResourceID の
+// string 型と整合させる）。detail(jsonb) は map[string]any に unmarshal する。
 func scanEvent(row rowScanner) (Event, error) {
 	var (
 		ev         Event
 		tenantID   *uuid.UUID
 		eventType  string
-		resourceID string
+		resourceID *string
 		detailJSON []byte
 		result     string
 	)
@@ -221,7 +224,9 @@ func scanEvent(row rowScanner) (Event, error) {
 		ev.TenantID = *tenantID
 	}
 	ev.EventType = EventType(eventType)
-	ev.ResourceID = resourceID
+	if resourceID != nil {
+		ev.ResourceID = *resourceID
+	}
 	ev.Result = ResultType(result)
 
 	detail, err := unmarshalDetail(detailJSON)
