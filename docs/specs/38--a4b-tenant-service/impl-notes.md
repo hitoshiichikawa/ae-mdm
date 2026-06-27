@@ -43,7 +43,23 @@ per-task ループで各 task の learning を追記する補足ノート。`req
   - `UpdateBound`/`UpdateDisabled` は affected を返すのみで、現状態の判定（bound/disabled/不在の区別）は Service が `Get` 経由で行う設計（design.md L244-265 Bind シーケンス図と整合）。
   - `List` は created_at 昇順固定・全件返却（ページングなし。requirements Open Question「テナント一覧のページング」は MVP 全件で据え置き）。
 
+### Task 4
+
+- **採用方針**: `internal/tenant/service.go` に Tenant Service を `internal/auth.NewService` と同型の「interface 公開 + 本番実装 struct + deps 注入 + コンストラクタ」パターンで実装し、本 task のスコープである Create / Get / List / EnterpriseNameForTenant の 4 メソッドのみを `Service` interface に宣言・実装した。`amapi.StubClient` + fake Repository/Recorder/Logger を使う in-package 単体テスト（`service_test.go`）を同 commit に含めた。
+- **重要な判断**:
+  - **interface に Bind/Disable を含めるか**: prompt の推奨どおり **後者（task 4 では 4 メソッドのみ interface 宣言）** を採用した。Bind/Disable は task 5 で interface に追記・実装する。これによりスタブのプレースホルダ（`CodeInternal` 等を返す未実装メソッド）を本番実装 struct に置かずに済み、「task 4 では実装しない」スコープと一致してクリーン。**task 5 への申し送り**: task 5 は `Service` interface に `Bind(ctx, id, BindInput) (TenantView, error)` / `Disable(ctx, id, DisableInput) (TenantView, error)` を追記し、`service` struct にメソッドを実装する（design.md L221-222 のシグネチャに従う）。
+  - **actor の受け渡し**: design.md の Service 疑似シグネチャ（`Create(ctx, in CreateInput)`）は actor 引数を持たないが、`tenant` package は doc.go の依存方向ルールで `httpserver` import を **禁止**（許可は amapi/db/logger/errors/config のみ）しているため、Service が ctx 経由で `httpserver.AuthClaimsFromContext` を呼ぶことは不可。よって監査 Event の実行者は **`Create(ctx, actor uuid.UUID, in CreateInput)` の明示引数**として受け取る形にした（Handler が `AuthClaimsFromContext` で取得して渡す / Repository の `UpdateDisabled(ctx, id, actor)` が既に explicit actor を取る前例と整合）。これは design 疑似シグネチャからの最小の逸脱であり、確認事項にも記載した。**task 5 への申し送り**: Bind/Disable も同様に actor を明示引数で受け取る設計が一貫する（Disable は Repository.UpdateDisabled に actor を渡す必要があるため必須）。
+  - **AMAPI error はそのまま伝播**: `CreateSignupURL` の error は #34 が Code 正規化済み（4xx=非 transient / 429・5xx=CodeUpstream+transient）のため Service では再分類せずそのまま返す（design.md Error Strategy / Req 1.4）。永続化前に return するため pending_bind 行は作られない。
+  - **拒否経路の構造化ログ（NFR 2.2）**: name 空 / pending_bind ガード / disabled ガードで `s.log.Warn("tenant operation denied", actor_id, tenant_id, deny_reason)` を出す。EnterpriseNameForTenant の前提ガードは actor を引き回さない契約（design 疑似シグネチャに actor 無し）のため actor は `uuid.Nil` を渡す。
+  - **EnterpriseNameForTenant の default 分岐**: 定義外 status は fail-closed で `ErrInvalidState`（422）を返す（NFR 1.1 / 1.2 の防御。Repository は正規 3 値しか書かないため通常到達しないが安全側）。
+- **残存課題（後続 task 5 への申し送り）**:
+  - `Service` interface への Bind/Disable 追記と実装は task 5 の責務（上記）。
+  - actor の明示引数化は Bind/Disable でも踏襲すること。
+  - `config.Config.AMAPIProjectID` は本 task では未使用だが Service struct の deps に含めた（Bind/task 5 が `CreateEnterprise(signupURLName, cfg.AMAPIProjectID)` で使用 / design.md L209）。
+
 ## 確認事項
+
+- **Task 4: Service の actor 受け渡しが design 疑似シグネチャから逸脱（実装上の判断）**: design.md L218-226 の `Service` 疑似シグネチャは `Create(ctx, in CreateInput)` のように actor 引数を持たず、L228 Preconditions で「ctx に AuthClaims が確立済み」と記す。しかし `tenant` package の doc.go 依存方向ルールは `httpserver` import を禁止（許可: amapi/db/logger/errors/config）しており、Service が ctx から `httpserver.AuthClaimsFromContext` で actor を取り出すことができない。本実装は監査 Event の実行者を **`Create(ctx, actor uuid.UUID, in CreateInput)` の明示引数**で受け取る形に確定した（Repository の `UpdateDisabled(ctx, id, actor)` が既に explicit actor を取る前例と整合し、最小の逸脱）。Handler（task 6）が `AuthClaimsFromContext` で actor を取得して Service へ渡す。design.md / tasks.md は書き換えていない（実装 PR では spec を書き換えない規約に準拠）。Architect 判断が必要なら本点を差し戻し対象として検討されたい。
 
 - **design.md「Modified Files」と現状の差異（task 1 では影響なし）**: design.md は「本 Issue 時点で `cmd/api/main.go` は未存在のため bootstrap 配線は行わない」と記すが、現コードベースには既に `cmd/api` パッケージが存在する（`go build ./...` / `go test ./...` 緑）。task 1 の scaffold（types + audit port）には影響しないが、後続 task 6（`Handler.Mount`）で DI bootstrap の既存状況を再確認すること。`design.md` / `tasks.md` の書き換えは行っていない（実装 PR では spec を書き換えない規約に準拠）。
 
