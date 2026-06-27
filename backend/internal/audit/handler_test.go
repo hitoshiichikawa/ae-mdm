@@ -194,6 +194,8 @@ func TestHandler_List_Operator_Returns403(t *testing.T) {
 	if code := decodeErrCode(t, rec); code != string(internalerrors.CodeForbidden) {
 		t.Errorf("body.Code = %q; want %q", code, internalerrors.CodeForbidden)
 	}
+	// NFR 3.2: 認可拒否分岐でも failure_kind=authz_denied を構造化 WARN に出す。
+	assertWarnFailureKind(t, log, FailureKindAuthzDenied)
 }
 
 // ---- (c) Viewer claims で 403（Req 4.5） ----
@@ -219,6 +221,8 @@ func TestHandler_List_Viewer_Returns403(t *testing.T) {
 	if code := decodeErrCode(t, rec); code != string(internalerrors.CodeForbidden) {
 		t.Errorf("body.Code = %q; want %q", code, internalerrors.CodeForbidden)
 	}
+	// NFR 3.2: 認可拒否分岐でも failure_kind=authz_denied を構造化 WARN に出す。
+	assertWarnFailureKind(t, log, FailureKindAuthzDenied)
 }
 
 // ---- (d) claims 不在で 401（Req 4.2） ----
@@ -395,4 +399,33 @@ func TestHandler_List_EmptyResult_Returns200EmptyArray(t *testing.T) {
 	if len(dtos) != 0 {
 		t.Errorf("DTO 件数 = %d; want 0", len(dtos))
 	}
+}
+
+// ---- (i) svc.List が DB エラーを返したら 503 + failure_kind=query_error（NFR 3.2 / Req 2.x） ----
+
+// TestHandler_List_ServiceError_Returns503 は、Service.List が SELECT / scan の DB 失敗
+// （CodeUnavailable）を返したとき、own-tenant 経路が 503 を返し failure_kind=query_error を
+// 構造化 WARN に出すことを検証する（design.md「503 / query_error」契約 / NFR 3.2）。
+func TestHandler_List_ServiceError_Returns503(t *testing.T) {
+	// Arrange: fake Service が DB 失敗（CodeUnavailable）を返す。
+	tenantID := uuid.New()
+	svc := &fakeService{listErr: internalerrors.New(internalerrors.CodeUnavailable, "db down")}
+	log := &fakeLogger{}
+	h := NewHandler(svc, authz.New(), log)
+	claims := newTenantClaims(tenantID, "TenantAdmin")
+
+	// Act
+	rec := doRequest(t, h, "", &claims)
+
+	// Assert
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d; want 503 body=%q", rec.Code, rec.Body.String())
+	}
+	if svc.listCalls != 1 {
+		t.Errorf("svc.List 呼び出し回数 = %d; want 1（認可は通過し List で失敗する経路）", svc.listCalls)
+	}
+	if code := decodeErrCode(t, rec); code != string(internalerrors.CodeUnavailable) {
+		t.Errorf("body.Code = %q; want %q", code, internalerrors.CodeUnavailable)
+	}
+	assertWarnFailureKind(t, log, FailureKindQueryError)
 }

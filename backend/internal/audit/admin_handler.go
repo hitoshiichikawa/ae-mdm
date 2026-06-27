@@ -148,7 +148,10 @@ func (h *AdminHandler) list(w http.ResponseWriter, r *http.Request) {
 		TargetTenantID:  targetTenantID,
 	})
 	if !decision.Allowed {
-		// AuthorizeAndLog が authz の構造化 WARN を出すため、ここでは status 写像のみ行う（Req 4.6）。
+		// AuthorizeAndLog は platform 層の `authz denied`（authz_deny_reason）を出すが、audit ドメインの
+		// 失敗観測契約（NFR 3.2）は failure_kind で識別するため、認可拒否分岐でも
+		// failure_kind=authz_denied を構造化 WARN に出す（他の失敗分岐と識別軸を揃える / Req 4.4 / 4.6）。
+		h.warnFailure(r, FailureKindAuthzDenied)
 		pkgerrors.WriteHTTP(w, r, pkgerrors.New(
 			pkgerrors.CodeForbidden,
 			"audit log read forbidden",
