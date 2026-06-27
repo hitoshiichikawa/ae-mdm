@@ -24,7 +24,7 @@
   - _Requirements: 2.1, NFR 1.1, NFR 3.1_
   - _Boundary: db.migrations_
 
-- [ ] 3. Tenant Repository（raw SQL + SuperAdmin ctx + 競合制御）
+- [x] 3. Tenant Repository（raw SQL + SuperAdmin ctx + 競合制御）
 - [x] 3.1 `internal/tenant/repository.go` を実装
   - `Repository` interface（`Insert` / `Get` / `List` / `UpdateBound` / `UpdateDisabled`）と pgxpool 実装
   - 全メソッドで `superAdminContext(ctx)` + `db.BeginTxFunc` を使う（`internal/auth/repository.go:81` と同型）
