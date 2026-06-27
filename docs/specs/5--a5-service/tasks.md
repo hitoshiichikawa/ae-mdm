@@ -189,7 +189,7 @@
   - _Depends: 3.1, 4.1_
 
 - [ ] 6. 結合テスト（実 DB + RLS / append-only / 保持下限 / 空結果）
-- [ ] 6.1 audit integration test
+- [x] 6.1 audit integration test
   - `backend/test/integration/audit_test.go` を新規追加（手本: `auth_repository_test.go` / `helpers_test.go`
     の `requireDBURLs` / `applyMigrationsUp` / `truncateAll` / `newAppPool` / `seedTenant` /
     `seedAdminUser`。DATABASE_URL 未設定で `t.Skip`）。実 `audit.NewRepository(pool)` /
