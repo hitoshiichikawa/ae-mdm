@@ -103,13 +103,22 @@ type TenantView struct {
 
 // ViewFromRow は TenantRow を API 応答用の TenantView へ変換する。
 // Handler / Service が DB 行から応答を組み立てる際に用いる共通変換ヘルパ。
+//
+// enterprise_name は **bound 時のみ** View に載せる（TenantView 契約 / Req 4.2）。
+// 無効化された行は監査目的で DB 上 enterprise_name を保持し続ける（UpdateDisabled は
+// status のみ更新する）が、disabled / pending_bind の GET / List 応答に enterprise_name を
+// 漏らさない（status!=bound の応答に enterprise 識別子を露出しない / Req 4.2 の条件付き返却・
+// Req 6.5 の存在差非露出と整合）。
 func ViewFromRow(row TenantRow) TenantView {
-	return TenantView{
-		ID:             row.ID,
-		Name:           row.Name,
-		Status:         row.Status,
-		EnterpriseName: row.EnterpriseName,
+	view := TenantView{
+		ID:     row.ID,
+		Name:   row.Name,
+		Status: row.Status,
 	}
+	if row.Status == StatusBound {
+		view.EnterpriseName = row.EnterpriseName
+	}
+	return view
 }
 
 // CreateInput はテナント作成要求の入力 DTO（Req 1.1 / 1.3）。

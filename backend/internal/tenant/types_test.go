@@ -154,4 +154,19 @@ func TestViewFromRow(t *testing.T) {
 			t.Errorf("enterprise_name = %q, want empty", view.EnterpriseName)
 		}
 	})
+
+	t.Run("disabled 行は DB に enterprise_name が残っていても View で露出しない（Req 4.2 / 6.5）", func(t *testing.T) {
+		// Arrange: bound 済みテナントを無効化した行は DB 上 enterprise_name を監査目的で保持するが、
+		// View には載せてはならない（status!=bound で enterprise 識別子を露出しない契約）。
+		row := TenantRow{Name: "acme", Status: StatusDisabled, EnterpriseName: "enterprises/LC123"}
+		// Act
+		view := ViewFromRow(row)
+		// Assert
+		if view.EnterpriseName != "" {
+			t.Errorf("disabled tenant view must not expose enterprise_name, got %q", view.EnterpriseName)
+		}
+		if view.Status != StatusDisabled {
+			t.Errorf("status = %q, want disabled", view.Status)
+		}
+	})
 }
