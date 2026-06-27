@@ -1,0 +1,157 @@
+package tenant
+
+import (
+	stdErrors "errors"
+	"testing"
+
+	pkgerrors "github.com/hitoshiichikawa/ae-mdm/internal/errors"
+)
+
+// TestStatusValid は Status.Valid が定義済み 3 値を正常判定し、未定義値を弾くことを検証する
+// （NFR 1.1: 状態は常に pending_bind / bound / disabled の 3 値のいずれか 1 つ）。
+func TestStatusValid(t *testing.T) {
+	t.Run("定義済み 3 値のとき true を返す", func(t *testing.T) {
+		for _, s := range []Status{StatusPendingBind, StatusBound, StatusDisabled} {
+			// Act
+			got := s.Valid()
+			// Assert
+			if !got {
+				t.Errorf("Status(%q).Valid() = false, want true", s)
+			}
+		}
+	})
+
+	t.Run("空文字のとき false を返す（空入力）", func(t *testing.T) {
+		// Arrange
+		s := Status("")
+		// Act
+		got := s.Valid()
+		// Assert
+		if got {
+			t.Errorf("Status(\"\").Valid() = true, want false")
+		}
+	})
+
+	t.Run("未定義値や大文字違いのとき false を返す（異常系）", func(t *testing.T) {
+		for _, s := range []Status{"unknown", "BOUND", "Pending_Bind", "deleted", " bound "} {
+			// Act
+			got := s.Valid()
+			// Assert
+			if got {
+				t.Errorf("Status(%q).Valid() = true, want false", s)
+			}
+		}
+	})
+}
+
+// TestParseStatus は ParseStatus が定義済み 3 値を Status へ変換し、未定義値を
+// CodeInvalidRequest の *errors.Error として弾くことを検証する（NFR 1.1）。
+func TestParseStatus(t *testing.T) {
+	t.Run("定義済み 3 値を対応する Status へ変換する（正常系）", func(t *testing.T) {
+		cases := map[string]Status{
+			"pending_bind": StatusPendingBind,
+			"bound":        StatusBound,
+			"disabled":     StatusDisabled,
+		}
+		for in, want := range cases {
+			// Act
+			got, err := ParseStatus(in)
+			// Assert
+			if err != nil {
+				t.Errorf("ParseStatus(%q) returned unexpected error: %v", in, err)
+				continue
+			}
+			if got != want {
+				t.Errorf("ParseStatus(%q) = %q, want %q", in, got, want)
+			}
+		}
+	})
+
+	t.Run("空文字を CodeInvalidRequest で弾く（空入力）", func(t *testing.T) {
+		// Act
+		_, err := ParseStatus("")
+		// Assert
+		assertInvalidRequest(t, err)
+	})
+
+	t.Run("未定義値を CodeInvalidRequest で弾く（異常系）", func(t *testing.T) {
+		for _, in := range []string{"unknown", "BOUND", "Disabled", "pending"} {
+			// Act
+			_, err := ParseStatus(in)
+			// Assert
+			assertInvalidRequest(t, err)
+		}
+	})
+}
+
+// assertInvalidRequest は err が CodeInvalidRequest の *errors.Error であることを検証する。
+func assertInvalidRequest(t *testing.T, err error) {
+	t.Helper()
+	if err == nil {
+		t.Fatalf("expected error, got nil")
+	}
+	var de *pkgerrors.Error
+	if !stdErrors.As(err, &de) {
+		t.Fatalf("expected *errors.Error, got %T (%v)", err, err)
+	}
+	if de.Code != pkgerrors.CodeInvalidRequest {
+		t.Errorf("error code = %q, want %q", de.Code, pkgerrors.CodeInvalidRequest)
+	}
+}
+
+// TestSentinelErrorCodes は sentinel error 群が design.md の Code 写像どおりの Code を持つ
+// *errors.Error であることを検証する（Req 2.5 / 2.6 / 3.2 / 3.4 / 4.3 / 5.2 / 5.3 / 6.5）。
+func TestSentinelErrorCodes(t *testing.T) {
+	cases := []struct {
+		name     string
+		err      *pkgerrors.Error
+		wantCode pkgerrors.Code
+	}{
+		{"ErrConflict は CodeConflict", ErrConflict, pkgerrors.CodeConflict},
+		{"ErrInvalidState は CodeBusinessRule", ErrInvalidState, pkgerrors.CodeBusinessRule},
+		{"ErrConfirmationRequired は CodeBusinessRule", ErrConfirmationRequired, pkgerrors.CodeBusinessRule},
+		{"ErrNotBound は CodeBusinessRule", ErrNotBound, pkgerrors.CodeBusinessRule},
+		{"ErrTenantDisabled は CodeBusinessRule", ErrTenantDisabled, pkgerrors.CodeBusinessRule},
+		{"ErrTenantNotFound は CodeNotFound", ErrTenantNotFound, pkgerrors.CodeNotFound},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			// Assert
+			if tc.err == nil {
+				t.Fatalf("sentinel is nil")
+			}
+			if tc.err.Code != tc.wantCode {
+				t.Errorf("code = %q, want %q", tc.err.Code, tc.wantCode)
+			}
+			if tc.err.Message == "" {
+				t.Errorf("sentinel message must not be empty")
+			}
+		})
+	}
+}
+
+// TestViewFromRow は TenantRow から TenantView への変換で id/name/status/enterprise_name が
+// 写像されることを検証する（Req 4.2 のシリアライズ前提）。
+func TestViewFromRow(t *testing.T) {
+	t.Run("bound 行は enterprise_name を引き継ぐ", func(t *testing.T) {
+		// Arrange
+		row := TenantRow{Name: "acme", Status: StatusBound, EnterpriseName: "enterprises/LC123"}
+		// Act
+		view := ViewFromRow(row)
+		// Assert
+		if view.Name != "acme" || view.Status != StatusBound || view.EnterpriseName != "enterprises/LC123" {
+			t.Errorf("unexpected view: %+v", view)
+		}
+	})
+
+	t.Run("pending_bind 行は enterprise_name が空", func(t *testing.T) {
+		// Arrange
+		row := TenantRow{Name: "acme", Status: StatusPendingBind}
+		// Act
+		view := ViewFromRow(row)
+		// Assert
+		if view.EnterpriseName != "" {
+			t.Errorf("enterprise_name = %q, want empty", view.EnterpriseName)
+		}
+	})
+}
