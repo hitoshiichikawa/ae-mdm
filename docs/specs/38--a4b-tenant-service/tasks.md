@@ -4,7 +4,7 @@
 （Create/参照 → Bind/Disable） → Handler → 認可ガード結合テスト。各実装タスクは対応する
 テストを同タスク内に含める（per-task Reviewer 運用での `missing test` reject 回避）。
 
-- [ ] 1. ドメイン型と監査記録ポート（`internal/tenant` パッケージ scaffold）
+- [x] 1. ドメイン型と監査記録ポート（`internal/tenant` パッケージ scaffold）
 - [x] 1.1 `internal/tenant/types.go` と `internal/tenant/audit_log.go` を追加 (P)
   - `Status` enum（`pending_bind` / `bound` / `disabled`）と 3 値以外を弾く `ParseStatus`/`Valid` を定義（NFR 1.1）
   - `TenantRow`（DB 行）/ `TenantView`（API 応答）/ `CreateInput` / `BindInput` / `DisableInput` / `SignupURL` DTO を定義
