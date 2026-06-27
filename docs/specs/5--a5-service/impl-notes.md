@@ -20,6 +20,25 @@
   **再宣言せず**、本 service.go の interface を満たす concrete struct + `NewRepository(pool) Repository`
   のみを実装すること（下記「確認事項」に詳述）。それ以外の残存課題はなし。
 
+### Task 2
+
+- **採用方針**: `repository.go` に concrete `repository` struct と `NewRepository(pool) Repository`
+  を実装。`Repository` interface は service.go 宣言済みのため再宣言せず（task 1 申し送り遵守）、
+  WHERE 句組み立てを純粋関数 `buildSelectQuery(f, effectiveFrom) (sql, args)` に切り出して
+  実 DB 非依存で単体テスト可能にした。
+- **重要な判断**:
+  - Detail nil は空 jsonb `{}`（`marshalDetail`）として bind。既存スキーマ
+    `detail jsonb NOT NULL DEFAULT '{}'`（`db/migrations/0009_create_audit_logs.up.sql:18`）と
+    整合させ NULL を渡さない（Req 1.1）。`TenantID == uuid.Nil` は `nullableTenantID` で
+    `*uuid.UUID` nil（NULL bind）に写像（手本: `auth/repository.go` の `*uuid.UUID` scan/bind / Req 1.2）。
+  - `buildSelectQuery` は `occurred_at >= $1`（effectiveFrom）を常に先頭付与し、To/EventType/
+    ActorID/ResourceID/TenantID 句を指定時のみ `$n` で追記。自テナント条件は書かず RLS に委ねる
+    （Req 2.6/2.9/3.5/NFR 2.1）。INSERT/SELECT/scan 失敗は `CodeUnavailable` で wrap し
+    機密値・query 生値を message に補間しない（Req 1.6/NFR 3.1/3.2）。
+- **残存課題（次 task への影響）**: 実 DB を要する INSERT・NULL bind・cross-tenant 可視
+  （Req 1.1/1.2/3.5）は `_Requirements_partial:_` 明示済みで task 6（integration）へ deferred。
+  task 3/4（handler）は本 Repository ではなく Service interface に依存するため本 task の影響なし。
+
 ## AC Traceability（task 1 で担保した範囲）
 
 | AC | 担保テスト（`internal/audit/service_test.go`） |
