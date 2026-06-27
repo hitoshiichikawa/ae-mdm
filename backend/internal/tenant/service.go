@@ -179,6 +179,17 @@ func (s *service) Create(ctx context.Context, actor uuid.UUID, in CreateInput) (
 // 状態遷移は「Get で現状態確認 → pending_bind のみ CreateEnterprise → 成功時のみ条件付き
 // UpdateBound で bound 確定」の順で行い、AMAPI I/O は tx の外に置く（design.md Bind シーケンス）。
 func (s *service) Bind(ctx context.Context, actor uuid.UUID, id uuid.UUID, in BindInput) (TenantView, error) {
+	// 0. 入力検証: signup_url_name は空白 trim 後に非空であること（設計 bind API の 400 契約）。
+	//    空のまま CreateEnterprise に渡すと入力検証を AMAPI 側の失敗に依存させてしまうため、
+	//    AMAPI 呼び出し・永続化の前にローカルで CodeInvalidRequest（400）を返す（Req 2.1）。
+	signupURLName := strings.TrimSpace(in.SignupURLName)
+	if signupURLName == "" {
+		err := pkgerrors.New(pkgerrors.CodeInvalidRequest, "signup_url_name is required")
+		s.logDeny(actor, id, "signup_url_name is empty")
+		s.record(ctx, actor, id, OperationBind, ResultFailure, false, "signup url name is empty")
+		return TenantView{}, err
+	}
+
 	// 1. 現状態を取得（不在は CodeNotFound をそのまま伝達 → 404 / Req 4.3）。
 	row, err := s.repo.Get(ctx, id)
 	if err != nil {
@@ -208,9 +219,20 @@ func (s *service) Bind(ctx context.Context, actor uuid.UUID, id uuid.UUID, in Bi
 
 	// 3. Enterprise を作成（AMAPI）。失敗時は永続化せずエラーを伝達し pending_bind を保つ
 	//    （Req 2.4 / NFR 1.3）。AMAPI 由来 error は #34 が Code 正規化済みのため再分類しない。
-	enterpriseName, err := s.amapi.CreateEnterprise(ctx, in.SignupURLName, s.cfg.AMAPIProjectID)
+	enterpriseName, err := s.amapi.CreateEnterprise(ctx, signupURLName, s.cfg.AMAPIProjectID)
 	if err != nil {
 		s.record(ctx, actor, id, OperationBind, ResultFailure, false, "enterprise creation failed")
+		return TenantView{}, err
+	}
+
+	// 3b. AMAPI が成功扱いで空の enterprise 識別子を返した場合は bound へ進めない（Req 2.1 / NFR 1.3）。
+	//     enterprise_name は bound の不変条件（bound 時のみ非空 / NFR 1.1）であり、空のまま UpdateBound
+	//     すると status=bound かつ enterprise 識別子なしの不整合行を作り、後続の業務操作前提ガード
+	//     （Req 5.1）が壊れる。上流の異常応答として CodeUpstream（502）を返し pending_bind を保つ。
+	if strings.TrimSpace(enterpriseName) == "" {
+		err := pkgerrors.New(pkgerrors.CodeUpstream, "amapi returned an empty enterprise name")
+		s.logDeny(actor, id, "amapi returned empty enterprise name")
+		s.record(ctx, actor, id, OperationBind, ResultFailure, false, "empty enterprise name from amapi")
 		return TenantView{}, err
 	}
 

@@ -829,6 +829,55 @@ func TestService_Bind(t *testing.T) {
 			t.Errorf("sensitive value leaked into structured log")
 		}
 	})
+
+	t.Run("signup_url_name が空白 trim 後に空のとき 400 を返し Get・CreateEnterprise を呼ばない（入力検証）", func(t *testing.T) {
+		// Arrange
+		h := newServiceHarness()
+		id := uuid.New()
+		h.repo.getRow = TenantRow{ID: id, Name: testTenantNameValue, Status: StatusPendingBind}
+
+		// Act
+		_, err := h.svc.Bind(context.Background(), uuid.New(), id, BindInput{SignupURLName: "   "})
+
+		// Assert
+		if got := codeOf(t, err); got != pkgerrors.CodeInvalidRequest {
+			t.Fatalf("expected CodeInvalidRequest on empty signup_url_name, got %s", got)
+		}
+		if h.repo.calls.get != 0 {
+			t.Errorf("Get must not be called when input is invalid, got %d", h.repo.calls.get)
+		}
+		if h.stub.CallCount("CreateEnterprise") != 0 {
+			t.Errorf("CreateEnterprise must not be called when input is invalid, got %d", h.stub.CallCount("CreateEnterprise"))
+		}
+		if _, ok := h.log.warnWithDenyReason(); !ok {
+			t.Errorf("expected a WARN log entry with deny_reason field (NFR 2.2)")
+		}
+	})
+
+	t.Run("CreateEnterprise が空の enterprise_name を返すとき 502 を返し UpdateBound を呼ばず pending_bind を保つ（NFR 1.3）", func(t *testing.T) {
+		// Arrange: AMAPI が成功扱い（err=nil）で空の name を返す異常応答を模擬する。
+		h := newServiceHarness()
+		id := uuid.New()
+		h.repo.getRow = TenantRow{ID: id, Name: testTenantNameValue, Status: StatusPendingBind}
+		h.stub.OnCreateEnterprise = func(_ context.Context, _, _ string) (string, error) {
+			return "  ", nil
+		}
+
+		// Act
+		_, err := h.svc.Bind(context.Background(), uuid.New(), id, BindInput{SignupURLName: testSignupURLName})
+
+		// Assert
+		if got := codeOf(t, err); got != pkgerrors.CodeUpstream {
+			t.Fatalf("expected CodeUpstream on empty enterprise name, got %s", got)
+		}
+		if h.repo.calls.updateBound != 0 {
+			t.Errorf("UpdateBound must not be called when enterprise name is empty, got %d", h.repo.calls.updateBound)
+		}
+		events := h.recorder.recorded()
+		if len(events) != 1 || events[0].Result != ResultFailure {
+			t.Errorf("expected a bind/failure audit event, got %+v", events)
+		}
+	})
 }
 
 // ===== Disable =====
