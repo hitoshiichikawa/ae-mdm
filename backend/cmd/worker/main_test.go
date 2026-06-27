@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	stdErrors "errors"
+	"net/http"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -13,6 +15,7 @@ import (
 	"google.golang.org/grpc/credentials/insecure"
 
 	"github.com/hitoshiichikawa/ae-mdm/internal/config"
+	pkgerrors "github.com/hitoshiichikawa/ae-mdm/internal/errors"
 	"github.com/hitoshiichikawa/ae-mdm/internal/logger"
 	"github.com/hitoshiichikawa/ae-mdm/internal/platform/pubsub"
 )
@@ -142,6 +145,90 @@ func TestSuperviseWorker_GracefulShutdownOnSignal(t *testing.T) {
 		}
 	case <-time.After(10 * time.Second):
 		t.Fatalf("superviseWorker did not return after ctx cancel (graceful shutdown timed out)")
+	}
+}
+
+// TestPendingDispatchHandler_RetainsViaNack は finding（main.go:141）を検証する。
+// 実 Dispatcher 未配線（#36）の間、暫定 handler が ack せず nack（再配信保持）に写像されること。
+// ack してしまうと未処理の AMAPI 通知を恒久喪失するため、ShouldAck=false（=nack）であることを確かめる。
+func TestPendingDispatchHandler_RetainsViaNack(t *testing.T) {
+	// Arrange
+	handler := pendingDispatchHandler(logger.Default())
+
+	// Act
+	err := handler.Handle(context.Background(), &pubsub.Message{ID: "m-1"})
+
+	// Assert
+	if err == nil {
+		t.Fatalf("placeholder handler must not ack (return nil); want a transient error for redelivery")
+	}
+	if pkgerrors.ShouldAck(err, nil) {
+		t.Fatalf("placeholder handler error must map to nack (retain), but ShouldAck=true (ack/drop)")
+	}
+}
+
+// TestGracefulShutdown_WaitsForSubscriberDrain は finding（main.go:185）と requirements 6.4 を検証する。
+// 停止シグナル後、subscriber の受信ループ完了（処理中メッセージの確定）を待ってから 0 を返すこと。
+func TestGracefulShutdown_WaitsForSubscriberDrain(t *testing.T) {
+	// Arrange: subscriber がまだ drain 中（一定時間後に完了通知）。
+	srv := &http.Server{Addr: ephemeralAddr}
+	subErr := make(chan error, 1)
+	drained := make(chan struct{})
+	go func() {
+		time.Sleep(150 * time.Millisecond)
+		close(drained)
+		subErr <- nil
+	}()
+
+	// Act
+	start := time.Now()
+	code := gracefulShutdown(srv, subErr, logger.Default(), 2*time.Second)
+	elapsed := time.Since(start)
+
+	// Assert: subscriber 完了を待ってから戻る。
+	select {
+	case <-drained:
+	default:
+		t.Fatalf("gracefulShutdown returned before subscriber drained")
+	}
+	if code != 0 {
+		t.Fatalf("clean drain should return code 0, got %d", code)
+	}
+	if elapsed < 150*time.Millisecond {
+		t.Fatalf("gracefulShutdown did not wait for subscriber drain (elapsed %s)", elapsed)
+	}
+}
+
+// TestGracefulShutdown_TimesOutWhenSubscriberHangs は requirements NFR 2.2 を検証する。
+// 猶予時間内に処理中メッセージの確定が終わらない場合、非ゼロ終了コードを返すこと。
+func TestGracefulShutdown_TimesOutWhenSubscriberHangs(t *testing.T) {
+	// Arrange: subErr が永遠に来ない（drain がハングする）。
+	srv := &http.Server{Addr: ephemeralAddr}
+	subErr := make(chan error, 1)
+
+	// Act
+	code := gracefulShutdown(srv, subErr, logger.Default(), 100*time.Millisecond)
+
+	// Assert
+	if code != 1 {
+		t.Fatalf("drain timeout should fail-fast with code 1 (NFR 2.2), got %d", code)
+	}
+}
+
+// TestGracefulShutdown_SubscriberDrainError_ReturnsNonZero は drain 中の subscriber エラーが
+// 非ゼロ終了になることを検証する（requirements 6.5）。
+func TestGracefulShutdown_SubscriberDrainError_ReturnsNonZero(t *testing.T) {
+	// Arrange
+	srv := &http.Server{Addr: ephemeralAddr}
+	subErr := make(chan error, 1)
+	subErr <- stdErrors.New("drain boom")
+
+	// Act
+	code := gracefulShutdown(srv, subErr, logger.Default(), 2*time.Second)
+
+	// Assert
+	if code != 1 {
+		t.Fatalf("subscriber drain error should return code 1, got %d", code)
 	}
 }
 

@@ -45,6 +45,11 @@ type Config struct {
 	// 未設定（空文字）の場合、dead-letter 送出 IF は構造化エラーを返して当該メッセージを
 	// ack しない（Issue #35 requirements 5.4。送出先が無いまま喪失することを防ぐ）。
 	PubSubDeadLetterTopic string
+	// PubSubMaxOutstandingMessages は subscriber が同時に未確定（ack 待ち）で保持する
+	// メッセージ数の上限（Issue #35 requirements 4.1）。未設定時は既定値を用いる。
+	// 1 未満を設定すると subscriber 構築が CodeConfigInvalid で fail-fast する
+	// （requirements 4.3 / 6.5。運用者が並行度を誤設定したまま起動するのを防ぐ）。
+	PubSubMaxOutstandingMessages int
 
 	// AMAPI（Android Management API）
 	AMAPIProjectID               string

@@ -43,15 +43,16 @@ type HandlerFunc func(ctx context.Context, msg *Message) error
 // Handle は MessageHandler interface を満たす。
 func (f HandlerFunc) Handle(ctx context.Context, msg *Message) error { return f(ctx, msg) }
 
-// defaultMaxOutstandingMessages は MaxOutstandingMessages 未指定（0 以下）時の既定値。
+// defaultMaxOutstandingMessages は opts=nil（未指定）時に採る既定値。
 // SDK の DefaultReceiveSettings と揃え、明示設定が無い場合の並行度を保つ。
 const defaultMaxOutstandingMessages = 1000
 
 // SubscriberOptions は Subscriber の挙動を調整する設定。
 type SubscriberOptions struct {
 	// MaxOutstandingMessages は同時に未確定（ack 待ち）で保持するメッセージ数の上限
-	// （requirements 4.1 / 4.2）。1 未満を指定すると NewSubscriber が構造化エラーを返す
-	// （requirements 4.3）。0（ゼロ値）の場合は既定値 defaultMaxOutstandingMessages を使う。
+	// （requirements 4.1 / 4.2）。SubscriberOptions を非 nil で渡す場合は本フィールドを
+	// 1 以上で明示すること。0（ゼロ値）を含む 1 未満を指定すると NewSubscriber が
+	// 構造化エラーを返す（requirements 4.3）。「既定値で良い」場合は opts 自体に nil を渡す。
 	MaxOutstandingMessages int
 }
 
@@ -67,8 +68,11 @@ type Subscriber struct {
 
 // NewSubscriber は Client と config から Subscriber を構築する。
 //
-// opts.MaxOutstandingMessages が 1 未満（負値）の場合は *pkgerrors.Error{Code: CodeConfigInvalid}
-// を返して構築を拒否する（requirements 4.3）。0（ゼロ値）は「未指定」とみなし既定値を採る。
+// opts が nil の場合は MaxOutstandingMessages に既定値（defaultMaxOutstandingMessages）を採る。
+// opts が非 nil の場合、opts.MaxOutstandingMessages が 1 未満（0 を含む）であれば
+// *pkgerrors.Error{Code: CodeConfigInvalid} を返して構築を拒否する（requirements 4.3。
+// 0 は SDK の「並行度ゼロ＝受信停止」と区別がつかない誤設定であり、未指定とは扱わない。
+// 既定値で良い場合は opts 自体に nil を渡すこと）。
 func NewSubscriber(client *Client, cfg config.Config, log logger.Logger, opts *SubscriberOptions) (*Subscriber, error) {
 	if client == nil {
 		return nil, pkgerrors.New(pkgerrors.CodeConfigInvalid, "pubsub client is required for Subscriber")
@@ -78,9 +82,9 @@ func NewSubscriber(client *Client, cfg config.Config, log logger.Logger, opts *S
 	}
 
 	maxOutstanding := defaultMaxOutstandingMessages
-	if opts != nil && opts.MaxOutstandingMessages != 0 {
+	if opts != nil {
 		if opts.MaxOutstandingMessages < 1 {
-			// 1 未満（負値）は不正設定として拒否する（requirements 4.3）。
+			// 1 未満（0 / 負値）は不正設定として拒否する（requirements 4.3）。
 			return nil, pkgerrors.New(pkgerrors.CodeConfigInvalid,
 				"MaxOutstandingMessages must be >= 1")
 		}
@@ -116,6 +120,15 @@ func (s *Subscriber) Run(ctx context.Context, handler MessageHandler) error {
 	// SDK が後段で曖昧なエラーを返すため、ここで明示的に fail-fast する。
 	exists, err := sub.Exists(ctx)
 	if err != nil {
+		// 存在確認中に ctx がキャンセル（SIGINT/SIGTERM 等）された場合は致命的失敗ではなく
+		// graceful shutdown として nil を返す（requirements 6.4 / NFR 2.1）。gRPC は
+		// codes.Canceled を context.Canceled でない status 値で返すことがあるため、
+		// 渡された ctx 自体の状態で判定する。
+		if ctx.Err() != nil {
+			s.log.Info("pubsub: subscription existence check canceled during shutdown",
+				"subscription", s.subscriptionID)
+			return nil
+		}
 		out := pkgerrors.Wrap(pkgerrors.CodeUnavailable,
 			"failed to check Pub/Sub subscription existence", err)
 		out.IsTransient = true
@@ -141,7 +154,9 @@ func (s *Subscriber) Run(ctx context.Context, handler MessageHandler) error {
 	err = sub.Receive(ctx, func(msgCtx context.Context, raw *gpubsub.Message) {
 		s.handleOne(msgCtx, handler, raw)
 	})
-	if err != nil && !stdErrors.Is(err, context.Canceled) {
+	// ctx キャンセル起因の終了（context.Canceled もしくは渡した ctx 自体の done）は
+	// graceful shutdown とみなし nil を返す（requirements 6.4）。
+	if err != nil && !stdErrors.Is(err, context.Canceled) && ctx.Err() == nil {
 		out := pkgerrors.Wrap(pkgerrors.CodeUnavailable, "Pub/Sub receive loop failed", err)
 		out.IsTransient = true
 		s.log.Error("pubsub: receive loop terminated with error",

@@ -6,7 +6,9 @@ tasks 6.1（PubSubClient / PubSubSubscriber）に範囲を限定し、以下を�
 
 - `internal/config`: 新規 optional config `PubSubDeadLetterTopic`（env `PUBSUB_DEAD_LETTER_TOPIC` /
   default `""`）。`.env.example` / `docker-compose.yml`（api / worker）に既定値
-  `amapi-notifications-deadletter` を追加。
+  `amapi-notifications-deadletter` を追加。さらに `PubSubMaxOutstandingMessages`（env
+  `PUBSUB_MAX_OUTSTANDING_MESSAGES` / default `1000`）を追加し、worker 経路で subscriber に配線
+  （PR iteration round 1 / requirements 4.1）。
 - `internal/platform/pubsub/client.go`: emulator / 本番 GCP 切替の `*pubsub.Client` 構築、
   多重 Close 安全（`sync.Once`）、emulator モード時の topic / subscription / dead-letter topic
   冪等 ensure。
@@ -78,10 +80,14 @@ requirements「確認事項」の未決定事項を Stage A で以下に暫定�
    おり、命名規約導出（`<topic>-deadletter`）より明示 env の方が IaC / 本番運用で設定源が一意になる。
 2. **handler 抽象の境界形** → pubsub パッケージ内 `MessageHandler` interface + `HandlerFunc`
    アダプタ。Envelope パースは #36 スコープ外のため raw `Message`（ID/Data/Attributes/PublishTime）を
-   そのまま渡す。worker main は #36 の Dispatcher 未実装のため暫定 handler（受信を message_id 付き
-   INFO ログし nil=ack）を注入。根拠: design.md の `NotificationHandler`（Envelope 受け取り）は #36 の
-   契約であり、本 Issue では「Dispatcher が無い間も subscriber を起動して受信疎通を成立させる」ことを
-   優先（requirements 6.3 の make up 起動要件を満たすため）。
+   そのまま渡す。worker main は #36 の Dispatcher 未実装のため暫定 handler（`pendingDispatchHandler`）を
+   注入。根拠: design.md の `NotificationHandler`（Envelope 受け取り）は #36 の契約であり、本 Issue では
+   「Dispatcher が無い間も subscriber を起動して受信疎通を成立させる」ことを優先（requirements 6.3 の
+   make up 起動要件を満たすため）。
+   **PR iteration round 1 で修正**: 当初は受信を INFO ログし `nil=ack` していたが、実 Dispatcher が
+   無い間に ack すると未処理の AMAPI 通知を恒久喪失するとの指摘を受け、暫定 handler は ack せず
+   transient エラーを返して nack（再配信保持）する方式に変更した（`errors.ShouldAck` 経由 /
+   requirements 3.3）。メッセージは subscription の retention 内で保持され #36 で処理される。
 3. **emulator の resource 自動作成** → emulator モード時（`PubSubEmulatorHost` 非空）のみ起動時に
    topic / subscription / dead-letter topic を冪等 ensure。本番モード（emulator host 空）では一切
    自動作成しない（IaC 前提）。根拠: 本番側で requirements 2.4「subscription 不在→受信開始前エラー」を
@@ -89,8 +95,9 @@ requirements「確認事項」の未決定事項を Stage A で以下に暫定�
 
 ## #36 への引き継ぎ事項
 
-- **暫定 handler の差し替え**: `cmd/worker/main.go` の `runWorker` 内 `HandlerFunc`（INFO ログ + ack）を
-  実 Dispatcher（design.md `Dispatcher` / `NotificationHandler`）に差し替える。
+- **暫定 handler の差し替え**: `cmd/worker/main.go` の `pendingDispatchHandler`（WARN ログ + nack で
+  再配信保持）を実 Dispatcher（design.md `Dispatcher` / `NotificationHandler`）に差し替える。差し替え
+  までは通知が nack され続けるため、#36 着手まで本 worker を実 AMAPI トラフィックに繋がないこと。
 - **Envelope パース**: 本 Issue は raw `pubsub.Message`（Data=未パース payload）を渡す。#36 で
   Envelope（MessageID/NotificationType/EnterpriseName/Payload/PublishTime）へパースする。
 - **dedupe（冪等処理）**: `notification_dedupe` ベースの MessageID 重複排除は #36。
@@ -112,6 +119,26 @@ requirements「確認事項」の未決定事項を Stage A で以下に暫定�
   設定値が Subscriber に保持されることをテストした。実際の「上限到達時の pull 抑制」挙動は SDK
   （`cloud.google.com/go/pubsub`）の責務であり、SDK 内部挙動の再現テストは行っていない（外部 SDK の
   挙動を二重実装しない方針）。
+
+## PR Iteration round 1（review 指摘への対応）
+
+PR #47 の review（codex）+ 自動裁定（legitimate 7 / excessive 3）を受け、コード側の指摘に対応した。
+
+| 指摘 | 重要度 | 対応 |
+|---|---|---|
+| `main.go` 暫定 handler が `nil=ack` で未処理通知を恒久喪失 | high | `pendingDispatchHandler` が transient エラーを返し nack（再配信保持）へ変更。`TestPendingDispatchHandler_RetainsViaNack` を追加 |
+| shutdown が subscriber 完了を待たず戻る（requirements 6.4 未達） | high | `gracefulShutdown` を新設し、停止シグナル後 subscriber drain（subErr）を `shutdownTimeout` 以内で待機。timeout 超過は非ゼロ終了（NFR 2.2）。`TestGracefulShutdown_*` 3 本を追加 |
+| `sub.Exists(ctx)` が `context.Canceled` を fatal 化 | medium | 存在確認中の ctx キャンセルは `ctx.Err() != nil` で graceful（nil 復帰）に変更。Receive 経路も同様に強化。`TestSubscriber_CanceledDuringExistsCheck_ReturnsNilGracefully` を追加 |
+| `MaxOutstandingMessages == 0` を未指定扱いで受理（requirements 4.3 未カバー） | medium | opts 非 nil 時は 0 を含む 1 未満を拒否（既定値は opts=nil で選択）。拒否テストに `zero` ケース、受理側に `TestNewSubscriber_NilOpts_UsesDefault` を追加 |
+| worker が `MaxOutstandingMessages` を config 配線していない（requirements 4.1 未達） | medium | config `PubSubMaxOutstandingMessages`（env `PUBSUB_MAX_OUTSTANDING_MESSAGES` / default 1000）を追加し worker から subscriber へ配線。`.env.example` / `docker-compose.yml` / config テストを追加 |
+| `ensureTopic` / `ensureSubscription` の TOCTOU（並行起動で `AlreadyExists` を fatal 化） | low | Create が `codes.AlreadyExists` を返した場合は冪等成功として扱うよう変更（既存の二重呼び出し冪等テストが contract を担保） |
+
+`requirements.md` の未同期（dead-letter 設定源 / handler 境界形 / emulator 自動作成）および
+`design.md` / `tasks.md` 不在の指摘は、実装 PR では spec 編集禁止のため本 PR では対応せず、PR
+本文の返信で Issue 側での同期を提案した（暫定確定の根拠は本ノート「暫定確定した 3 点」に記載済み）。
+
+検証: `gofmt -l`（変更ファイル差分ゼロ）/ `go vet ./...` / `go build ./...` / `go test ./...`（全 PASS）/
+`go test -race ./internal/platform/pubsub/ ./cmd/worker/ ./internal/config/`（race なし）。
 
 ## Feature Flag Protocol
 

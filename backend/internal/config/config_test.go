@@ -306,6 +306,63 @@ func TestLoad_PubSubDeadLetterTopic_OptionalDefaultEmpty(t *testing.T) {
 	})
 }
 
+// TestLoad_PubSubMaxOutstandingMessages は Issue #35 の新規 optional config を検証する
+// （requirements 4.1: 同時処理上限を設定値として受け付ける）。
+func TestLoad_PubSubMaxOutstandingMessages(t *testing.T) {
+	t.Run("未設定なら既定値1000", func(t *testing.T) {
+		// Arrange
+		env := validEnv()
+		delete(env, "PUBSUB_MAX_OUTSTANDING_MESSAGES")
+
+		// Act
+		cfg, err := loadFrom(envGetterFromMap(env))
+
+		// Assert
+		if err != nil {
+			t.Fatalf("loadFrom returned error: %v", err)
+		}
+		if cfg.PubSubMaxOutstandingMessages != defaultPubSubMaxOutstandingMessages {
+			t.Errorf("PubSubMaxOutstandingMessages = %d, want %d",
+				cfg.PubSubMaxOutstandingMessages, defaultPubSubMaxOutstandingMessages)
+		}
+	})
+
+	t.Run("設定値が読み込まれる", func(t *testing.T) {
+		// Arrange
+		env := validEnv()
+		env["PUBSUB_MAX_OUTSTANDING_MESSAGES"] = "50"
+
+		// Act
+		cfg, err := loadFrom(envGetterFromMap(env))
+
+		// Assert
+		if err != nil {
+			t.Fatalf("loadFrom returned error: %v", err)
+		}
+		if cfg.PubSubMaxOutstandingMessages != 50 {
+			t.Errorf("PubSubMaxOutstandingMessages = %d, want 50", cfg.PubSubMaxOutstandingMessages)
+		}
+	})
+
+	t.Run("整数でない値はinvalidとして拒否", func(t *testing.T) {
+		// Arrange
+		env := validEnv()
+		env["PUBSUB_MAX_OUTSTANDING_MESSAGES"] = "not-a-number"
+
+		// Act
+		_, err := loadFrom(envGetterFromMap(env))
+
+		// Assert
+		if err == nil {
+			t.Fatalf("expected error for non-integer PUBSUB_MAX_OUTSTANDING_MESSAGES, got nil")
+		}
+		var de *internalerrors.Error
+		if !stdErrors.As(err, &de) || de.Code != internalerrors.CodeConfigInvalid {
+			t.Fatalf("expected CodeConfigInvalid, got %v", err)
+		}
+	})
+}
+
 // TestLoad_FromOSEnv_Smoke は os.LookupEnv を使う公開 API Load を t.Setenv で動かす smoke test。
 // 主要な分岐は loadFrom テストで検証済みのため、ここでは Load -> loadFrom の配線確認のみ。
 func TestLoad_FromOSEnv_Smoke(t *testing.T) {

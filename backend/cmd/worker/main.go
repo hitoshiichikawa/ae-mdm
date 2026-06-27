@@ -4,8 +4,9 @@
 // （ENROLLMENT / STATUS_REPORT / COMMAND）を受信・処理する。本 Issue #35（tasks 6.1）で
 // Pub/Sub subscriber 基盤（internal/platform/pubsub）を配線する。通知種別ごとの dispatch・
 // 冪等処理・未割当退避・Envelope パースは別 Issue #36（tasks 6.2）に委ねるため、本 entrypoint は
-// 暫定 handler（受信を message_id 付きで INFO ログし ack）を注入する。#36 で実 Dispatcher に
-// 差し替える。
+// 暫定 handler（受信を message_id 付きでログし、transient エラーを返して nack＝再配信保持する）を
+// 注入する。実 Dispatcher が無い間に ack すると未処理の AMAPI 通知を恒久的に喪失するため、
+// ack せず subscription の retention 内で保持し、#36 で実 Dispatcher に差し替える。
 //
 // 本 entrypoint の責務:
 //   - config.Load → logger.NewLogger の bootstrap を行い、process global の default logger を
@@ -36,6 +37,7 @@ import (
 	"time"
 
 	"github.com/hitoshiichikawa/ae-mdm/internal/config"
+	pkgerrors "github.com/hitoshiichikawa/ae-mdm/internal/errors"
 	"github.com/hitoshiichikawa/ae-mdm/internal/logger"
 	"github.com/hitoshiichikawa/ae-mdm/internal/platform/pubsub"
 )
@@ -130,21 +132,36 @@ func runWorker(parent context.Context, cfg config.Config, log logger.Logger) int
 		return 1
 	}
 
-	subscriber, err := pubsub.NewSubscriber(client, cfg, log, nil)
+	// MaxOutstandingMessages を運用者設定（PUBSUB_MAX_OUTSTANDING_MESSAGES）から配線する
+	// （requirements 4.1）。1 未満なら NewSubscriber が CodeConfigInvalid を返し fail-fast する
+	// （requirements 4.3 / 6.5）。
+	subscriber, err := pubsub.NewSubscriber(client, cfg, log, &pubsub.SubscriberOptions{
+		MaxOutstandingMessages: cfg.PubSubMaxOutstandingMessages,
+	})
 	if err != nil {
 		log.Error("ae-mdm worker: failed to construct Pub/Sub subscriber", logger.Err(err))
 		return 1
 	}
 
-	// 暫定 handler（#36 で実 Dispatcher に差し替え）。受信を message_id 付きで INFO ログし
-	// nil を返す（= ack）。requirements 6.2 の handler 抽象配線を満たす最小実装。
-	handler := pubsub.HandlerFunc(func(_ context.Context, msg *pubsub.Message) error {
-		log.Info("ae-mdm worker: notification received (placeholder handler; dispatcher pending #36)",
-			logger.MessageID(msg.ID))
-		return nil
-	})
+	return superviseWorker(sigCtx, log, listenAddr, subscriber, pendingDispatchHandler(log))
+}
 
-	return superviseWorker(sigCtx, log, listenAddr, subscriber, handler)
+// pendingDispatchHandler は #36 の実 Dispatcher が配線されるまでの暫定 handler を返す。
+//
+// 実 Dispatcher が無い間にメッセージを ack すると、未処理の AMAPI 通知（ENROLLMENT /
+// STATUS_REPORT / COMMAND）を恒久的に喪失する。これを避けるため本 handler は ack せず、
+// transient なエラーを返して nack＝再配信保持する（errors.ShouldAck 経由で nack 判定 /
+// requirements 3.3）。メッセージは subscription の retention 内で保持され、#36 で実
+// Dispatcher に差し替えた時点で処理される。
+func pendingDispatchHandler(log logger.Logger) pubsub.MessageHandler {
+	return pubsub.HandlerFunc(func(_ context.Context, msg *pubsub.Message) error {
+		log.Warn("ae-mdm worker: notification retained for redelivery (dispatcher pending #36)",
+			logger.MessageID(msg.ID))
+		out := pkgerrors.New(pkgerrors.CodeUnavailable,
+			"notification dispatcher not yet wired (#36); message retained for redelivery")
+		out.IsTransient = true
+		return out
+	})
 }
 
 // superviseWorker は subscriber 受信ループと healthz server を並走させ、停止条件を監視する。
@@ -184,6 +201,9 @@ func superviseWorker(sigCtx context.Context, log logger.Logger, addr string, sub
 	select {
 	case <-sigCtx.Done():
 		log.Info("ae-mdm worker: shutdown signal received")
+		// 停止シグナル受信。subscriber 受信ループの完了（処理中メッセージの確定）を待ってから
+		// healthz を停止する（requirements 6.4 / NFR 2.1 / 2.2）。
+		return gracefulShutdown(srv, subErr, log, shutdownTimeout)
 	case err := <-subErr:
 		if err != nil {
 			// subscriber の致命的エラー（subscription 不在等）は fail-fast（requirements 6.5）。
@@ -193,6 +213,7 @@ func superviseWorker(sigCtx context.Context, log logger.Logger, addr string, sub
 		}
 		// エラーなく subscriber が終了した場合（通常は ctx キャンセル時のみ）。
 		log.Info("ae-mdm worker: subscriber stopped")
+		return shutdownHealthz(srv, log)
 	case err := <-srvErr:
 		if err != nil {
 			log.Error("ae-mdm worker: healthz server error", logger.Err(err))
@@ -200,9 +221,41 @@ func superviseWorker(sigCtx context.Context, log logger.Logger, addr string, sub
 		}
 		return 0
 	}
+}
 
-	// graceful shutdown（requirements 6.4 / NFR 2.1: 5s 以内）。
-	return shutdownHealthz(srv, log)
+// gracefulShutdown は SIGINT/SIGTERM 受信後の停止処理を timeout の単一予算で行う
+// （本番では shutdownTimeout=5s を渡す）。
+//
+// sigCtx は既にキャンセル済みのため、subscriber.Run の Receive は outstanding メッセージの
+// callback を drain した後に返る。本関数はその完了（subErr）を待ってから healthz server を
+// 停止する（requirements 6.4: 処理中メッセージを規定の猶予時間内で確定させる）。
+//
+//   - 猶予時間内に subscriber が drain 完了 → healthz を残り時間で停止し 0
+//   - drain が猶予時間を超過 → 構造化 ERROR ログ + 1（NFR 2.2）
+//   - subscriber が drain 中にエラーを返した → 構造化 ERROR ログ + 1
+func gracefulShutdown(srv *http.Server, subErr <-chan error, log logger.Logger, timeout time.Duration) int {
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+
+	select {
+	case err := <-subErr:
+		if err != nil {
+			log.Error("ae-mdm worker: subscriber drain error during shutdown", logger.Err(err))
+			_ = srv.Shutdown(ctx)
+			return 1
+		}
+		log.Info("ae-mdm worker: subscriber drained")
+	case <-ctx.Done():
+		// 猶予時間内に処理中メッセージの確定が終わらなかった（NFR 2.2）。
+		log.Error("ae-mdm worker: graceful shutdown timed out waiting for subscriber drain")
+		return 1
+	}
+
+	if err := srv.Shutdown(ctx); err != nil {
+		log.Error("ae-mdm worker: graceful shutdown error", logger.Err(err))
+		return 1
+	}
+	return 0
 }
 
 // newHealthzMux は :8090 /healthz を返す最小 mux を作る（requirements 6.3）。

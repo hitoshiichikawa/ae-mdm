@@ -24,7 +24,9 @@ import (
 	gpubsub "cloud.google.com/go/pubsub"
 	"google.golang.org/api/option"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/status"
 
 	"github.com/hitoshiichikawa/ae-mdm/internal/config"
 	pkgerrors "github.com/hitoshiichikawa/ae-mdm/internal/errors"
@@ -163,6 +165,10 @@ func (c *Client) EnsureEmulatorResources(ctx context.Context, cfg config.Config)
 }
 
 // ensureTopic は topic を冪等に作成する。既存なら作成をスキップしてハンドルを返す。
+//
+// Exists 確認と Create の間に別 worker が同一 topic を作る TOCTOU 競合があり得るため、
+// Create が codes.AlreadyExists を返した場合は冪等成功として既存ハンドルを返す
+// （並行起動時に AlreadyExists を fatal 化しない）。
 func (c *Client) ensureTopic(ctx context.Context, topicID string) (*gpubsub.Topic, error) {
 	topic := c.raw.Topic(topicID)
 	exists, err := topic.Exists(ctx)
@@ -175,6 +181,10 @@ func (c *Client) ensureTopic(ctx context.Context, topicID string) (*gpubsub.Topi
 	}
 	created, err := c.raw.CreateTopic(ctx, topicID)
 	if err != nil {
+		if status.Code(err) == codes.AlreadyExists {
+			// 並行起動で別 worker が先に作成済み。既存ハンドルを返して冪等に続行する。
+			return c.raw.Topic(topicID), nil
+		}
 		return nil, pkgerrors.Wrap(pkgerrors.CodeUnavailable,
 			"failed to create Pub/Sub topic: "+topicID, err)
 	}
@@ -182,6 +192,9 @@ func (c *Client) ensureTopic(ctx context.Context, topicID string) (*gpubsub.Topi
 }
 
 // ensureSubscription は topic に紐づく pull subscription を冪等に作成する。
+//
+// ensureTopic と同様、Create が codes.AlreadyExists を返した場合は冪等成功として扱う
+// （並行起動の TOCTOU 競合対策）。
 func (c *Client) ensureSubscription(ctx context.Context, subID string, topic *gpubsub.Topic) error {
 	sub := c.raw.Subscription(subID)
 	exists, err := sub.Exists(ctx)
@@ -193,6 +206,10 @@ func (c *Client) ensureSubscription(ctx context.Context, subID string, topic *gp
 		return nil
 	}
 	if _, err := c.raw.CreateSubscription(ctx, subID, gpubsub.SubscriptionConfig{Topic: topic}); err != nil {
+		if status.Code(err) == codes.AlreadyExists {
+			// 並行起動で別 worker が先に作成済み。冪等成功として続行する。
+			return nil
+		}
 		return pkgerrors.Wrap(pkgerrors.CodeUnavailable,
 			"failed to create Pub/Sub subscription: "+subID, err)
 	}

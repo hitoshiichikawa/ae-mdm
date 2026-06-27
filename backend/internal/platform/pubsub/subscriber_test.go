@@ -167,6 +167,42 @@ func TestSubscriber_SubscriptionMissing_ReturnsErrorWithoutLoop(t *testing.T) {
 	}
 }
 
+// TestSubscriber_CanceledDuringExistsCheck_ReturnsNilGracefully は finding（subscriber.go:117）
+// と requirements 6.4 を検証する。存在確認の最中に ctx がキャンセル（SIGINT/SIGTERM 相当）
+// された場合、致命的エラーではなく graceful shutdown として nil を返すこと。
+func TestSubscriber_CanceledDuringExistsCheck_ReturnsNilGracefully(t *testing.T) {
+	// Arrange: subscription は seed 済み（存在自体は問題ない）。
+	srv := newFakeServer(t)
+	cfg := testConfig()
+	seedTopicAndSubscription(t, srv, testProjectID, testTopicID, testSubID)
+	client := newTestClient(t, srv, cfg)
+	sub, err := NewSubscriber(client, cfg, nil, nil)
+	if err != nil {
+		t.Fatalf("NewSubscriber: %v", err)
+	}
+
+	var handlerCalled atomic.Bool
+	handler := HandlerFunc(func(_ context.Context, _ *Message) error {
+		handlerCalled.Store(true)
+		return nil
+	})
+
+	// 事前にキャンセル済みの ctx を渡す（存在確認が ctx 起因で失敗する）。
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	// Act
+	runErr := sub.Run(ctx, handler)
+
+	// Assert: fatal 化せず nil（graceful）を返す。
+	if runErr != nil {
+		t.Fatalf("canceled context during existence check should return nil, got: %v", runErr)
+	}
+	if handlerCalled.Load() {
+		t.Fatalf("receive loop must not start when context is already canceled")
+	}
+}
+
 // TestSubscriber_HandlerSuccess_Acks は requirements 3.1 を検証する。
 // handler 成功時はメッセージが ack され、再配信されないこと（handler は 1 回だけ呼ばれる）。
 func TestSubscriber_HandlerSuccess_Acks(t *testing.T) {
@@ -277,12 +313,14 @@ func TestSubscriber_PermanentError_Acks_NotRedelivered(t *testing.T) {
 }
 
 // TestNewSubscriber_MaxOutstandingBelowOne_Rejected は requirements 4.3 を検証する。
-// MaxOutstandingMessages < 1 を構造化エラーで拒否すること。
+// opts 非 nil で MaxOutstandingMessages < 1（0 を含む）を構造化エラーで拒否すること。
+// 0（ゼロ値）も「並行度ゼロ＝受信停止」の誤設定であり、拒否対象に含める。
 func TestNewSubscriber_MaxOutstandingBelowOne_Rejected(t *testing.T) {
 	cases := []struct {
 		name  string
 		value int
 	}{
+		{name: "zero", value: 0},
 		{name: "negative", value: -1},
 		{name: "negative large", value: -100},
 	}
@@ -304,6 +342,27 @@ func TestNewSubscriber_MaxOutstandingBelowOne_Rejected(t *testing.T) {
 				t.Fatalf("expected CodeConfigInvalid, got %v", err)
 			}
 		})
+	}
+}
+
+// TestNewSubscriber_NilOpts_UsesDefault は opts=nil が既定値で受理されることを検証する
+// （requirements 4.1: 既定値で良い場合は opts に nil を渡す契約）。
+func TestNewSubscriber_NilOpts_UsesDefault(t *testing.T) {
+	// Arrange
+	srv := newFakeServer(t)
+	cfg := testConfig()
+	client := newTestClient(t, srv, cfg)
+
+	// Act
+	sub, err := NewSubscriber(client, cfg, nil, nil)
+
+	// Assert
+	if err != nil {
+		t.Fatalf("nil opts should be accepted with default, got error: %v", err)
+	}
+	if sub.maxOutstandingMessages != defaultMaxOutstandingMessages {
+		t.Errorf("maxOutstandingMessages = %d, want default %d",
+			sub.maxOutstandingMessages, defaultMaxOutstandingMessages)
 	}
 }
 
