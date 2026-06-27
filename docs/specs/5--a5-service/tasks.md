@@ -17,7 +17,7 @@
 > 並列実行可能なタスクには `(P)` を付け、`_Boundary:_` で担当 Components を明示する。
 
 - [ ] 1. Audit ドメイン型 + Service（記録 / 閲覧 + 保持期間下限）+ 単体テスト
-- [ ] 1.1 Audit types + Clock + failure_kinds (P)
+- [x] 1.1 Audit types + Clock + failure_kinds (P)
   - `backend/internal/audit/types.go` を新規追加。`EventType string` / `ResultType string`
     （`ResultSuccess` / `ResultFailure` の 2 値）/ `Event`(ID / TenantID / ActorID / EventType /
     ResourceID / Detail `map[string]any` / Result / OccurredAt) / `Filter`(TenantID `*uuid.UUID` /
