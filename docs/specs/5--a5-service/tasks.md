@@ -164,7 +164,7 @@
   - _Depends: 1.2_
 
 - [ ] 5. cmd/api への DI 配線 + Mount
-- [ ] 5.1 audit Service/Handler/AdminHandler の構築と Routers への Mount
+- [x] 5.1 audit Service/Handler/AdminHandler の構築と Routers への Mount
   - `backend/cmd/api/main.go` を修正。`httpserver.NewServer(...)` の戻り値を `srv, routers, err`
     （現状 `srv, _, err` で破棄）に変更し、`routers` を受け取る
   - bootstrap の (6) http server 構築後に audit ドメインを配線:
