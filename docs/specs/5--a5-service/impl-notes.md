@@ -75,15 +75,18 @@
 - **重要な判断**:
   - **authz↔design 不整合の解決**: design.md は authz を「常に claims.TenantID fallback で
     TargetTenantID 指定」と書くが、authz.Authorize は TargetTenantID が uuid.Nil（SuperAdmin の
-    claims.TenantID）に正規化されると role/aud に関わらず無条件 deny する（authz.go:156-159 /
-    Req 4.4 fail-closed）。これを全テナント横断ビュー（tenant_id query 無し）に適用すると 403 に
-    なり AC Req 3.1 と矛盾するため、cross-tenant authz matrix 判定は **tenant_id query 指定時のみ**
-    実施する（target=その tenant_id / SuperAdmin × admin-console × cross-tenant → allow）。tenant_id
-    無しの全テナントビューは `RequireAdminConsoleAndSuperAdmin` 固定ガード（Req 4.4）に依拠して保護
-    （詳細は下記「確認事項」）。
+    claims.TenantID）に正規化されると role/aud に関わらず無条件 deny する（authz.go /
+    Req 4.4 fail-closed）。design 字義どおり claims.TenantID（= uuid.Nil）を渡すと全テナント横断ビュー
+    （tenant_id query 無し）が 403 に化け AC Req 3.1 と矛盾する。これを解消するため cross-tenant
+    authz matrix 判定は **常に**（tenant_id 指定の有無に関わらず）実施し、tenant_id 無しの全件
+    ビューでは代表 probe テナント（`crossTenantAuthzProbeTenantID` / 非 nil sentinel）を
+    TargetTenantID に渡す。SuperAdmin session（SessionTenantID=uuid.Nil）に対し任意の非 nil target は
+    authz の cross-tenant 分岐へ落ちるため、許可マトリクスの `audit_log read`（cross-tenant =
+    SuperAdmin のみ）が main path でも実際に gate する（Req 4.6 / fcf3694 で修正。詳細は下記「確認事項」）。
   - SuperAdmin TenantContext（`TenantID=uuid.Nil, IsSuperAdmin=true`）を `db.WithTenantContext` で
     handler 境界で確立してから `svc.List` を呼ぶ（RLS の is_superadmin 句で全テナント + NULL 可視 /
     Req 3.1 / 3.5）。`Filter.TenantID` は tenant_id query 指定時のみ `*uuid.UUID` で設定（Req 3.2）。
+    probe テナントは authz 判定専用であり `Filter.TenantID` には設定しない（Filter は nil のまま）。
   - `warnFailure` は `*Handler` のメソッドで admin から呼べないため、`*AdminHandler` 専用に同等の
     小メソッドを持たせ handler.go を触らずに boundary（AuditAdminHandler）を保った（軽微な重複を許容）。
 - **残存課題（次 task への影響）**: admin_handler は task 5 で `routers.Admin.Mount("/audit-logs",
@@ -278,17 +281,23 @@
   `claims.TenantID == uuid.Nil` のため、design 字義どおり「tenant_id 無し → claims.TenantID
   fallback」で authorize すると TargetTenantID=uuid.Nil → authz deny → 403 となり、**AC Req 3.1
   （tenant_id 無しの全テナント横断ビューは 200）と矛盾**する。
-- **解決方針（実装済み）**: cross-tenant authz matrix 判定（Req 4.6）は **具体的な `tenant_id`
-  query が指定されたときのみ** 行う（target=その tenant_id / SuperAdmin × admin-console ×
-  cross-tenant → allow / deny なら 403 + `failure_kind=authz_denied`）。tenant_id query 無し
-  （全テナント横断ビュー）は、`RequireAdminConsoleAndSuperAdmin` 固定ガードが既に admin-console +
-  SuperAdmin を強制済み（Req 4.4）であることに依拠し、authz の uuid.Nil deny を発火させない
-  （authz モデルは「全テナント」を表す target を持たないため、ここを matrix 判定に通すと正当な
-  全件ビューが fail-close する）。claims 不在は防御的に 401。
-- **位置付け**: この「authz matrix 判定は tenant_id 指定時のみ」は design.md の字義（常に
-  claims.TenantID fallback で authorize）からの **意図的な乖離**。理由（authz Req 4.4 の uuid.Nil
-  fail-closed と AC Req 3.1 の両立）を本項に明記し、spec 本文（design.md / tasks.md /
-  requirements.md）は書き換えていない。PM / Architect の判断が必要なら本項を起点に差し戻し可能。
+- **解決方針（実装済み / fcf3694 で更新）**: cross-tenant authz matrix 判定（Req 4.6）は
+  **tenant_id 指定の有無に関わらず常に** 行う（deny なら 403 + `failure_kind=authz_denied`）。
+  tenant_id query 指定時は TargetTenantID=その tenant_id を、無指定（全テナント横断ビュー）時は
+  代表 probe テナント（`crossTenantAuthzProbeTenantID` / 非 nil sentinel）を TargetTenantID に渡す。
+  SuperAdmin session（SessionTenantID=uuid.Nil）に対し任意の非 nil target は authz の cross-tenant
+  分岐へ落ちるため、いずれの経路でも許可マトリクスが cross-tenant `audit_log read`（SuperAdmin の
+  み）を main path で gate する（Req 4.6）。probe は authz 判定専用で Filter.TenantID には設定しない
+  （Filter は nil のままで RLS の SuperAdmin 句が全テナント + NULL を可視にする / Req 3.1 / 3.5）。
+  claims 不在は防御的に 401。
+- **位置付け**: design.md の字義（常に claims.TenantID fallback で authorize）は SuperAdmin の
+  claims.TenantID=uuid.Nil を fail-closed deny に化けさせ AC Req 3.1 と両立しないため、authz 判定専用の
+  probe sentinel を介在させて全テナントビューでも matrix を発火させる **意図的な乖離**である。理由
+  （authz Req 4.4 の uuid.Nil fail-closed と AC Req 3.1 / Req 4.6 の両立）を本項に明記し、spec 本文
+  （design.md / tasks.md / requirements.md）は書き換えていない。PM / Architect の判断が必要なら本項を
+  起点に差し戻し可能。当初は「tenant_id 指定時のみ matrix 判定 / 全件ビューは固定ガード依拠」で実装
+  したが、Req 4.6（全テナントビューにも matrix 適用）を main path で満たすため fcf3694 で常時判定へ
+  改めた。
 
 ## 検証結果（サマリ）
 
