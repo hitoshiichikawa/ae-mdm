@@ -115,6 +115,15 @@ func TestValidate_Security_RequiredAndEnum(t *testing.T) {
 			name: "必須充足かつ選択肢が許容値内のとき受理する(Req3.1 正常系)",
 			sec:  SecurityPolicy{EncryptionPolicy: "ENABLED_WITHOUT_PASSWORD", PasswordQuality: "NUMERIC"},
 		},
+		// Req 3.1: complexity-based の passwordQuality（AMAPI enum）も許容値内として受理
+		{
+			name: "PasswordQualityがCOMPLEXITY_HIGHのとき受理する(Req3.1 正常系/AMAPI enum)",
+			sec:  SecurityPolicy{EncryptionPolicy: "ENABLED_WITH_PASSWORD", PasswordQuality: "COMPLEXITY_HIGH"},
+		},
+		{
+			name: "PasswordQualityがCOMPLEXITY_LOWのとき受理する(Req3.1 正常系/AMAPI enum)",
+			sec:  SecurityPolicy{EncryptionPolicy: "ENABLED_WITH_PASSWORD", PasswordQuality: "COMPLEXITY_LOW"},
+		},
 		// Req 3.2: 必須項目欠落（空文字）を拒否
 		{
 			name:        "必須項目EncryptionPolicyが欠落のとき拒否する(Req3.2 異常系)",
@@ -265,8 +274,8 @@ func TestValidate_Kiosk_PackageNameFormat(t *testing.T) {
 			// Act
 			got := Validate(in)
 
-			// Assert
-			e, found := hasError(got, DomainKiosk, "PackageNames")
+			// Assert: 不正要素は添字 0 の要素のため Field=PackageNames[0]（Req 5.2 / 6.1）
+			e, found := hasError(got, DomainKiosk, "PackageNames[0]")
 			if tt.wantReject {
 				if !found {
 					t.Fatalf("packages=%v: 拒否を期待したが検証エラーが無い", tt.packages)
@@ -278,6 +287,39 @@ func TestValidate_Kiosk_PackageNameFormat(t *testing.T) {
 				t.Fatalf("packages=%v: 受理を期待したが検証エラーが返った (err=%+v)", tt.packages, e)
 			}
 		})
+	}
+}
+
+// Req 5.2 / 6.1: 不正なパッケージ名がどの要素かを Field の配列添字で機械可読に識別できる
+func TestValidate_Kiosk_ReportsOffendingIndex(t *testing.T) {
+	// Arrange: 添字 0=妥当 / 1=形式不正(1seg) / 2=妥当 / 3=空文字 と混在させる
+	in := PolicyInput{Kiosk: &KioskPolicy{PackageNames: []string{
+		"com.ok",     // 0: 妥当
+		"invalid",    // 1: 形式不正（1 セグメント）
+		"jp.co.ok_2", // 2: 妥当
+		"",           // 3: 空文字
+	}}}
+
+	// Act
+	got := Validate(in)
+
+	// Assert: 不正な添字 1 / 3 のみが、それぞれの添字付き Field で報告される
+	if _, found := hasError(got, DomainKiosk, "PackageNames[1]"); !found {
+		t.Errorf("添字 1 の形式不正が PackageNames[1] として報告されていない (result=%+v)", got)
+	}
+	if _, found := hasError(got, DomainKiosk, "PackageNames[3]"); !found {
+		t.Errorf("添字 3 の空文字が PackageNames[3] として報告されていない (result=%+v)", got)
+	}
+	// 妥当な添字 0 / 2 は報告されない
+	if _, found := hasError(got, DomainKiosk, "PackageNames[0]"); found {
+		t.Errorf("妥当な添字 0 が誤って報告された (result=%+v)", got)
+	}
+	if _, found := hasError(got, DomainKiosk, "PackageNames[2]"); found {
+		t.Errorf("妥当な添字 2 が誤って報告された (result=%+v)", got)
+	}
+	// 不正要素は 2 件のみ
+	if len(got.Errors) != 2 {
+		t.Errorf("検証エラー件数 = %d, want 2 (result=%+v)", len(got.Errors), got)
 	}
 }
 
@@ -309,7 +351,7 @@ func TestValidate_CollectsAllErrors(t *testing.T) {
 		{DomainApp, "AppCount"},
 		{DomainPassword, "MinimumLength"},
 		{DomainSecurity, "EncryptionPolicy"},
-		{DomainKiosk, "PackageNames"},
+		{DomainKiosk, "PackageNames[0]"},
 	} {
 		if _, found := hasError(got, want.domain, want.field); !found {
 			t.Errorf("期待した不正項目が収集されていない: domain=%s field=%s", want.domain, want.field)

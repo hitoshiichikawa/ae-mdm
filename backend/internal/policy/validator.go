@@ -1,6 +1,9 @@
 package policy
 
-import "regexp"
+import (
+	"fmt"
+	"regexp"
+)
 
 // 検証定数。マジックナンバーを意味のある名前で共有する（CLAUDE.md コード規約）。
 const (
@@ -27,7 +30,9 @@ var allowedEncryptionPolicies = map[string]struct{}{
 }
 
 // allowedPasswordQualities はセキュリティ領域 PasswordQuality の許容値集合（Req 3.3）。
-// AMAPI passwordQuality enum に整合させた代表値。
+// AMAPI passwordQuality enum（google.golang.org/api v0.186.0 androidmanagement/v1
+// PasswordRequirements.PasswordQuality）の全許容値に整合させる。complexity-based の
+// COMPLEXITY_LOW / COMPLEXITY_MEDIUM / COMPLEXITY_HIGH も AMAPI が受理する有効値のため含める。
 var allowedPasswordQualities = map[string]struct{}{
 	"PASSWORD_QUALITY_UNSPECIFIED": {},
 	"BIOMETRIC_WEAK":               {},
@@ -37,6 +42,9 @@ var allowedPasswordQualities = map[string]struct{}{
 	"ALPHABETIC":                   {},
 	"ALPHANUMERIC":                 {},
 	"COMPLEX":                      {},
+	"COMPLEXITY_LOW":               {},
+	"COMPLEXITY_MEDIUM":            {},
+	"COMPLEXITY_HIGH":              {},
 }
 
 // allowedSystemUpdateTypes はシステム更新領域 Type の許容値集合（Req 4.3）。
@@ -210,21 +218,29 @@ func checkSystemUpdate(in PolicyInput, result *ValidationResult) {
 }
 
 // checkKiosk は Kiosk 指定アプリのパッケージ名がすべて妥当な形式か検証する（Req 5）。
+// 不正な要素は Field に配列添字を含めて報告し、どの要素が不正かを機械可読に識別できる
+// ようにする（Req 5.2 / 6.1）。
 func checkKiosk(in PolicyInput, result *ValidationResult) {
 	for i, name := range in.Kiosk.PackageNames {
 		if !isValidPackageName(name) {
 			result.add(ValidationError{
 				Domain:  DomainKiosk,
-				Field:   "PackageNames",
+				Field:   kioskField(i),
 				Kind:    KindInvalidField,
-				Message: kioskMessage(i, name),
+				Message: kioskMessage(name),
 			})
 		}
 	}
 }
 
+// kioskField は不正な Kiosk パッケージ名のフィールド名を配列添字付きで返す（Req 5.2 / 6.1）。
+// 例: PackageNames[2]。呼び出し側が PackageNames 配列のどの要素が不正かを機械可読に特定できる。
+func kioskField(index int) string {
+	return fmt.Sprintf("PackageNames[%d]", index)
+}
+
 // kioskMessage は Kiosk パッケージ名不正の説明を組み立てる（空文字と形式不正を区別表記）。
-func kioskMessage(index int, name string) string {
+func kioskMessage(name string) string {
 	if name == "" {
 		return "Kiosk パッケージ名が空文字列です"
 	}
