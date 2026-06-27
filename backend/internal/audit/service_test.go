@@ -60,7 +60,7 @@ func TestService_Record(t *testing.T) {
 	t.Run("ID/OccurredAt 未設定かつ結果成功のとき採番・補完して ResultSuccess を Repository へ渡す", func(t *testing.T) {
 		// Arrange (Req 1.1 / 1.3)
 		repo := &fakeRepository{}
-		svc := NewService(config.Config{AuditLogRetentionDays: 180}, repo, fakeClock{now: fixedNow})
+		svc := NewService(config.Config{AuditLogRetentionDays: 180}, repo, fakeClock{now: fixedNow}, nil)
 		ev := Event{
 			TenantID:  uuid.New(),
 			ActorID:   uuid.New(),
@@ -93,7 +93,7 @@ func TestService_Record(t *testing.T) {
 	t.Run("結果失敗のとき ResultFailure をそのまま Repository へ渡す", func(t *testing.T) {
 		// Arrange (Req 1.4)
 		repo := &fakeRepository{}
-		svc := NewService(config.Config{AuditLogRetentionDays: 180}, repo, fakeClock{now: fixedNow})
+		svc := NewService(config.Config{AuditLogRetentionDays: 180}, repo, fakeClock{now: fixedNow}, nil)
 		ev := Event{ActorID: uuid.New(), EventType: "role_change", Result: ResultFailure}
 
 		// Act
@@ -111,7 +111,7 @@ func TestService_Record(t *testing.T) {
 	t.Run("ID/OccurredAt が設定済みのとき上書きせず保持する", func(t *testing.T) {
 		// Arrange (Req 1.1 — 既存値の温存。境界: 採番・補完が発火しないケース)
 		repo := &fakeRepository{}
-		svc := NewService(config.Config{AuditLogRetentionDays: 180}, repo, fakeClock{now: fixedNow})
+		svc := NewService(config.Config{AuditLogRetentionDays: 180}, repo, fakeClock{now: fixedNow}, nil)
 		presetID := uuid.New()
 		presetTime := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 		ev := Event{ID: presetID, ActorID: uuid.New(), EventType: "policy_change", Result: ResultSuccess, OccurredAt: presetTime}
@@ -134,7 +134,7 @@ func TestService_Record(t *testing.T) {
 	t.Run("TenantID == uuid.Nil（NULL テナント）がそのまま Repository へ渡る", func(t *testing.T) {
 		// Arrange (Req 1.2 — NULL bind は Repository 責務。Service は素通し)
 		repo := &fakeRepository{}
-		svc := NewService(config.Config{AuditLogRetentionDays: 180}, repo, fakeClock{now: fixedNow})
+		svc := NewService(config.Config{AuditLogRetentionDays: 180}, repo, fakeClock{now: fixedNow}, nil)
 		ev := Event{TenantID: uuid.Nil, ActorID: uuid.New(), EventType: "command_wipe", Result: ResultSuccess}
 
 		// Act
@@ -152,7 +152,7 @@ func TestService_Record(t *testing.T) {
 		// Arrange (Req 1.6 — fail-closed)
 		wantErr := stderrors.New("insert failed")
 		repo := &fakeRepository{insertErr: wantErr}
-		svc := NewService(config.Config{AuditLogRetentionDays: 180}, repo, fakeClock{now: fixedNow})
+		svc := NewService(config.Config{AuditLogRetentionDays: 180}, repo, fakeClock{now: fixedNow}, nil)
 		ev := Event{ActorID: uuid.New(), EventType: "token_issue", Result: ResultSuccess}
 
 		// Act
@@ -166,6 +166,48 @@ func TestService_Record(t *testing.T) {
 			t.Errorf("error chain does not contain repo error: got %v", err)
 		}
 	})
+}
+
+// TestService_Record_PersistError_LogsPersistErrorWarn は永続化失敗時に
+// failure_kind=persist_error の構造化 WARN が出ることを検証する（NFR 3.2）。
+//
+// 永続化失敗のエラー伝播そのもの（Req 1.6）は別テストでカバーするため、本テストは
+// 構造化ログの failure_kind 観点のみに限定する（1 テスト = 1 検証対象）。
+func TestService_Record_PersistError_LogsPersistErrorWarn(t *testing.T) {
+	// Arrange (NFR 3.2)
+	repo := &fakeRepository{insertErr: stderrors.New("insert failed")}
+	log := &fakeLogger{}
+	svc := NewService(config.Config{AuditLogRetentionDays: 180}, repo, fakeClock{now: fixedNow}, log)
+	ev := Event{ActorID: uuid.New(), EventType: "token_issue", Result: ResultSuccess}
+
+	// Act
+	err := svc.Record(context.Background(), ev)
+
+	// Assert
+	if err == nil {
+		t.Fatalf("Record returned nil error, want propagated error")
+	}
+	assertWarnFailureKind(t, log, FailureKindPersistError)
+}
+
+// TestService_Record_Success_NoWarn は永続化成功時に WARN を出さないことを検証する
+// （NFR 3.2 の境界 = 失敗時のみ failure_kind ログを出す）。
+func TestService_Record_Success_NoWarn(t *testing.T) {
+	// Arrange
+	repo := &fakeRepository{}
+	log := &fakeLogger{}
+	svc := NewService(config.Config{AuditLogRetentionDays: 180}, repo, fakeClock{now: fixedNow}, log)
+	ev := Event{ActorID: uuid.New(), EventType: "policy_change", Result: ResultSuccess}
+
+	// Act
+	if err := svc.Record(context.Background(), ev); err != nil {
+		t.Fatalf("Record returned unexpected error: %v", err)
+	}
+
+	// Assert
+	if len(log.warnCalls) != 0 {
+		t.Errorf("成功時に WARN が出力されている: %+v", log.warnCalls)
+	}
 }
 
 // ---- List tests ----
@@ -211,7 +253,7 @@ func TestService_List_RetentionFloor(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			// Arrange
 			repo := &fakeRepository{selectOut: []Event{}}
-			svc := NewService(config.Config{AuditLogRetentionDays: tc.retentionDays}, repo, fakeClock{now: fixedNow})
+			svc := NewService(config.Config{AuditLogRetentionDays: tc.retentionDays}, repo, fakeClock{now: fixedNow}, nil)
 
 			// Act
 			_, err := svc.List(context.Background(), Filter{From: tc.from})
@@ -236,9 +278,9 @@ func TestService_List_DefaultRetentionDiffersFrom365(t *testing.T) {
 	from := timePtr(fixedNow.AddDate(0, 0, -400)) // 起点より十分前に置き、retentionFloor が支配的になるようにする
 
 	repo180 := &fakeRepository{selectOut: []Event{}}
-	svc180 := NewService(config.Config{AuditLogRetentionDays: 180}, repo180, fakeClock{now: fixedNow})
+	svc180 := NewService(config.Config{AuditLogRetentionDays: 180}, repo180, fakeClock{now: fixedNow}, nil)
 	repo365 := &fakeRepository{selectOut: []Event{}}
-	svc365 := NewService(config.Config{AuditLogRetentionDays: 365}, repo365, fakeClock{now: fixedNow})
+	svc365 := NewService(config.Config{AuditLogRetentionDays: 365}, repo365, fakeClock{now: fixedNow}, nil)
 
 	// Act
 	if _, err := svc180.List(context.Background(), Filter{From: from}); err != nil {
@@ -263,7 +305,7 @@ func TestService_List_DefaultRetentionDiffersFrom365(t *testing.T) {
 func TestService_List_PassesFilterAndResult(t *testing.T) {
 	// Arrange — Filter が Repository へそのまま伝播し、結果が呼び出し側へ返ることを確認 (Req 2.x / 3.x)
 	repo := &fakeRepository{selectOut: []Event{{EventType: "policy_change"}}}
-	svc := NewService(config.Config{AuditLogRetentionDays: 180}, repo, fakeClock{now: fixedNow})
+	svc := NewService(config.Config{AuditLogRetentionDays: 180}, repo, fakeClock{now: fixedNow}, nil)
 	tenantID := uuid.New()
 	filter := Filter{TenantID: &tenantID, EventType: "policy_change", ActorID: "actor-1", ResourceID: "res-1"}
 
@@ -288,7 +330,7 @@ func TestService_List_PassesFilterAndResult(t *testing.T) {
 func TestService_List_EmptyResult(t *testing.T) {
 	// Arrange — (g) fake Repository が 0 行を返したら空 slice + nil (Req 2.8 / 3.4)
 	repo := &fakeRepository{selectOut: []Event{}}
-	svc := NewService(config.Config{AuditLogRetentionDays: 180}, repo, fakeClock{now: fixedNow})
+	svc := NewService(config.Config{AuditLogRetentionDays: 180}, repo, fakeClock{now: fixedNow}, nil)
 
 	// Act
 	got, err := svc.List(context.Background(), Filter{})
@@ -309,7 +351,7 @@ func TestService_List_PropagatesSelectError(t *testing.T) {
 	// Arrange — SELECT エラー時はそのまま伝播する（閲覧経路の fail パス）
 	wantErr := stderrors.New("select failed")
 	repo := &fakeRepository{selectErr: wantErr}
-	svc := NewService(config.Config{AuditLogRetentionDays: 180}, repo, fakeClock{now: fixedNow})
+	svc := NewService(config.Config{AuditLogRetentionDays: 180}, repo, fakeClock{now: fixedNow}, nil)
 
 	// Act
 	_, err := svc.List(context.Background(), Filter{})

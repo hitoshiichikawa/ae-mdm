@@ -203,7 +203,7 @@ func runBootstrap(ctx context.Context) int {
 	//     → 実 path `/api/admin/audit-logs`（cross-tenant 閲覧 / 固定ガード
 	//       RequireAdminConsoleAndSuperAdmin 配下 / Req 3.x / 4.4）
 	auditRepo := audit.NewRepository(pool)
-	auditSvc := audit.NewService(cfg, auditRepo, audit.SystemClock{})
+	auditSvc := audit.NewService(cfg, auditRepo, audit.SystemClock{}, log)
 	authorizer := authz.New()
 	auditHandler := audit.NewHandler(auditSvc, authorizer, log)
 	auditAdminHandler := audit.NewAdminHandler(auditSvc, authorizer, log)

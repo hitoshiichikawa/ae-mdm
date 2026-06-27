@@ -105,7 +105,7 @@ func TestAuditIntegration_TenantContextIsolation_OtherTenantAndNullInvisible(t *
 	ids := seedDummyData(t, ctx, pool)
 
 	repo := audit.NewRepository(pool)
-	svc := audit.NewService(config.Config{AuditLogRetentionDays: auditTestRetentionDays}, repo, auditFixedClock{now: auditFixedNow})
+	svc := audit.NewService(config.Config{AuditLogRetentionDays: auditTestRetentionDays}, repo, auditFixedClock{now: auditFixedNow}, nil)
 
 	tcA := platformdb.TenantContext{TenantID: ids.tenantAID, IsSuperAdmin: false}
 	tcB := platformdb.TenantContext{TenantID: ids.tenantBID, IsSuperAdmin: false}
@@ -167,7 +167,7 @@ func TestAuditIntegration_SuperAdminSeesAllDesc(t *testing.T) {
 	ids := seedDummyData(t, ctx, pool)
 
 	repo := audit.NewRepository(pool)
-	svc := audit.NewService(config.Config{AuditLogRetentionDays: auditTestRetentionDays}, repo, auditFixedClock{now: auditFixedNow})
+	svc := audit.NewService(config.Config{AuditLogRetentionDays: auditTestRetentionDays}, repo, auditFixedClock{now: auditFixedNow}, nil)
 
 	tcA := platformdb.TenantContext{TenantID: ids.tenantAID, IsSuperAdmin: false}
 	tcB := platformdb.TenantContext{TenantID: ids.tenantBID, IsSuperAdmin: false}
@@ -223,7 +223,7 @@ func TestAuditIntegration_SuperAdminFilterByTenant(t *testing.T) {
 	ids := seedDummyData(t, ctx, pool)
 
 	repo := audit.NewRepository(pool)
-	svc := audit.NewService(config.Config{AuditLogRetentionDays: auditTestRetentionDays}, repo, auditFixedClock{now: auditFixedNow})
+	svc := audit.NewService(config.Config{AuditLogRetentionDays: auditTestRetentionDays}, repo, auditFixedClock{now: auditFixedNow}, nil)
 
 	tcA := platformdb.TenantContext{TenantID: ids.tenantAID, IsSuperAdmin: false}
 	tcB := platformdb.TenantContext{TenantID: ids.tenantBID, IsSuperAdmin: false}
@@ -270,7 +270,7 @@ func TestAuditIntegration_AppendOnly_UpdateDeleteRejected(t *testing.T) {
 	ids := seedDummyData(t, ctx, pool)
 
 	repo := audit.NewRepository(pool)
-	svc := audit.NewService(config.Config{AuditLogRetentionDays: auditTestRetentionDays}, repo, auditFixedClock{now: auditFixedNow})
+	svc := audit.NewService(config.Config{AuditLogRetentionDays: auditTestRetentionDays}, repo, auditFixedClock{now: auditFixedNow}, nil)
 
 	tcA := platformdb.TenantContext{TenantID: ids.tenantAID, IsSuperAdmin: false}
 	tcSA := platformdb.TenantContext{TenantID: uuid.Nil, IsSuperAdmin: true}
@@ -349,7 +349,7 @@ func TestAuditIntegration_AppendOnly_NullTenantRowImmutable(t *testing.T) {
 	ids := seedDummyData(t, ctx, pool)
 
 	repo := audit.NewRepository(pool)
-	svc := audit.NewService(config.Config{AuditLogRetentionDays: auditTestRetentionDays}, repo, auditFixedClock{now: auditFixedNow})
+	svc := audit.NewService(config.Config{AuditLogRetentionDays: auditTestRetentionDays}, repo, auditFixedClock{now: auditFixedNow}, nil)
 
 	tcSA := platformdb.TenantContext{TenantID: uuid.Nil, IsSuperAdmin: true}
 
@@ -418,7 +418,7 @@ func TestAuditIntegration_RetentionFloor_ExcludesOlderRows(t *testing.T) {
 	ids := seedDummyData(t, ctx, pool)
 
 	repo := audit.NewRepository(pool)
-	svc := audit.NewService(config.Config{AuditLogRetentionDays: auditTestRetentionDays}, repo, auditFixedClock{now: auditFixedNow})
+	svc := audit.NewService(config.Config{AuditLogRetentionDays: auditTestRetentionDays}, repo, auditFixedClock{now: auditFixedNow}, nil)
 
 	tcA := platformdb.TenantContext{TenantID: ids.tenantAID, IsSuperAdmin: false}
 
@@ -475,7 +475,7 @@ func TestAuditIntegration_NormalTenant_CrossTenantInsertRejectedAndInTenantRetai
 	ids := seedDummyData(t, ctx, pool)
 
 	repo := audit.NewRepository(pool)
-	svc := audit.NewService(config.Config{AuditLogRetentionDays: auditTestRetentionDays}, repo, auditFixedClock{now: auditFixedNow})
+	svc := audit.NewService(config.Config{AuditLogRetentionDays: auditTestRetentionDays}, repo, auditFixedClock{now: auditFixedNow}, nil)
 
 	tcA := platformdb.TenantContext{TenantID: ids.tenantAID, IsSuperAdmin: false}
 	ctxA := platformdb.WithTenantContext(ctx, tcA)
@@ -532,7 +532,7 @@ func TestAuditIntegration_EmptyResult_ReturnsEmptySliceNilError(t *testing.T) {
 	ids := seedDummyData(t, ctx, pool)
 
 	repo := audit.NewRepository(pool)
-	svc := audit.NewService(config.Config{AuditLogRetentionDays: auditTestRetentionDays}, repo, auditFixedClock{now: auditFixedNow})
+	svc := audit.NewService(config.Config{AuditLogRetentionDays: auditTestRetentionDays}, repo, auditFixedClock{now: auditFixedNow}, nil)
 
 	tcA := platformdb.TenantContext{TenantID: ids.tenantAID, IsSuperAdmin: false}
 
@@ -570,6 +570,11 @@ func TestAuditIntegration_EmptyResult_ReturnsEmptySliceNilError(t *testing.T) {
 // default deny（auth middleware 未配線でも TenantContextMiddleware が claims 不在で 401）に
 // 依拠するため DB を必要としないが、tasks.md L191 の「結合テスト」配置に合わせ本ファイルに
 // 置く（http_subrouter_mount_test.go の newIntegrationHTTPServer 作法を踏襲）。
+//
+// NOTE: 401 のみでは「handler 未 mount でも TenantContextMiddleware が claims 不在で 401 を返す」
+// ケースと区別できず wiring 回帰として不十分なため、認証済みリクエストが実際に audit handler へ
+// 到達することは下記 TestAuditIntegration_RoutingSmoke_AuthenticatedReachesHandler で別途検証する
+// （未 mount なら catch-all で 404、mount 済みなら handler 本体に到達して 200 となる差分で wiring を観測）。
 func TestAuditIntegration_RoutingSmoke_UnauthenticatedReturns401(t *testing.T) {
 	// Arrange: httpserver.NewServer を組み、task 5 と同じく audit handler を 2 サブルータへ Mount する。
 	log, err := logger.NewLogger(config.Config{
@@ -623,5 +628,119 @@ func TestAuditIntegration_RoutingSmoke_UnauthenticatedReturns401(t *testing.T) {
 				t.Errorf("GET %s status = %d; want 401（認証なしは先行ガードで閉じる）", tc.path, resp.StatusCode)
 			}
 		})
+	}
+}
+
+// fakeAuditReachService は routing smoke で audit handler 本体への到達を観測する最小の
+// audit.Service。List は空 slice + nil を返し、handler が svc.List まで到達したことを
+// listCalls で記録する（DB を要さない wiring 検証のための test double）。
+type fakeAuditReachService struct {
+	listCalls int
+}
+
+func (s *fakeAuditReachService) Record(context.Context, audit.Event) error { return nil }
+
+func (s *fakeAuditReachService) List(context.Context, audit.Filter) ([]audit.Event, error) {
+	s.listCalls++
+	return []audit.Event{}, nil
+}
+
+// injectAuthClaimsMW は指定 claims を request context に注入する test 専用 middleware。
+//
+// httpserver.NewServer の authMWTenant / authMWAdmin スロット（本番では auth.Middleware）に
+// 差し込むことで、実 auth middleware（OIDC / session）を経ずに認証済みリクエストを再現する。
+// 後段の TenantContextMiddleware が claims を読んで TenantContext を確立し、handler へ進める。
+func injectAuthClaimsMW(claims httpserver.AuthClaims) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			ctx := httpserver.WithAuthClaims(r.Context(), claims)
+			next.ServeHTTP(w, r.WithContext(ctx))
+		})
+	}
+}
+
+// TestAuditIntegration_RoutingSmoke_AuthenticatedReachesHandler はシナリオ (i) の wiring 回帰を
+// 強化する。認証済み claims を注入した状態で `/api/audit-logs` / `/api/admin/audit-logs` へ
+// アクセスすると、リクエストが実際に audit handler 本体へ到達して 200 を返すことを確認する
+// （task 5 の audit handler Mount 回帰 / Req 4.2 / 4.4）。
+//
+// 認証なしの 401 だけでは handler 未 mount のケース（catch-all + TenantContextMiddleware でも
+// 同じ 401）と区別できないため、本テストは認証済み経路が handler 本体へ到達することで wiring を
+// 観測する: handler が Mount されていれば 200（fake service が空配列を返す）、Mount されて
+// いなければ catch-all notFoundHandler で 404 になる差分で配線崩れを検出する。DB は不要
+// （fake service / pool=nil）。
+func TestAuditIntegration_RoutingSmoke_AuthenticatedReachesHandler(t *testing.T) {
+	// Arrange: tenant / admin それぞれの認証済み claims を注入する auth middleware を差し込む。
+	log, err := logger.NewLogger(config.Config{
+		LogLevel: "error", LogFormat: "json", LogOutput: "stderr",
+	})
+	if err != nil {
+		t.Fatalf("logger.NewLogger: %v", err)
+	}
+
+	tenantClaims := httpserver.AuthClaims{
+		TenantID:          uuid.New(),
+		AdminUserID:       uuid.New(),
+		Roles:             []string{"TenantAdmin"},
+		Console:           "tenant-console",
+		SessionHashPrefix: "abc12345",
+	}
+	adminClaims := httpserver.AuthClaims{
+		TenantID:          uuid.Nil,
+		AdminUserID:       uuid.New(),
+		Roles:             []string{"SuperAdmin"},
+		IsSuperAdmin:      true,
+		Console:           "admin-console",
+		SessionHashPrefix: "abc12345",
+	}
+
+	srv, routers, err := httpserver.NewServer(
+		config.Config{HTTPListenAddr: ":0"},
+		log,
+		nil,                              // pool 不要（fake service が DB を介さず空配列を返す）
+		injectAuthClaimsMW(tenantClaims), // authMWTenant: 認証済み tenant claims を注入
+		injectAuthClaimsMW(adminClaims),  // authMWAdmin: 認証済み admin claims を注入
+		nil,                              // authMount: /api/auth は Mount しない
+	)
+	if err != nil {
+		t.Fatalf("httpserver.NewServer: %v", err)
+	}
+
+	// task 5 (cmd/api) と同じ配線で fake service を持つ audit handler を Mount する。
+	svc := &fakeAuditReachService{}
+	authorizer := authz.New()
+	routers.API.Mount("/audit-logs", audit.NewHandler(svc, authorizer, log))
+	routers.Admin.Mount("/audit-logs", audit.NewAdminHandler(svc, authorizer, log))
+
+	ts := httptest.NewServer(srv.Handler)
+	defer ts.Close()
+
+	cases := []struct {
+		name string
+		path string
+	}{
+		{"tenant-console /api/audit-logs", "/api/audit-logs"},
+		{"admin-console /api/admin/audit-logs", "/api/admin/audit-logs"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			// Act
+			resp, err := http.Get(ts.URL + tc.path)
+			if err != nil {
+				t.Fatalf("GET %s: %v", tc.path, err)
+			}
+			defer func() { _ = resp.Body.Close() }()
+			_, _ = io.ReadAll(resp.Body)
+
+			// Assert: 認証済みリクエストは audit handler 本体へ到達して 200（未 mount なら 404 / Req 4.2 / 4.4）。
+			if resp.StatusCode != http.StatusOK {
+				t.Errorf("GET %s status = %d; want 200（認証済みは handler 本体へ到達する wiring）", tc.path, resp.StatusCode)
+			}
+		})
+	}
+
+	// 両経路とも handler 本体（svc.List）へ到達していること（handler 未 mount なら 0 のまま）。
+	if svc.listCalls != 2 {
+		t.Errorf("svc.List 到達回数 = %d; want 2（tenant + admin の両経路が audit handler へ到達）", svc.listCalls)
 	}
 }

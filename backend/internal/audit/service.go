@@ -7,6 +7,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/hitoshiichikawa/ae-mdm/internal/config"
+	"github.com/hitoshiichikawa/ae-mdm/internal/logger"
 )
 
 // Repository は audit_logs への永続化操作を抽象化する DI 境界。
@@ -41,6 +42,9 @@ type Service interface {
 	//
 	// ev.Detail は素通しする。ID トークン本体・cookie 生値・パスワード等の機密値を Detail に
 	// 入れないことは **呼び出し側の責務**（Req 1.7 / NFR 3.1）。
+	//
+	// 永続化失敗時は failure_kind=persist_error の構造化 WARN を出力する（NFR 3.2）。機密値
+	// （detail 生値）はログ本文に補間しない（NFR 3.1）。
 	Record(ctx context.Context, ev Event) error
 
 	// List は Filter に一致する監査ログを occurred_at 降順で返す（Req 2.x / 3.x / 5.x）。
@@ -57,17 +61,23 @@ type service struct {
 	cfg   config.Config
 	repo  Repository
 	clock Clock
+	log   logger.Logger
 }
 
 // NewService は本番用 Service を構築する。
 //
 // cfg は保持期間（AuditLogRetentionDays）の参照に、repo は永続化に、clock は保持期間下限の
-// 現在時刻算出に用いる（design.md「Audit Service」節 / task 1.2 と整合）。
-func NewService(cfg config.Config, repo Repository, clock Clock) Service {
-	return &service{cfg: cfg, repo: repo, clock: clock}
+// 現在時刻算出に用いる（design.md「Audit Service」節 / task 1.2 と整合）。log は記録経路の
+// 永続化失敗時に failure_kind=persist_error の構造化 WARN を出すために用いる（NFR 3.2）。
+// log が nil の場合は WARN 出力を skip する（test fixture / 防御的経路）。
+func NewService(cfg config.Config, repo Repository, clock Clock, log logger.Logger) Service {
+	return &service{cfg: cfg, repo: repo, clock: clock, log: log}
 }
 
 // Record は Service.Record の実装。
+//
+// 永続化失敗時は failure_kind=persist_error の構造化 WARN を出してからエラーを呼び出し側へ
+// 伝播し、当該書込を成功として扱わない（Req 1.6 / NFR 3.2 / fail-closed）。
 func (s *service) Record(ctx context.Context, ev Event) error {
 	if ev.ID == uuid.Nil {
 		ev.ID = uuid.New()
@@ -75,7 +85,28 @@ func (s *service) Record(ctx context.Context, ev Event) error {
 	if ev.OccurredAt.IsZero() {
 		ev.OccurredAt = s.clock.Now()
 	}
-	return s.repo.Insert(ctx, ev)
+	if err := s.repo.Insert(ctx, ev); err != nil {
+		s.warnPersistFailure(ev)
+		return err
+	}
+	return nil
+}
+
+// warnPersistFailure は監査ログ追記（INSERT）の永続化失敗で failure_kind=persist_error の
+// 構造化 WARN を出す（NFR 3.2）。
+//
+// Record は HTTP 経路外（各ドメイン Service）から呼ばれ request_id を持たないため、
+// event_type / result の非機密 field のみ載せる。detail の生値・query 生値・トークン等の
+// 機密値はログ本文に補間しない（NFR 3.1）。log が nil の場合は no-op。
+func (s *service) warnPersistFailure(ev Event) {
+	if s.log == nil {
+		return
+	}
+	s.log.Warn("audit failure",
+		"failure_kind", FailureKindPersistError,
+		"event_type", string(ev.EventType),
+		"result", string(ev.Result),
+	)
 }
 
 // List は Service.List の実装。
