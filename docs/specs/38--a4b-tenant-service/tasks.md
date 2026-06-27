@@ -25,7 +25,7 @@
   - _Boundary: db.migrations_
 
 - [ ] 3. Tenant Repository（raw SQL + SuperAdmin ctx + 競合制御）
-- [ ] 3.1 `internal/tenant/repository.go` を実装
+- [x] 3.1 `internal/tenant/repository.go` を実装
   - `Repository` interface（`Insert` / `Get` / `List` / `UpdateBound` / `UpdateDisabled`）と pgxpool 実装
   - 全メソッドで `superAdminContext(ctx)` + `db.BeginTxFunc` を使う（`internal/auth/repository.go:81` と同型）
   - `Insert`: status=`pending_bind` で 1 行 INSERT（NFR 1.1 / 3.1）
