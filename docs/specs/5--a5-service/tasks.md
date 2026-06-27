@@ -57,7 +57,7 @@
   - _Boundary: AuditService_
   - _Depends: 1.1_
 
-- [ ] 2. Audit Repository（append-only INSERT + 保持下限付き SELECT / raw pgx）+ 単体テスト
+- [x] 2. Audit Repository（append-only INSERT + 保持下限付き SELECT / raw pgx）+ 単体テスト
 - [x] 2.1 Repository 実装 + 動的 SQL 組み立ての単体テスト
   - `backend/internal/audit/repository.go` を新規追加。`Repository interface { Insert(ctx, Event) error;
     Select(ctx, Filter, effectiveFrom time.Time) ([]Event, error) }`（UPDATE/DELETE メソッドは **持たない**
