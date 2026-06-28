@@ -79,14 +79,20 @@ type Service interface {
 
 	// EnterpriseNameForTenant は他ドメインの業務操作前提ガード（Req 5.1〜5.3）。
 	//
-	//   - bound: enterprise_name + nil を返す。
+	//   - bound: enterprise_name + nil を返す。ただし bound 行の enterprise_name が空（データ
+	//     不整合）の場合は fail-closed で CodeBusinessRule（ErrInvalidState）を返す（NFR 1.1 防御）。
 	//   - pending_bind: 未バインドとして CodeBusinessRule（ErrNotBound）を返す（Req 5.2）。
 	//   - disabled: 無効化として CodeBusinessRule（ErrTenantDisabled）を返す（Req 5.3）。
 	//   - 不在: CodeNotFound（ErrTenantNotFound）を返す（Req 5.1）。
 	//
-	// tenant-scoped な呼び出し元（ctx の TenantContext が IsSuperAdmin=false）が自テナント以外の
-	// id を要求した場合は、存在差を露出しない ErrTenantNotFound で拒否する（テナント分離 / Req 6.5）。
-	// 拒否時は構造化ログを出す（NFR 2.2）。
+	// テナント分離（Req 6.5）は fail-closed で適用する。Repository は SuperAdmin context へ昇格し
+	// 全 tenants 行を可視化するため、本メソッドが唯一の越境防止点である:
+	//   - TenantContext 未確立: 認可文脈なしとして ErrTenantNotFound で拒否する（呼び出し側の
+	//     context 設定漏れで任意 tenant の enterprise_name が漏れる経路を塞ぐ。SuperAdmin の内部
+	//     経路は明示的に SuperAdmin TenantContext を確立してから呼ぶこと）。
+	//   - tenant-scoped（IsSuperAdmin=false）が自テナント以外の id を要求: ErrTenantNotFound。
+	//   - SuperAdmin context: 全 tenant 横断参照を許可。
+	// 拒否時は存在差を露出しない ErrTenantNotFound で統一し、構造化ログを出す（NFR 2.2）。
 	EnterpriseNameForTenant(ctx context.Context, id uuid.UUID) (string, error)
 }
 
@@ -292,11 +298,21 @@ func (s *service) Disable(ctx context.Context, actor uuid.UUID, id uuid.UUID, in
 		return TenantView{}, err
 	}
 
-	// 2. 既に disabled なら二重無効化として拒否（Req 3.4）。disabled は終端で再遷移しない。
-	if row.Status == StatusDisabled {
+	// 2. 前提状態判定（状態機械）。pending_bind / bound のみ無効化可能。
+	switch row.Status {
+	case StatusPendingBind, StatusBound:
+		// 無効化可能な状態。以降の確認テキスト検証 → UpdateDisabled へ進む。
+	case StatusDisabled:
+		// 既に disabled なら二重無効化として拒否（Req 3.4）。disabled は終端で再遷移しない。
 		s.logDeny(actor, id, "tenant is already disabled")
 		s.record(ctx, actor, id, OperationDisable, ResultFailure, false, "tenant already disabled")
 		return TenantView{}, ErrConflict
+	default:
+		// 定義外 status は fail-closed で不正状態として拒否し、disabled へ遷移させない（NFR 1.2 /
+		// Bind 側の default 分岐と対称）。
+		s.logDeny(actor, id, "tenant state is invalid")
+		s.record(ctx, actor, id, OperationDisable, ResultFailure, false, "tenant state invalid")
+		return TenantView{}, ErrInvalidState
 	}
 
 	// 3. 二段階確認テキスト検証（対象テナント name との完全一致 / Req 3.2）。
@@ -360,12 +376,23 @@ func (s *service) List(ctx context.Context) ([]TenantView, error) {
 // 他ドメインの業務操作前提ガード。bound のみ enterprise_name を返し、pending_bind / disabled は
 // 拒否、不在は CodeNotFound を返す。拒否時は構造化ログを出す（NFR 2.2）。
 func (s *service) EnterpriseNameForTenant(ctx context.Context, id uuid.UUID) (string, error) {
-	// テナント分離ガード（Req 6.5 / テナント分離）: 本 IF は他ドメインの tenant-scoped 文脈から
-	// 呼ばれる。Repository は全メソッドで SuperAdmin context へ昇格し全 tenants 行を可視化するため、
-	// tenant-scoped な呼び出し元（IsSuperAdmin=false）が自テナント以外の id を要求した場合は
-	// enterprise 識別子を返さず、存在差を露出しない ErrTenantNotFound（404）で拒否する。
-	// TenantContext 未確立（SuperAdmin の内部経路 / 単体テスト等）では本ガードを適用しない。
-	if tc, ctxErr := db.FromContext(ctx); ctxErr == nil && !tc.IsSuperAdmin && tc.TenantID != id {
+	// テナント分離ガード（Req 6.5 / テナント分離）を fail-closed で適用する。本 IF は他ドメインの
+	// tenant-scoped 文脈から呼ばれ、続く Repository は全メソッドで SuperAdmin context へ昇格して
+	// 全 tenants 行を可視化する。したがって本メソッドが唯一の越境防止点であり、認可文脈を確認
+	// できない呼び出しは fail-open にせずすべて拒否する:
+	//   - TenantContext 未確立（呼び出し側の context 設定漏れ等）: ErrTenantNotFound（fail-closed）。
+	//     これにより Repository の SuperAdmin 昇格に委ねて任意 tenant の enterprise_name を返して
+	//     しまう経路を構造的に塞ぐ。SuperAdmin の内部経路も明示的に SuperAdmin TenantContext を
+	//     確立してから呼ぶこと。
+	//   - tenant-scoped（IsSuperAdmin=false）かつ自テナント以外の id 要求: ErrTenantNotFound。
+	//   - SuperAdmin context: 全 tenant 横断参照を許可（admin 経路）。
+	// 拒否時は存在差を露出しない ErrTenantNotFound（404）で統一し、構造化ログを出す（NFR 2.2）。
+	tc, ctxErr := db.FromContext(ctx)
+	if ctxErr != nil {
+		s.logDeny(uuid.Nil, id, "tenant context is required for enterprise name access")
+		return "", ErrTenantNotFound
+	}
+	if !tc.IsSuperAdmin && tc.TenantID != id {
 		s.logDeny(tc.AdminUserID, id, "cross-tenant enterprise name access denied")
 		return "", ErrTenantNotFound
 	}
@@ -378,6 +405,13 @@ func (s *service) EnterpriseNameForTenant(ctx context.Context, id uuid.UUID) (st
 
 	switch row.Status {
 	case StatusBound:
+		// bound だが enterprise_name が空 = データ不整合（DDL は bound 行の enterprise_name 非空を
+		// 強制しない）。空の識別子を下流 AMAPI 操作へ渡すと前提ガード（Req 5.1）が壊れるため、
+		// fail-closed で不正状態として拒否する（NFR 1.1 invariant 防御 / Bind 側 3b の空応答ガードと対称）。
+		if strings.TrimSpace(row.EnterpriseName) == "" {
+			s.logDeny(uuid.Nil, id, "bound tenant has empty enterprise name")
+			return "", ErrInvalidState
+		}
 		return row.EnterpriseName, nil
 	case StatusPendingBind:
 		// 未バインドテナントへの enterprise 識別子要求は拒否（Req 5.2）。

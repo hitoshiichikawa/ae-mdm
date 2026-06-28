@@ -563,6 +563,13 @@ func TestService_List(t *testing.T) {
 
 // ===== EnterpriseNameForTenant =====
 
+// superAdminCtx は SuperAdmin TenantContext を確立した ctx を返す。EnterpriseNameForTenant の
+// テナント分離ガードは fail-closed（TenantContext 未確立は拒否）であり、status 別の挙動を検証する
+// サブテストは admin 内部経路を模す SuperAdmin context 上で実行する。
+func superAdminCtx() context.Context {
+	return db.WithTenantContext(context.Background(), db.TenantContext{TenantID: uuid.Nil, IsSuperAdmin: true})
+}
+
 func TestService_EnterpriseNameForTenant(t *testing.T) {
 	t.Run("bound のとき enterprise_name と nil を返す", func(t *testing.T) {
 		// Arrange
@@ -571,7 +578,7 @@ func TestService_EnterpriseNameForTenant(t *testing.T) {
 		h.repo.getRow = TenantRow{ID: id, Name: testTenantNameValue, Status: StatusBound, EnterpriseName: testEnterpriseName}
 
 		// Act
-		name, err := h.svc.EnterpriseNameForTenant(context.Background(), id)
+		name, err := h.svc.EnterpriseNameForTenant(superAdminCtx(), id)
 
 		// Assert
 		if err != nil {
@@ -589,7 +596,7 @@ func TestService_EnterpriseNameForTenant(t *testing.T) {
 		h.repo.getRow = TenantRow{ID: id, Name: testTenantNameValue, Status: StatusPendingBind}
 
 		// Act
-		name, err := h.svc.EnterpriseNameForTenant(context.Background(), id)
+		name, err := h.svc.EnterpriseNameForTenant(superAdminCtx(), id)
 
 		// Assert
 		if got := codeOf(t, err); got != pkgerrors.CodeBusinessRule {
@@ -610,7 +617,7 @@ func TestService_EnterpriseNameForTenant(t *testing.T) {
 		h.repo.getRow = TenantRow{ID: id, Name: testTenantNameValue, Status: StatusDisabled}
 
 		// Act
-		_, err := h.svc.EnterpriseNameForTenant(context.Background(), id)
+		_, err := h.svc.EnterpriseNameForTenant(superAdminCtx(), id)
 
 		// Assert
 		if got := codeOf(t, err); got != pkgerrors.CodeBusinessRule {
@@ -628,9 +635,10 @@ func TestService_EnterpriseNameForTenant(t *testing.T) {
 		// Arrange
 		h := newServiceHarness()
 		h.repo.getErr = pkgerrors.Wrap(pkgerrors.CodeNotFound, "tenant not found", nil)
+		id := uuid.New()
 
-		// Act
-		_, err := h.svc.EnterpriseNameForTenant(context.Background(), uuid.New())
+		// Act: SuperAdmin context + 一致 id で越境ガードを通し、Get 不在の写像を検証する。
+		_, err := h.svc.EnterpriseNameForTenant(superAdminCtx(), id)
 
 		// Assert
 		if got := codeOf(t, err); got != pkgerrors.CodeNotFound {
@@ -641,14 +649,63 @@ func TestService_EnterpriseNameForTenant(t *testing.T) {
 	t.Run("pending_bind 拒否で ErrNotBound sentinel を返す", func(t *testing.T) {
 		// Arrange
 		h := newServiceHarness()
-		h.repo.getRow = TenantRow{ID: uuid.New(), Status: StatusPendingBind}
+		id := uuid.New()
+		h.repo.getRow = TenantRow{ID: id, Status: StatusPendingBind}
 
 		// Act
-		_, err := h.svc.EnterpriseNameForTenant(context.Background(), uuid.New())
+		_, err := h.svc.EnterpriseNameForTenant(superAdminCtx(), id)
 
 		// Assert
 		if !stderrors.Is(err, ErrNotBound) {
 			t.Errorf("expected ErrNotBound sentinel, got %v", err)
+		}
+	})
+
+	t.Run("TenantContext 未確立のとき fail-closed で ErrTenantNotFound を返し repo.Get を呼ばない（テナント分離 / #51 round4）", func(t *testing.T) {
+		// Arrange: 呼び出し側が TenantContext を確立し損ねた経路を模す（context.Background）。
+		h := newServiceHarness()
+		id := uuid.New()
+		h.repo.getRow = TenantRow{ID: id, Name: testTenantNameValue, Status: StatusBound, EnterpriseName: testEnterpriseName}
+
+		// Act
+		name, err := h.svc.EnterpriseNameForTenant(context.Background(), id)
+
+		// Assert: SuperAdmin 昇格に委ねて任意 tenant の enterprise_name を返さず fail-closed で拒否。
+		if !stderrors.Is(err, ErrTenantNotFound) {
+			t.Fatalf("expected ErrTenantNotFound when TenantContext is missing, got %v", err)
+		}
+		if name != "" {
+			t.Errorf("expected empty enterprise name on fail-closed denial, got %q", name)
+		}
+		if h.repo.calls.get != 0 {
+			t.Errorf("repo.Get must not be called when TenantContext is missing (no existence leak), got %d", h.repo.calls.get)
+		}
+		if _, ok := h.log.warnWithDenyReason(); !ok {
+			t.Errorf("expected a WARN log entry with deny_reason field (NFR 2.2)")
+		}
+	})
+
+	t.Run("bound だが enterprise_name が空のとき fail-closed で拒否する（データ不整合防御 / #51 round4）", func(t *testing.T) {
+		// Arrange: DDL は bound 行の enterprise_name 非空を強制しないため、空の bound 行を模す。
+		h := newServiceHarness()
+		id := uuid.New()
+		h.repo.getRow = TenantRow{ID: id, Name: testTenantNameValue, Status: StatusBound, EnterpriseName: ""}
+
+		// Act
+		name, err := h.svc.EnterpriseNameForTenant(superAdminCtx(), id)
+
+		// Assert: 空の識別子を下流へ渡さず CodeBusinessRule（ErrInvalidState）で拒否する。
+		if got := codeOf(t, err); got != pkgerrors.CodeBusinessRule {
+			t.Fatalf("expected CodeBusinessRule on empty enterprise name, got %s", got)
+		}
+		if !stderrors.Is(err, ErrInvalidState) {
+			t.Errorf("expected ErrInvalidState sentinel, got %v", err)
+		}
+		if name != "" {
+			t.Errorf("expected empty enterprise name on rejection, got %q", name)
+		}
+		if _, ok := h.log.warnWithDenyReason(); !ok {
+			t.Errorf("expected a WARN log entry with deny_reason field (NFR 2.2)")
 		}
 	})
 
@@ -1161,6 +1218,31 @@ func TestService_Disable(t *testing.T) {
 		}
 		if view.Status != StatusDisabled {
 			t.Errorf("expected status disabled, got %s", view.Status)
+		}
+	})
+
+	t.Run("定義外 status のとき fail-closed で 422 を返し UpdateDisabled 未呼出（NFR 1.2 / #51 round4）", func(t *testing.T) {
+		// Arrange: 確認テキストは一致させ、未定義 status のみが拒否要因であることを切り出す。
+		h := newServiceHarness()
+		id := uuid.New()
+		h.repo.getRow = TenantRow{ID: id, Name: testTenantNameValue, Status: Status("weird")}
+		h.repo.updateDisabledAffected = 1
+
+		// Act
+		_, err := h.svc.Disable(context.Background(), uuid.New(), id, DisableInput{Confirmation: testTenantNameValue})
+
+		// Assert: disabled へ遷移させず CodeBusinessRule（ErrInvalidState）で拒否する。
+		if got := codeOf(t, err); got != pkgerrors.CodeBusinessRule {
+			t.Fatalf("expected CodeBusinessRule on undefined state, got %s", got)
+		}
+		if !stderrors.Is(err, ErrInvalidState) {
+			t.Errorf("expected ErrInvalidState sentinel, got %v", err)
+		}
+		if h.repo.calls.updateDisabled != 0 {
+			t.Errorf("UpdateDisabled must not be called on undefined state, got %d", h.repo.calls.updateDisabled)
+		}
+		if _, ok := h.log.warnWithDenyReason(); !ok {
+			t.Errorf("expected a WARN log entry with deny_reason field (NFR 2.2)")
 		}
 	})
 }

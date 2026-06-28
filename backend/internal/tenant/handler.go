@@ -230,9 +230,15 @@ func parseID(r *http.Request) (uuid.UUID, error) {
 // decodeJSON は request body を v へ JSON decode する。
 // decode 失敗（malformed JSON / 型不一致）は CodeInvalidRequest（400）の `*errors.Error` を返す。
 // body が空（EOF）の場合も不正入力として 400 を返す。
+// 先頭の 1 値を decode した後、後続トークン（例: `{"name":"x"} trailing`）が残っている場合も
+// malformed として 400 を返す（単一 JSON document のみを正当な入力とする入力検証契約）。
 func decodeJSON(r *http.Request, v any) error {
-	if err := json.NewDecoder(r.Body).Decode(v); err != nil {
+	dec := json.NewDecoder(r.Body)
+	if err := dec.Decode(v); err != nil {
 		return pkgerrors.New(pkgerrors.CodeInvalidRequest, "invalid request body")
+	}
+	if err := ensureSingleJSONValue(dec); err != nil {
+		return err
 	}
 	return nil
 }
@@ -241,11 +247,29 @@ func decodeJSON(r *http.Request, v any) error {
 // エラーとせず v を zero value のまま残す。`DELETE /tenants/{id}` のように body が無い
 // （= 二段階確認テキスト未入力）リクエストを Handler 入口の 400 ではなく、Service の確認未完了
 // 判定（422 / Req 3.2）へ委ねるために用いる。malformed JSON / 型不一致は通常どおり 400 を返す。
+// 後続トークン（先頭値の後に余分なトークンが続く body）も malformed として 400 を返す。
 func decodeJSONAllowEmpty(r *http.Request, v any) error {
-	if err := json.NewDecoder(r.Body).Decode(v); err != nil {
+	dec := json.NewDecoder(r.Body)
+	if err := dec.Decode(v); err != nil {
 		if stderrors.Is(err, io.EOF) {
 			return nil
 		}
+		return pkgerrors.New(pkgerrors.CodeInvalidRequest, "invalid request body")
+	}
+	if err := ensureSingleJSONValue(dec); err != nil {
+		return err
+	}
+	return nil
+}
+
+// ensureSingleJSONValue は先頭の 1 JSON 値を decode 済みの dec に対し、後続トークンが
+// 残っていないことを検証する。残っていれば（または不正トークンであれば）malformed として
+// CodeInvalidRequest（400）を返す。残りが空（io.EOF）のときのみ nil を返す。
+//
+// 単一 JSON document のみを正当な入力とすることで、`{"name":"x"} trailing` や `{} {}` のように
+// 後続トークンを伴う body を入力検証契約どおり 400 として弾く。
+func ensureSingleJSONValue(dec *json.Decoder) error {
+	if err := dec.Decode(&struct{}{}); !stderrors.Is(err, io.EOF) {
 		return pkgerrors.New(pkgerrors.CodeInvalidRequest, "invalid request body")
 	}
 	return nil

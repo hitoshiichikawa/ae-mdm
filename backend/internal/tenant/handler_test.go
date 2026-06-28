@@ -214,6 +214,29 @@ func TestCreate_MalformedJSON_Returns400AndDoesNotCallService(t *testing.T) {
 }
 
 // ============================================================================
+// POST /tenants: 先頭 JSON 値の後に後続トークンが続く body → 400（decodeJSON / #51 round4）
+// ============================================================================
+
+func TestCreate_TrailingTokensAfterJSON_Returns400AndDoesNotCallService(t *testing.T) {
+	// Arrange
+	fake := &fakeTenantService{}
+	r := newTestHandlerRouter(t, fake)
+
+	// Act: 先頭の単一 JSON object の後に余分なトークンが続く（単一 document ではない）。
+	req := httptest.NewRequest(http.MethodPost, "/tenants", strings.NewReader(`{"name":"x"} trailing`))
+	rec := httptest.NewRecorder()
+	r.ServeHTTP(rec, req)
+
+	// Assert: malformed として Handler 入口で 400、Service は呼ばれない。
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status: want 400, got %d", rec.Code)
+	}
+	if fake.calls.create != 0 {
+		t.Errorf("Create should NOT be called on trailing tokens, but called %d times", fake.calls.create)
+	}
+}
+
+// ============================================================================
 // POST /tenants: 正常 → 201 + status=pending_bind + signup_url（Req 1.1 シリアライズ）
 // ============================================================================
 
@@ -464,6 +487,31 @@ func TestDisable_MalformedJSON_Returns400AndDoesNotCallService(t *testing.T) {
 	}
 	if fake.calls.disable != 0 {
 		t.Errorf("Disable should NOT be called on malformed JSON, but called %d times", fake.calls.disable)
+	}
+}
+
+// ============================================================================
+// DELETE /tenants/{id}: 先頭 JSON 値の後に後続トークンが続く body → 400
+// （decodeJSONAllowEmpty / #51 round4）
+// ============================================================================
+
+func TestDisable_TrailingTokensAfterJSON_Returns400AndDoesNotCallService(t *testing.T) {
+	// Arrange
+	fake := &fakeTenantService{}
+	r := newTestHandlerRouter(t, fake)
+	id := uuid.New()
+
+	// Act: 空 body は許容するが、後続トークンを伴う body は malformed として 400。
+	req := httptest.NewRequest(http.MethodDelete, "/tenants/"+id.String(), strings.NewReader(`{"confirmation":"x"} trailing`))
+	rec := httptest.NewRecorder()
+	r.ServeHTTP(rec, req)
+
+	// Assert
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status: want 400, got %d", rec.Code)
+	}
+	if fake.calls.disable != 0 {
+		t.Errorf("Disable should NOT be called on trailing tokens, but called %d times", fake.calls.disable)
 	}
 }
 
