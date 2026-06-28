@@ -409,21 +409,21 @@ func (s *service) EnterpriseNameForTenant(ctx context.Context, id uuid.UUID) (st
 		// 強制しない）。空の識別子を下流 AMAPI 操作へ渡すと前提ガード（Req 5.1）が壊れるため、
 		// fail-closed で不正状態として拒否する（NFR 1.1 invariant 防御 / Bind 側 3b の空応答ガードと対称）。
 		if strings.TrimSpace(row.EnterpriseName) == "" {
-			s.logDeny(uuid.Nil, id, "bound tenant has empty enterprise name")
+			s.logDeny(tc.AdminUserID, id, "bound tenant has empty enterprise name")
 			return "", ErrInvalidState
 		}
 		return row.EnterpriseName, nil
 	case StatusPendingBind:
 		// 未バインドテナントへの enterprise 識別子要求は拒否（Req 5.2）。
-		s.logDeny(uuid.Nil, id, "tenant is not bound to an enterprise")
+		s.logDeny(tc.AdminUserID, id, "tenant is not bound to an enterprise")
 		return "", ErrNotBound
 	case StatusDisabled:
 		// 無効化テナントへの業務操作要求は拒否（Req 5.3）。
-		s.logDeny(uuid.Nil, id, "tenant is disabled")
+		s.logDeny(tc.AdminUserID, id, "tenant is disabled")
 		return "", ErrTenantDisabled
 	default:
 		// 定義外 status は fail-closed で不正状態として拒否（NFR 1.1 / 1.2 の防御）。
-		s.logDeny(uuid.Nil, id, "tenant state is invalid")
+		s.logDeny(tc.AdminUserID, id, "tenant state is invalid")
 		return "", ErrInvalidState
 	}
 }
@@ -454,7 +454,10 @@ func (s *service) record(ctx context.Context, actor, tenantID uuid.UUID, op Oper
 // logDeny は拒否された操作の原因分析属性（実行者・対象テナント・拒否理由）を構造化ログとして
 // 出力する（NFR 2.2）。機密値は含めない（reason は人間可読な短い拒否理由のみ）。
 //
-// actor が不明な経路（前提ガード等、ctx の actor を引き回さない呼び出し）では Nil を渡す。
+// actor には実行者識別子（admin_users.id）を渡す。Create/Bind/Disable は Handler から受け取った
+// actor を、EnterpriseNameForTenant の前提ガード拒否は確立済み TenantContext の `AdminUserID` を
+// 渡す（NFR 2.2 の「実行者」を満たすため）。実行者が真に不明な経路（TenantContext 未確立で
+// fail-closed 拒否する場合のみ）に限り uuid.Nil を渡す。
 func (s *service) logDeny(actor, tenantID uuid.UUID, reason string) {
 	s.log.Warn("tenant operation denied",
 		logger.ActorID(actor),

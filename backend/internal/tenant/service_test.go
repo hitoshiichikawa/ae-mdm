@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/google/uuid"
+	"go.uber.org/zap/zapcore"
 
 	"github.com/hitoshiichikawa/ae-mdm/internal/config"
 	pkgerrors "github.com/hitoshiichikawa/ae-mdm/internal/errors"
@@ -40,17 +41,33 @@ func (l *fakeLogger) record(level, msg string, fields ...any) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	f := map[string]any{}
-	for i := 0; i+1 < len(fields); i += 2 {
-		// logger.ActorID / logger.TenantID は zap.Field を返すため、key/value ペアの
-		// string key のみを map 化する（zap.Field 直接渡しは構造化済みなので本 fake では
-		// "deny_reason" 等の素の key/value ペアの検証に用いる）。
-		k, ok := fields[i].(string)
-		if !ok {
-			continue
+	// fields は zap.Field（単一引数 / logger.ActorID・TenantID 等）と素の key/value ペア
+	// （"deny_reason", reason 等）が混在する。両方を map 化して field 検証に使えるようにする
+	// （actor_id を含む zap.Field を捨てると NFR 2.2 の実行者記録を検証できないため / #51 round5）。
+	for i := 0; i < len(fields); {
+		switch fv := fields[i].(type) {
+		case zapcore.Field:
+			f[fv.Key] = zapFieldValue(fv)
+			i++
+		case string:
+			if i+1 < len(fields) {
+				f[fv] = fields[i+1]
+			}
+			i += 2
+		default:
+			i++
 		}
-		f[k] = fields[i+1]
 	}
 	l.entries = append(l.entries, fakeLogEntry{Level: level, Msg: msg, Fields: f})
+}
+
+// zapFieldValue は zapcore.Field から検証に使う値を取り出す。logger.ActorID / TenantID は
+// zap.String（StringType）であり、値は String フィールドに入る。それ以外の型は Interface を返す。
+func zapFieldValue(fld zapcore.Field) any {
+	if fld.Type == zapcore.StringType {
+		return fld.String
+	}
+	return fld.Interface
 }
 
 func (l *fakeLogger) Debug(msg string, fields ...any) { l.record("debug", msg, fields...) }
@@ -72,6 +89,28 @@ func (l *fakeLogger) warnWithDenyReason() (string, bool) {
 			s, _ := v.(string)
 			return s, true
 		}
+	}
+	return "", false
+}
+
+// warnDenyActor は WARN + deny_reason を持つ最初のエントリの actor_id field 値を返す（NFR 2.2 /
+// #51 round5）。拒否ログに実行者が記録されているか（uuid.Nil でないか）を検証するために用いる。
+func (l *fakeLogger) warnDenyActor() (string, bool) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	for _, e := range l.entries {
+		if e.Level != "warn" {
+			continue
+		}
+		if _, ok := e.Fields["deny_reason"]; !ok {
+			continue
+		}
+		v, ok := e.Fields["actor_id"]
+		if !ok {
+			return "", false
+		}
+		s, _ := v.(string)
+		return s, true
 	}
 	return "", false
 }
@@ -747,6 +786,39 @@ func TestService_EnterpriseNameForTenant(t *testing.T) {
 		}
 		if name != testEnterpriseName {
 			t.Errorf("expected %q for own tenant, got %q", testEnterpriseName, name)
+		}
+	})
+
+	t.Run("前提ガード拒否の構造化ログに実行者（actor_id）を記録する（NFR 2.2 / #51 round5）", func(t *testing.T) {
+		// Arrange: tenant-scoped 自テナント呼び出しが pending_bind を要求する経路（status 別の
+		// 前提ガード拒否）。TenantContext に実行者 admin の id を確立する。
+		h := newServiceHarness()
+		caller := uuid.New()
+		adminID := uuid.New()
+		h.repo.getRow = TenantRow{ID: caller, Name: testTenantNameValue, Status: StatusPendingBind}
+		ctx := db.WithTenantContext(context.Background(), db.TenantContext{
+			TenantID:     caller,
+			AdminUserID:  adminID,
+			IsSuperAdmin: false,
+		})
+
+		// Act
+		_, err := h.svc.EnterpriseNameForTenant(ctx, caller)
+
+		// Assert: 拒否ログの actor_id が確立済み TenantContext の AdminUserID であり、uuid.Nil で
+		// 取りこぼされていないこと（実行者・対象テナント・拒否理由を満たす / NFR 2.2）。
+		if !stderrors.Is(err, ErrNotBound) {
+			t.Fatalf("expected ErrNotBound, got %v", err)
+		}
+		got, ok := h.log.warnDenyActor()
+		if !ok {
+			t.Fatalf("expected a WARN deny log entry carrying actor_id (NFR 2.2)")
+		}
+		if got != adminID.String() {
+			t.Errorf("deny log actor_id must be the calling admin %q, got %q", adminID.String(), got)
+		}
+		if got == uuid.Nil.String() {
+			t.Errorf("deny log actor_id must not be uuid.Nil once TenantContext is established")
 		}
 	})
 
