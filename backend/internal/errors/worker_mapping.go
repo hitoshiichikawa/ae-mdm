@@ -20,7 +20,8 @@ func ShouldAck(err error, log ErrLogger) (ack bool) {
 
 	var de *Error
 	if stdErrors.As(err, &de) && de != nil {
-		if de.IsTransient {
+		// ack/nack 判定は IsTransient へ一元化し、ここはログレベル選択のみを担う（両者の drift を防ぐ）。
+		if IsTransient(err) {
 			emitWorkerLog(log, "warn", de, err)
 			return false
 		}
@@ -37,6 +38,31 @@ func ShouldAck(err error, log ErrLogger) (ack bool) {
 	}
 	emitWorkerLog(log, "warn", wrapped, err)
 	return false
+}
+
+// IsTransient は err を ShouldAck と同一規則で「再処理保持（nack）すべき一時的失敗か」へ写像する純粋関数。
+//
+// ShouldAck の nack 判定（戻り値 false）と常に一致する（`IsTransient(err) == !ShouldAck(err, nil)`）。
+// 判定規則:
+//   - err == nil                    → false（成功は一時的失敗ではない）
+//   - *Error で IsTransient=true    → true（一時的失敗 = nack）
+//   - *Error で IsTransient=false   → false（恒常的失敗 = ack）
+//   - 独自 Error 型でない error     → true（CodeInternal/IsTransient=true 相当として nack）
+//
+// ログ副作用を持たない点だけが ShouldAck と異なる。worker 最外層の ack/nack 写像と、その手前で
+// 副作用（dedupe claim の release 等）を一時的失敗時のみ行いたい呼び出し側とで、同一規則を共有する
+// ために切り出す（両者が別実装になると ack 判定と副作用が食い違う / 例: 恒常的失敗で ack 済みなのに
+// claim を消して後続 duplicate を再 dispatch する不整合を防ぐ）。
+func IsTransient(err error) bool {
+	if err == nil {
+		return false
+	}
+	var de *Error
+	if stdErrors.As(err, &de) && de != nil {
+		return de.IsTransient
+	}
+	// 独自 Error 型でない error は ShouldAck と同様に CodeInternal/IsTransient=true 相当として扱う。
+	return true
 }
 
 // emitWorkerLog は ShouldAck のロギング副作用を集約する。
