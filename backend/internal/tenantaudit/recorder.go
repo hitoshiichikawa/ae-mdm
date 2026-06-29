@@ -101,13 +101,16 @@ func mapEventType(op tenant.Operation) audit.EventType {
 
 // mapResult は tenant.Result を audit.ResultType へ写像する（Req 2.3）。
 //
-// tenant.ResultFailure のみ audit.ResultFailure へ写像し、それ以外（success）は
-// audit.ResultSuccess へ写像する。
+// **fail-closed（境界防御）**: 明示的な tenant.ResultSuccess のみ audit.ResultSuccess へ写像し、
+// それ以外（tenant.ResultFailure / zero 値 / 未知の文字列値）はすべて audit.ResultFailure へ倒す。
+// tenant.Result は string 型のため zero 値や未定義値を表現可能であり、これらを「成功」として
+// 監査記録すると本当は失敗した操作が成功扱いで残るリスクがある。失敗を成功と誤認しない方向
+// （= 未知値は failure 側）へ倒すのが安全側であるため、success を allow-list として扱う。
 func mapResult(result tenant.Result) audit.ResultType {
-	if result == tenant.ResultFailure {
-		return audit.ResultFailure
+	if result == tenant.ResultSuccess {
+		return audit.ResultSuccess
 	}
-	return audit.ResultSuccess
+	return audit.ResultFailure
 }
 
 // buildDetail は tenant.Event の非機密フィールドのみを audit.Event.Detail へ写像する（Req 4）。

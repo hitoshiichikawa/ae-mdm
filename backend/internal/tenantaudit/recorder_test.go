@@ -280,6 +280,45 @@ func TestRecorder_Record_DenyReasonEmpty_OmitsDenyReasonKey(t *testing.T) {
 	}
 }
 
+// ---- 結果区分の境界防御: 未知 / zero 値は failure へ倒す（Req 2.3 異常系）----
+
+func TestRecorder_Record_UnknownResult_MapsToFailure(t *testing.T) {
+	// Arrange (境界防御): tenant.Result は string 型のため zero 値 / 未定義値を取り得る。
+	// これらを成功扱いにすると、本当は失敗した操作が success として監査記録される危険があるため、
+	// 明示的な success 以外はすべて failure へ倒すことを検証する。
+	cases := []struct {
+		name   string
+		result tenant.Result
+	}{
+		{name: "zero 値の Result は failure へ倒れる", result: tenant.Result("")},
+		{name: "未知の Result 文字列は failure へ倒れる", result: tenant.Result("partial")},
+	}
+
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			spy := &spyAuditService{}
+			rec := NewRecorder(spy)
+			ev := tenant.Event{
+				Actor:     uuid.New(),
+				TenantID:  uuid.New(),
+				Operation: tenant.OperationCreate,
+				Result:    c.result,
+			}
+
+			// Act
+			if err := rec.Record(context.Background(), ev); err != nil {
+				t.Fatalf("Record() 予期しないエラー: %v", err)
+			}
+
+			// Assert: 未知 / zero 値は success と誤認せず failure へ写像する。
+			if spy.recordedEvent.Result != audit.ResultFailure {
+				t.Errorf("Result = %q, want %q（未知値を成功扱いにしない境界防御 / Req 2.3）",
+					spy.recordedEvent.Result, audit.ResultFailure)
+			}
+		})
+	}
+}
+
 // ---- 未知 Operation（Req 2.7 異常系）----
 
 func TestRecorder_Record_UnknownOperation_MapsToIdentifiableType(t *testing.T) {

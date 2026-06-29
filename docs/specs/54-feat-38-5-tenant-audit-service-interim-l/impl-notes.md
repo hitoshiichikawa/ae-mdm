@@ -118,4 +118,51 @@ Red→Green 確認: `mapEventType` の default 分岐を一時的に壊すと
    tenant ドメイン側の監査詳細仕様の論点であり、本 Issue のスコープ外（既存 LoggerRecorder も
    常時出力していたため互換維持）。
 
+## Iteration ラウンド 1（PR #56 レビュー対応）
+
+レビュー（codex）4 件のうち裁定で legitimate とされた 3 件に対応した（残り 1 件は excessive 裁定）。
+
+- **[low] `mapResult` の境界防御（対応済み / 修正 commit）**: `mapResult` を fail-closed 化した。
+  従来は `tenant.ResultFailure` 以外をすべて `ResultSuccess` に倒していたが、`tenant.Result` は
+  string 型で zero 値 / 未定義値を表現可能なため、明示的な `tenant.ResultSuccess` のみを成功と
+  写像し、それ以外（failure / zero / 未知値）はすべて `audit.ResultFailure` へ倒す allow-list 方式に
+  変更（未知値を成功と誤認しない安全側）。`TestRecorder_Record_UnknownResult_MapsToFailure` を追加。
+  既存 2 値（success/failure）の写像挙動は不変。
+- **[medium] 実 audit.Service 経由の結合寄りテスト（対応済み / 修正 commit）**: spy だけでは
+  カバーできなかった「実 `audit.NewService` 経由の写像 → 採番 / clock 補完 / 永続化失敗伝播」を
+  `recorder_integration_test.go` で追加検証（DB 境界 `audit.Repository` のみ fake 化）。
+  実 PostgreSQL を起動する結合テスト基盤が本リポジトリに存在しない（DB 系テストは `fakeTx` mock、
+  `audit/repository_test.go` は純粋関数のみ）ため、`audit_logs` の FK / RLS / jsonb 永続化そのものを
+  通す結合テストは本 PR スコープ（利用・配線のみ）外であり別途基盤導入を要する。
+- **[high] 存在しない tenant_id の失敗監査が FK で永続化されない件（要件/設計ギャップとして申し送り）**:
+  下記「確認事項 5」を参照。本 PR スコープ内では修正できないため commit せず、別 Issue 化を提案する。
+- **[medium] design.md / tasks.md 不在（裁定 excessive / 対応なし）**: 自動裁定で excessive と
+  判定された（設計書不在はプロセス観察であり AC 違反やコード欠陥ではない / Architect は条件付き起動で
+  interim 実装の設計書不在は許容範囲）。加えて本モードは impl PR iteration であり spec 文書の新規
+  作成・書き換えは禁止のため対応しない。
+
+確認事項に以下を追記:
+
+5. **[要件/設計ギャップ] `audit_logs.tenant_id` の FK と「存在しないテナントへの失敗監査」の衝突**:
+   `0009_create_audit_logs.up.sql` の `tenant_id uuid REFERENCES tenants(id)` により、`tenants` に
+   存在しない非 nil の tenant_id を持つ行は INSERT が FK で拒否される。tenant Service の失敗経路の
+   うち、bind / disable の lookup failure（`service.go:217-221` / `295-299`）や bind の入力検証失敗
+   （`service.go:207-213`）は、URL path 由来の**存在しない tenant id** を載せた失敗 Event を記録要求
+   するため、`audit_logs` への永続化が FK で失敗する（→ `audit.Service` が error を返し、アダプタは
+   伝播するが、`record()` helper が握りつぶすため当該失敗監査は `/api/admin/audit-logs` に残らない）。
+   - 注: 作成失敗（name 空 / `service.go:147-148`）は `tenant_id=uuid.Nil` で記録され、audit Repository が
+     `uuid.Nil → NULL` 写像するため FK 違反にならない（NULL は許容）。問題は **非 nil かつ非実在**の id。
+   - 本 PR スコープ内で修正不能な理由: (a) スキーマ（FK）変更は本 Issue の Out of Scope（`audit_logs`
+     のスキーマは #5 / #33 / #37 の領分。本統合は利用・配線のみ）。(b) Req 2.2 はアダプタに
+     tenant_id 写像を義務付けており、失敗時に一律 `tenant_id=NULL` へ倒すと Req 2.2 と矛盾する。
+     (c) アダプタは「変換 + 委譲」のみに責務を限定され（Req 5.2）、テナント存在確認のための DB
+     アクセスや retry/fallback 判断を持てない（DB ハンドルも持たない）。
+   - 提案（別 Issue 化）: いずれも要件/設計判断を伴うため人間レビューに委ねる。
+     (i) `audit_logs.tenant_id` の FK を緩和し「存在しないテナントへの操作試行」も監査可能にする、
+     または (ii) 失敗監査では `tenant_id=NULL` + `resource_id=<試行 id>`（resource_id は FK なしの
+     text 列で既に試行 id を保持済み）で記録する規則を要件として確定する。どちらも本アダプタ単独では
+     決められないため、Req 1.2 / 2.2 と `audit_logs` スキーマ責務をまたぐ別 Issue を推奨。
+
+ITERATION-1 STATUS: complete
+
 STATUS: complete
