@@ -679,6 +679,42 @@ func TestService_Create_Validation(t *testing.T) {
 			t.Errorf("expected both BusinessRule and InvalidField errors (all-errors presentation), got %+v", vferr.Errors)
 		}
 	})
+
+	t.Run("mapper 型不整合と Validator 必須欠落が同一フィールドで重複しない（PR #60 round4 / Req 2.4）", func(t *testing.T) {
+		// Arrange: systemUpdate.type を数値（型不整合）にすると、mapper が (SystemUpdate, Type) の
+		// 型不整合 invalid_field を出し、かつ in.SystemUpdate は非 nil で Type="" のため Validator が
+		// 同じ (SystemUpdate, Type) に必須欠落 invalid_field を重ねる。全件提示（Req 2.4）は distinct
+		// フィールド単位で維持しつつ、同一フィールドへの重複ノイズは 1 件へ畳むこと。
+		h := newServiceHarness()
+		actor, tenantID := uuid.New(), uuid.New()
+		body := map[string]any{
+			keySystemUpdate: map[string]any{keySystemUpdateType: 123}, // type が文字列でない
+		}
+
+		// Act
+		_, err := h.svc.Create(context.Background(), actor, tenantID, PolicyRequest{Name: testPolicyName, Body: body})
+
+		// Assert: (SystemUpdate, Type) のエラーはちょうど 1 件（重複しない）。
+		var vferr *ValidationFailedError
+		if !stderrors.As(err, &vferr) {
+			t.Fatalf("expected *ValidationFailedError, got %T", err)
+		}
+		typeErrCount := 0
+		for _, e := range vferr.Errors {
+			if e.Domain == DomainSystemUpdate && e.Field == "Type" {
+				typeErrCount++
+			}
+		}
+		if typeErrCount != 1 {
+			t.Errorf("expected exactly 1 error for (SystemUpdate, Type), got %d: %+v", typeErrCount, vferr.Errors)
+		}
+		// 残った 1 件は mapper 由来（root cause = 型不整合）であること。
+		for _, e := range vferr.Errors {
+			if e.Domain == DomainSystemUpdate && e.Field == "Type" && !strings.Contains(e.Message, "文字列") {
+				t.Errorf("expected the surviving error to be the mapper type-mismatch (root cause), got %q", e.Message)
+			}
+		}
+	})
 }
 
 // ===== Create / Update: name 必須（空は invalid field で拒否 / Req 2.3） =====

@@ -3,6 +3,7 @@ package integration_test
 import (
 	"context"
 	stdErrors "errors"
+	"math"
 	"testing"
 
 	"github.com/google/uuid"
@@ -106,6 +107,44 @@ func TestPolicyRepository_InsertGet_RoundTrip(t *testing.T) {
 	}
 	if b, ok := got.Body["kioskMode"].(bool); !ok || !b {
 		t.Errorf("Get().Body[kioskMode] = %v; want true", got.Body["kioskMode"])
+	}
+}
+
+// TestPolicyRepository_InsertGet_LargeVersion はシナリオ (a) の型幅境界対応（PR #60 review round 4 /
+// Req 1.3 / NFR 2.1）。AMAPI 反映済み version は `amapi.PolicyBody.Version int64` 由来で、
+// `PolicyRow.Version` も int64。policies.version 列が int32（integer）のままだと int32 範囲外の
+// version で INSERT が "integer out of range" 失敗し snapshot 永続化が成立しない。migration 0017 で
+// 列を bigint へ広げたことで int32 範囲外の version が round-trip することを実 DB で検証する。
+func TestPolicyRepository_InsertGet_LargeVersion(t *testing.T) {
+	// Arrange: int32 上限を超える version（bigint でのみ保持可能）。
+	repo, ids, ctx, cleanup := setupPolicyRepo(t)
+	defer cleanup()
+
+	newID := uuid.New()
+	const largeVersion = int64(math.MaxInt32) + 1 // 2147483648（int32 範囲外）
+	row := policy.PolicyRow{
+		ID:              newID,
+		TenantID:        ids.tenantAID,
+		Name:            "large-version-policy",
+		AMAPIPolicyName: "enterprises/X/policies/" + newID.String(),
+		Body:            map[string]any{"label": "frontline"},
+		Version:         largeVersion,
+	}
+
+	// Act: Insert（旧 integer 列ではここで "integer out of range" 失敗していた）
+	if _, err := repo.Insert(ctx, row); err != nil {
+		t.Fatalf("Insert with int32-overflow version: %v", err)
+	}
+
+	// Act: Get
+	got, err := repo.Get(ctx, ids.tenantAID, newID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+
+	// Assert: int32 範囲外 version が無損失で読み戻る（bigint / NFR 2.1）。
+	if got.Version != largeVersion {
+		t.Errorf("Get().Version = %d; want %d (int32 範囲外 version の無損失永続化)", got.Version, largeVersion)
 	}
 }
 

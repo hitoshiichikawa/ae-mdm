@@ -513,7 +513,31 @@ func (s *service) validate(in PolicyRequest) *ValidationFailedError {
 	if len(combined) == 0 {
 		return nil
 	}
-	return newValidationFailedError(combined)
+	return newValidationFailedError(dedupeFieldErrors(combined))
+}
+
+// dedupeFieldErrors は同一 (Domain, Field) に対する重複 ValidationError を 1 件へ畳む（出現順は保持）。
+//
+// mapper の変換不能エラー（convErrs）は Validator の検証不正より先に combined へ append されるため、
+// 同一フィールドで「型不整合（root cause）」と「必須欠落（型不整合の下流症状）」が重なった場合は
+// 先頭の mapper エラーを残し、Validator 側の重複を捨てる。Req 2.4 の「全件提示」は distinct な
+// (Domain, Field) 単位で維持され、同一フィールドへの重複ノイズのみを排除する。
+func dedupeFieldErrors(errs []ValidationError) []ValidationError {
+	type fieldKey struct {
+		domain Domain
+		field  string
+	}
+	seen := make(map[fieldKey]struct{}, len(errs))
+	deduped := make([]ValidationError, 0, len(errs))
+	for _, e := range errs {
+		key := fieldKey{domain: e.Domain, field: e.Field}
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		deduped = append(deduped, e)
+	}
+	return deduped
 }
 
 // record は監査イベントを eventRecorder へ渡す helper（Req 5.1 / 5.2）。
