@@ -6,7 +6,7 @@
 > 新規マイグレーション / sqlc query は追加しない（design 推奨案）。
 
 - [ ] 1. application 層の型定義と Raw JSON ↔ PolicyInput 変換層を追加
-- [ ] 1.1 application 層 DTO / sentinel error を `service_types.go` に定義
+- [x] 1.1 application 層 DTO / sentinel error を `service_types.go` に定義
   - `PolicyRow`（DB 行）/ `PolicyView` / `PolicySummary`（JSON tag 付き）/ `PolicyRequest{name, body map[string]any}` / `AssignInput{device_id}` を定義
   - `Operation`（create/update/delete/assign）/ `Result`（success/failure）enum と sentinel error（`ErrPolicyNotFound`=404 汎用 message / `ErrDeleteConflict`=409）を定義（Req 4.5）
   - 既存 `types.go`（Validator 占有）を変更しないこと
