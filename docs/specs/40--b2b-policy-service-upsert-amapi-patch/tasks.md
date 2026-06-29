@@ -67,7 +67,7 @@
   - _Depends: 3.1, 4.1_
 
 - [ ] 6. DI 配線（main.go）と doc.go 追記
-- [ ] 6.1 `cmd/api/main.go` に Policy domain を配線 + `doc.go` 追記
+- [x] 6.1 `cmd/api/main.go` に Policy domain を配線 + `doc.go` 追記
   - `policy.NewRepository(pool)` / `policy.NewService(repo, amapiClient, auditSvc, authorizer, tenantSvc, log)` / `policy.NewHandler(...)` を構築し `routers.API.Mount("/policies", policyHandler)`（既存 amapiClient / auditSvc / authorizer / tenantSvc を再利用 / 新規構築しない）
   - `doc.go` に application 層（Service/Repository/Handler/mapper）の構成と依存方向（amapi/audit/tenant/authz import 可、cmd 不可）を追記。Validator 純粋性契約節は変更しない
   - `main_test.go` に Policy 配線が interim へ退行していないことの型レベル回帰テストを追加（`buildTenantRecorder` testability 方針に倣う）
