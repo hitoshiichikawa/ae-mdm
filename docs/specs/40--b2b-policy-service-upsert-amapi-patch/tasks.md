@@ -13,7 +13,7 @@
   - 型定義の zero-value / JSON tag を検証する単体テストを `service_types.go` 近傍に追加
   - _Requirements: 4.5_
   - _Boundary: policy.Service, policy.Repository, policy.Handler_
-- [ ] 1.2 Raw JSON ↔ PolicyInput 変換を `mapper.go` + `mapper_test.go` に実装
+- [x] 1.2 Raw JSON ↔ PolicyInput 変換を `mapper.go` + `mapper_test.go` に実装
   - `RawToPolicyInput(raw map[string]any) (policy.PolicyInput, []ValidationError)` を実装。5 領域（applications 件数 / passwordMinimumLength / encryptionPolicy・passwordQuality / systemUpdate / kiosk）を `PolicyInput` の各 struct に写像
   - 型不整合・必須キー欠落で変換不能なケースを invalid field 相当の `ValidationError` に写像（Req 2.3 / design 確認事項 4 推奨案）
   - 検証通過後に `amapi.PolicyBody{Name, Raw}` を pass-through で組み立てる helper を実装（`amapi/policies.go` の ForceSendFields 機構に依拠 / NFR 1.1）
