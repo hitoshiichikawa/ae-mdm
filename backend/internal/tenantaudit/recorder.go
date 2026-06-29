@@ -14,6 +14,7 @@ import (
 	"context"
 
 	"github.com/hitoshiichikawa/ae-mdm/internal/audit"
+	"github.com/hitoshiichikawa/ae-mdm/internal/logger"
 	"github.com/hitoshiichikawa/ae-mdm/internal/tenant"
 )
 
@@ -47,24 +48,44 @@ const (
 // 内部に audit.Service を保持し、Record 呼び出しごとに tenant.Event を audit.Event へ変換して
 // audit.Service.Record へ渡す。永続化失敗は握りつぶさず呼び出し側へそのまま伝播する
 // （fail-closed の射程 / Req 3.1 / 3.2）。
+//
+// 加えて、永続化が成功したイベントについては結果を識別可能な構造化ログを出力する（NFR 2.1）。
+// audit.Service は永続化「失敗」時のみ WARN（failure_kind=persist_error）を出すため、interim の
+// LoggerRecorder から差し替えると成功経路の観測ログが失われる。本アダプタが成功経路の観測ログを
+// 担い、監査経路全体（成功 = 本アダプタ / 失敗 = audit.Service）で結果が構造化ログに残ることを
+// 保証する。ログ出力は観測性のための副作用であり、再試行・抑制・フィルタリング等の追加「判断」
+// （Req 5.2 が禁ずるもの）は一切持たない（写像内容・委譲先・伝播 error を変えない）。
 type Recorder struct {
 	svc audit.Service
+	log logger.Logger
 }
 
-// NewRecorder は audit.Service を注入して Recorder を構築する。
+// NewRecorder は audit.Service と logger を注入して Recorder を構築する。
 //
 // 引数 svc は tenant 監査イベントの永続化先となる監査ログ Service（`internal/audit` の
-// Service interface）。返り値は tenant.EventRecorder を満たす *Recorder。副作用は持たない
-// （構築のみ）。DI 配線（main.go）から audit.NewService の戻り値を渡して用いる（Req 5.3）。
-func NewRecorder(svc audit.Service) *Recorder {
-	return &Recorder{svc: svc}
+// Service interface）。引数 log は永続化成功時の観測ログ（NFR 2.1）出力先で、nil の場合は
+// `logger.Default()`（未配線時は no-op logger）を採用し DI 未配線でも panic させない
+// （`NewLoggerRecorder` / `amapi.NewClient` の nil-log フォールバックと同方針）。返り値は
+// tenant.EventRecorder を満たす *Recorder。副作用は持たない（構築のみ）。DI 配線（main.go）から
+// audit.NewService の戻り値と bootstrap 済み logger を渡して用いる（Req 5.3）。
+func NewRecorder(svc audit.Service, log logger.Logger) *Recorder {
+	if log == nil {
+		log = logger.Default()
+	}
+	return &Recorder{svc: svc, log: log}
 }
 
 // Record は tenant.EventRecorder の実装（Req 1 / Req 5.1）。
 //
 // 引数 e の tenant.Event を audit.Event へ変換し、audit.Service.Record へ委譲する。返り値は
 // audit.Service.Record が返した error を **そのまま伝播** する（アダプタ境界で握りつぶさない
-// / Req 3.1 / 3.2 fail-closed）。副作用は audit.Service 経由の永続化要求（audit_logs への追記）。
+// / Req 3.1 / 3.2 fail-closed）。副作用は (1) audit.Service 経由の永続化要求（audit_logs への
+// 追記）と、(2) 永続化成功時の観測ログ出力（NFR 2.1）の 2 点。
+//
+// 永続化失敗時はログを出さずに error を伝播する。失敗経路の構造化ログ（failure_kind=
+// persist_error の WARN）は audit.Service が担うため、ここで重複出力しない。永続化成功時のみ
+// logPersisted で結果を識別可能な構造化ログを出力し、監査経路全体で成功・失敗いずれの結果も
+// 構造化ログに残るようにする（NFR 2.1）。
 //
 // audit.Event の ID / OccurredAt は設定せず zero のまま渡し、採番・現在時刻補完は audit.Service
 // に委ねる（Req 2.9）。機密値は Detail に載せず、非機密フィールドのみを機械可読な鍵名で載せる
@@ -79,7 +100,36 @@ func (r *Recorder) Record(ctx context.Context, e tenant.Event) error {
 		Result:     mapResult(e.Result),
 		// ID / OccurredAt は zero のまま（audit.Service が採番・clock 補完する / Req 2.9）。
 	}
-	return r.svc.Record(ctx, ev)
+	if err := r.svc.Record(ctx, ev); err != nil {
+		return err
+	}
+	r.logPersisted(e)
+	return nil
+}
+
+// logPersisted は永続化に成功した tenant 監査イベントの結果を構造化ログへ出力する（NFR 2.1）。
+//
+// 出力フィールドは operation / result / actor_id / tenant_id / confirmation_completed と、
+// 拒否時のみ deny_reason に限定する（いずれも機密値を含まない / NFR 2.3）。永続化は成功して
+// いるが操作結果が失敗 / 拒否（ResultFailure）のイベントは原因分析のため Warn、操作成功は Info
+// で出力する（interim LoggerRecorder と同じ結果識別規約 / NFR 2.1 / 2.2）。tenant.Event は機密値
+// フィールドを構造的に持たないため、安全フィールドのみを載せる一次防御に依拠する（Req 4 / #38 NFR 2.3）。
+func (r *Recorder) logPersisted(e tenant.Event) {
+	fields := []any{
+		"operation", string(e.Operation),
+		"result", string(e.Result),
+		logger.ActorID(e.Actor),
+		logger.TenantID(e.TenantID),
+		"confirmation_completed", e.ConfirmationCompleted,
+	}
+	if e.DenyReason != "" {
+		fields = append(fields, "deny_reason", e.DenyReason)
+	}
+	if e.Result == tenant.ResultFailure {
+		r.log.Warn("tenant audit event persisted", fields...)
+		return
+	}
+	r.log.Info("tenant audit event persisted", fields...)
 }
 
 // mapEventType は tenant.Operation を audit.EventType へ写像する（Req 2.4〜2.7）。

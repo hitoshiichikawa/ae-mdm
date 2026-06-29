@@ -236,7 +236,7 @@ func runBootstrap(ctx context.Context) int {
 		return 1
 	}
 	tenantRepo := tenant.NewRepository(pool)
-	tenantRecorder := tenantaudit.NewRecorder(auditSvc)
+	tenantRecorder := tenantaudit.NewRecorder(auditSvc, log)
 	tenantSvc := tenant.NewService(tenantRepo, amapiClient, tenantRecorder, cfg, log)
 	tenantHandler := tenant.NewHandler(tenantSvc, log)
 	tenantHandler.Mount(routers.Admin)

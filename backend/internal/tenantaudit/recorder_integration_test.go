@@ -62,7 +62,7 @@ func TestRecorder_ThroughRealAuditService_PersistsMappedEvent(t *testing.T) {
 	repo := &fakeAuditRepo{}
 	clk := fixedClock{now: time.Date(2026, 6, 29, 9, 0, 0, 0, time.UTC)}
 	svc := audit.NewService(config.Config{}, repo, clk, nil)
-	rec := NewRecorder(svc)
+	rec := NewRecorder(svc, nil)
 
 	actor := uuid.New()
 	tenantID := uuid.New()
@@ -120,7 +120,7 @@ func TestRecorder_ThroughRealAuditService_PropagatesPersistError(t *testing.T) {
 	repo := &fakeAuditRepo{insertErr: wantErr}
 	clk := fixedClock{now: time.Date(2026, 6, 29, 9, 0, 0, 0, time.UTC)}
 	svc := audit.NewService(config.Config{}, repo, clk, nil)
-	rec := NewRecorder(svc)
+	rec := NewRecorder(svc, nil)
 
 	ev := tenant.Event{
 		Actor:     uuid.New(),

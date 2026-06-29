@@ -8,6 +8,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/hitoshiichikawa/ae-mdm/internal/audit"
+	"github.com/hitoshiichikawa/ae-mdm/internal/logger"
 	"github.com/hitoshiichikawa/ae-mdm/internal/tenant"
 )
 
@@ -77,7 +78,7 @@ func TestRecorder_Record_OperationMapping(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			// Arrange (Req 2.1 / 2.2 / 2.3 / 2.4〜2.6 / 2.8)
 			spy := &spyAuditService{}
-			rec := NewRecorder(spy)
+			rec := NewRecorder(spy, nil)
 			actor := uuid.New()
 			tenantID := uuid.New()
 			ev := tenant.Event{
@@ -122,7 +123,7 @@ func TestRecorder_Record_OperationMapping(t *testing.T) {
 func TestRecorder_Record_ResultSuccessMapping(t *testing.T) {
 	// Arrange (Req 2.3)
 	spy := &spyAuditService{}
-	rec := NewRecorder(spy)
+	rec := NewRecorder(spy, nil)
 	ev := tenant.Event{
 		Actor:     uuid.New(),
 		TenantID:  uuid.New(),
@@ -146,7 +147,7 @@ func TestRecorder_Record_ResultSuccessMapping(t *testing.T) {
 func TestRecorder_Record_DelegatesIDAndOccurredAt(t *testing.T) {
 	// Arrange (Req 2.9): アダプタは ID / OccurredAt を自前確定せず zero で渡す。
 	spy := &spyAuditService{}
-	rec := NewRecorder(spy)
+	rec := NewRecorder(spy, nil)
 	ev := tenant.Event{
 		Actor:     uuid.New(),
 		TenantID:  uuid.New(),
@@ -175,7 +176,7 @@ func TestRecorder_Record_PropagatesPersistError(t *testing.T) {
 	// Arrange (Req 3.1 / 3.2): audit.Service が永続化エラーを返す。
 	wantErr := stderrors.New("persist failed")
 	spy := &spyAuditService{recordErr: wantErr}
-	rec := NewRecorder(spy)
+	rec := NewRecorder(spy, nil)
 	ev := tenant.Event{
 		Actor:     uuid.New(),
 		TenantID:  uuid.New(),
@@ -197,7 +198,7 @@ func TestRecorder_Record_PropagatesPersistError(t *testing.T) {
 func TestRecorder_Record_DetailCarriesNonSensitiveFields(t *testing.T) {
 	// Arrange (Req 4.2): 二段階確認完了 + 拒否理由を持つ failure イベント。
 	spy := &spyAuditService{}
-	rec := NewRecorder(spy)
+	rec := NewRecorder(spy, nil)
 	ev := tenant.Event{
 		Actor:                 uuid.New(),
 		TenantID:              uuid.New(),
@@ -227,7 +228,7 @@ func TestRecorder_Record_DetailCarriesNonSensitiveFields(t *testing.T) {
 func TestRecorder_Record_DetailHasNoSensitiveKeys(t *testing.T) {
 	// Arrange (Req 4.1 / 4.3): tenant.Event は機密フィールドを構造的に持たない。
 	spy := &spyAuditService{}
-	rec := NewRecorder(spy)
+	rec := NewRecorder(spy, nil)
 	ev := tenant.Event{
 		Actor:                 uuid.New(),
 		TenantID:              uuid.New(),
@@ -259,7 +260,7 @@ func TestRecorder_Record_DetailHasNoSensitiveKeys(t *testing.T) {
 func TestRecorder_Record_DenyReasonEmpty_OmitsDenyReasonKey(t *testing.T) {
 	// Arrange (Req 4.4): DenyReason 空のときは deny_reason 鍵を載せない。
 	spy := &spyAuditService{}
-	rec := NewRecorder(spy)
+	rec := NewRecorder(spy, nil)
 	ev := tenant.Event{
 		Actor:                 uuid.New(),
 		TenantID:              uuid.New(),
@@ -297,7 +298,7 @@ func TestRecorder_Record_UnknownResult_MapsToFailure(t *testing.T) {
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			spy := &spyAuditService{}
-			rec := NewRecorder(spy)
+			rec := NewRecorder(spy, nil)
 			ev := tenant.Event{
 				Actor:     uuid.New(),
 				TenantID:  uuid.New(),
@@ -324,7 +325,7 @@ func TestRecorder_Record_UnknownResult_MapsToFailure(t *testing.T) {
 func TestRecorder_Record_UnknownOperation_MapsToIdentifiableType(t *testing.T) {
 	// Arrange (Req 2.7): 定義外 Operation。
 	spy := &spyAuditService{}
-	rec := NewRecorder(spy)
+	rec := NewRecorder(spy, nil)
 	ev := tenant.Event{
 		Actor:     uuid.New(),
 		TenantID:  uuid.New(),
@@ -343,6 +344,169 @@ func TestRecorder_Record_UnknownOperation_MapsToIdentifiableType(t *testing.T) {
 	}
 	if spy.recordedEvent.EventType != EventTypeUnknown {
 		t.Errorf("EventType = %q, want %q（未知種別へ写像 / Req 2.7）", spy.recordedEvent.EventType, EventTypeUnknown)
+	}
+}
+
+// ---- 観測ログ: 永続化成功時に結果を識別可能な構造化ログを出す（NFR 2.1）----
+
+// spyLogger は logger.Logger の test double。Info / Warn の呼び出し回数とフィールドを捕捉し、
+// 観測ログ（NFR 2.1）の有無・レベル・フィールドを検証する。永続化という外部副作用は audit.Service
+// 側で fake 化済みのため、ここではログ出力の副作用のみを捕捉する。
+type spyLogger struct {
+	infoCalls int
+	warnCalls int
+	lastMsg   string
+	lastFlds  []any
+}
+
+func (l *spyLogger) Info(msg string, fields ...any) {
+	l.infoCalls++
+	l.lastMsg = msg
+	l.lastFlds = fields
+}
+
+func (l *spyLogger) Warn(msg string, fields ...any) {
+	l.warnCalls++
+	l.lastMsg = msg
+	l.lastFlds = fields
+}
+
+func (l *spyLogger) Debug(_ string, _ ...any)    {}
+func (l *spyLogger) Error(_ string, _ ...any)    {}
+func (l *spyLogger) With(_ ...any) logger.Logger { return l }
+func (l *spyLogger) Sync() error                 { return nil }
+
+// 静的型アサーション: spyLogger が logger.Logger を満たすこと。
+var _ logger.Logger = (*spyLogger)(nil)
+
+// hasStringField は構造化フィールド列に指定文字列（key 名 / 値）が含まれるかを返す。
+// fields は plain な key/value ペアと zap.Field（actor_id / tenant_id）が混在するため、
+// 文字列要素の有無を走査する（厳密なペア解析は行わない）。
+func hasStringField(fields []any, s string) bool {
+	for _, f := range fields {
+		if str, ok := f.(string); ok && str == s {
+			return true
+		}
+	}
+	return false
+}
+
+func TestRecorder_Record_LogsOutcomeOnPersistSuccess(t *testing.T) {
+	tests := []struct {
+		name          string
+		result        tenant.Result
+		denyReason    string
+		wantInfoCalls int
+		wantWarnCalls int
+		wantResultStr string
+	}{
+		{
+			name:          "操作成功が永続化されたとき Info で結果 success を識別可能に出す",
+			result:        tenant.ResultSuccess,
+			denyReason:    "",
+			wantInfoCalls: 1,
+			wantWarnCalls: 0,
+			wantResultStr: string(tenant.ResultSuccess),
+		},
+		{
+			name:          "拒否（操作失敗）が永続化されたとき Warn で結果 failure を識別可能に出す",
+			result:        tenant.ResultFailure,
+			denyReason:    "two-step confirmation is required",
+			wantInfoCalls: 0,
+			wantWarnCalls: 1,
+			wantResultStr: string(tenant.ResultFailure),
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Arrange (NFR 2.1): 永続化が成功する spy と観測ログ spy を配線する。
+			spy := &spyAuditService{}
+			log := &spyLogger{}
+			rec := NewRecorder(spy, log)
+			ev := tenant.Event{
+				Actor:                 uuid.New(),
+				TenantID:              uuid.New(),
+				Operation:             tenant.OperationDisable,
+				Result:                tt.result,
+				ConfirmationCompleted: true,
+				DenyReason:            tt.denyReason,
+			}
+
+			// Act
+			if err := rec.Record(context.Background(), ev); err != nil {
+				t.Fatalf("Record() 予期しないエラー: %v", err)
+			}
+
+			// Assert: 永続化成功時に結果に応じた level で観測ログが 1 件出る（NFR 2.1）。
+			if log.infoCalls != tt.wantInfoCalls {
+				t.Errorf("Info 呼び出し回数 = %d, want %d（NFR 2.1 成功経路の観測ログ）", log.infoCalls, tt.wantInfoCalls)
+			}
+			if log.warnCalls != tt.wantWarnCalls {
+				t.Errorf("Warn 呼び出し回数 = %d, want %d（NFR 2.1 / 結果区分で level 分岐）", log.warnCalls, tt.wantWarnCalls)
+			}
+			// 結果が構造化ログで識別可能であること（result 値が載る / NFR 2.1）。
+			if !hasStringField(log.lastFlds, tt.wantResultStr) {
+				t.Errorf("観測ログに result=%q が載らない: fields=%v（NFR 2.1）", tt.wantResultStr, log.lastFlds)
+			}
+		})
+	}
+}
+
+// ---- 観測ログ: 拒否理由など非機密フィールドのみが載り、機密鍵は載らない（NFR 2.1 / 2.3）----
+
+func TestRecorder_Record_PersistSuccessLog_CarriesOnlyNonSensitiveFields(t *testing.T) {
+	// Arrange (NFR 2.3): 二段階確認完了 + 拒否理由を持つ failure イベントが永続化成功する。
+	spy := &spyAuditService{}
+	log := &spyLogger{}
+	rec := NewRecorder(spy, log)
+	ev := tenant.Event{
+		Actor:                 uuid.New(),
+		TenantID:              uuid.New(),
+		Operation:             tenant.OperationDisable,
+		Result:                tenant.ResultFailure,
+		ConfirmationCompleted: true,
+		DenyReason:            "two-step confirmation is required",
+	}
+
+	// Act
+	if err := rec.Record(context.Background(), ev); err != nil {
+		t.Fatalf("Record() 予期しないエラー: %v", err)
+	}
+
+	// Assert: 非機密フィールド（confirmation_completed / deny_reason）が載る。
+	if !hasStringField(log.lastFlds, "confirmation_completed") {
+		t.Errorf("観測ログに confirmation_completed が載らない: fields=%v（NFR 2.1）", log.lastFlds)
+	}
+	if !hasStringField(log.lastFlds, "deny_reason") {
+		t.Errorf("拒否イベントの観測ログに deny_reason が載らない: fields=%v（NFR 2.1 / 2.2）", log.lastFlds)
+	}
+}
+
+// ---- 観測ログ: 永続化失敗時は重複出力しない（失敗ログは audit.Service の責務 / NFR 2.1）----
+
+func TestRecorder_Record_PersistError_DoesNotEmitSuccessLog(t *testing.T) {
+	// Arrange (NFR 2.1): 永続化が失敗する。失敗経路の構造化ログ（failure_kind=persist_error）は
+	// audit.Service が担うため、アダプタは成功経路ログを重複出力しない。
+	spy := &spyAuditService{recordErr: stderrors.New("persist failed")}
+	log := &spyLogger{}
+	rec := NewRecorder(spy, log)
+	ev := tenant.Event{
+		Actor:     uuid.New(),
+		TenantID:  uuid.New(),
+		Operation: tenant.OperationBind,
+		Result:    tenant.ResultFailure,
+	}
+
+	// Act
+	if err := rec.Record(context.Background(), ev); err == nil {
+		t.Fatalf("Record() は永続化失敗を伝播するはず（fail-closed / Req 3.1 / 3.2）")
+	}
+
+	// Assert: 永続化失敗時にアダプタは観測ログ（成功経路ログ）を出さない（二重出力回避）。
+	if log.infoCalls != 0 || log.warnCalls != 0 {
+		t.Errorf("永続化失敗時にアダプタが観測ログを出した: Info=%d Warn=%d, want 0/0（失敗ログは audit.Service の責務）",
+			log.infoCalls, log.warnCalls)
 	}
 }
 

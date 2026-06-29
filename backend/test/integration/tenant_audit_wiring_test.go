@@ -41,7 +41,7 @@ func setupTenantAuditWiring(t *testing.T) (rec *tenantaudit.Recorder, svc audit.
 		audit.SystemClock{},
 		nil,
 	)
-	rec = tenantaudit.NewRecorder(svc)
+	rec = tenantaudit.NewRecorder(svc, nil)
 
 	superAdminCtx = platformdb.WithTenantContext(ctx, platformdb.TenantContext{
 		TenantID:     uuid.Nil,
