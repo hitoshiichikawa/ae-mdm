@@ -11,29 +11,35 @@ import (
 
 // Status はテナントのライフサイクル状態を表す機械可読な enum（NFR 1.1）。
 //
-// テナント状態は常に以下 3 値のいずれか 1 つを取る:
+// テナント状態は常に以下 4 値のいずれか 1 つを取る（#52 で binding を追加 / Req 4.1）:
 //
 //   - StatusPendingBind: テナント作成済みだが Enterprise 未バインド
+//   - StatusBinding:      バインド予約中（pending_bind→binding 原子遷移の勝者のみが
+//     CreateEnterprise に進む中間状態。enterprise_name は未確定 / NFR 1.2）
 //   - StatusBound:        Enterprise バインド済み（enterprise_name 確定）
 //   - StatusDisabled:     無効化済み（終端 / 本 Issue では再有効化遷移を持たない）
 //
-// DB 側 `tenant_status` enum（migration 0001）と文字列値を一致させる。
+// DB 側 `tenant_status` enum（migration 0001 + 0017 で binding 追加）と文字列値を一致させる。
 type Status string
 
 const (
 	// StatusPendingBind はバインド未完了状態（テナント作成直後の初期状態）。
 	StatusPendingBind Status = "pending_bind"
+	// StatusBinding はバインド予約中状態（pending_bind→binding 予約に成功した勝者が
+	// CreateEnterprise を待つ中間状態 / Req 1.1）。enterprise_name は未確定（NFR 1.2）であり、
+	// 再 bind 可能・disable 可能だが bound とはみなさない（Req 2.3）。
+	StatusBinding Status = "binding"
 	// StatusBound はバインド済み状態（enterprise_name が確定している）。
 	StatusBound Status = "bound"
 	// StatusDisabled は無効化状態（終端状態 / Req 3.1）。
 	StatusDisabled Status = "disabled"
 )
 
-// Valid は Status が定義済みの 3 値のいずれかであるとき true を返す（NFR 1.1）。
+// Valid は Status が定義済みの 4 値のいずれかであるとき true を返す（NFR 1.1 / Req 4.1）。
 // 未定義値（空文字 / 想定外文字列 / 大文字小文字違い）に対しては false を返す。
 func (s Status) Valid() bool {
 	switch s {
-	case StatusPendingBind, StatusBound, StatusDisabled:
+	case StatusPendingBind, StatusBinding, StatusBound, StatusDisabled:
 		return true
 	default:
 		return false
@@ -45,9 +51,9 @@ func (s Status) String() string {
 	return string(s)
 }
 
-// ParseStatus は文字列を Status へ変換する（NFR 1.1）。
+// ParseStatus は文字列を Status へ変換する（NFR 1.1 / Req 4.1）。
 //
-// 入力が定義済みの 3 値（pending_bind / bound / disabled）のいずれかであれば対応する
+// 入力が定義済みの 4 値（pending_bind / binding / bound / disabled）のいずれかであれば対応する
 // Status を返し、それ以外（空文字を含む未定義値）は `*errors.Error{Code: CodeInvalidRequest}`
 // を返す。DB から読み出した status 文字列の正当性検証や、外部入力のバリデーションに用いる。
 func ParseStatus(s string) (Status, error) {
@@ -61,20 +67,25 @@ func ParseStatus(s string) (Status, error) {
 // TenantRow は `tenants` テーブルの 1 行に対応する DB 層のドメイン型。
 //
 // Repository（後続 task 3.1）が SELECT / INSERT / UPDATE で読み書きする。
-// EnterpriseName は **bound 時のみ非空** であり、pending_bind / disabled では空文字となる
-// （nullable カラムを最も素直な「空文字 = 未設定」で表現する設計判断。`*string` ではなく
+// EnterpriseName は **bound 時のみ非空** であり、pending_bind / binding / disabled では空文字
+// となる（nullable カラムを最も素直な「空文字 = 未設定」で表現する設計判断。`*string` ではなく
 // `string` を採用し、Repository は NULL を空文字へ写像する。これにより View 変換時の
 // nil ポインタ分岐を避け、`EnterpriseName == ""` で未バインドを判定できる）。
+// SignupURLName も同じ「NULL→空文字」写像パターンで扱う（Repository 実装は後続 task 3.1）。
 // DisabledAt / DisabledBy は無効化された行でのみ非 nil（NFR 2.1 の補助 / 0016 監査列）。
 type TenantRow struct {
 	// ID はテナントの primary key。
 	ID uuid.UUID
 	// Name はテナント名（顧客企業名）。空は許容しない（Req 1.3 で Service / Handler が弾く）。
 	Name string
-	// Status は現在のライフサイクル状態（常に 3 値のいずれか / NFR 1.1）。
+	// Status は現在のライフサイクル状態（常に 4 値のいずれか / NFR 1.1 / Req 4.1）。
 	Status Status
 	// EnterpriseName は AMAPI Enterprise 識別子。bound 時のみ非空、それ以外は空文字。
 	EnterpriseName string
+	// SignupURLName は CreateSignupURL が返した識別子（発行元テナントに束縛される正本 / Req 3.1）。
+	// create 時に永続化し、bind 時の CreateEnterprise 引数に用いる。未発行 / NULL は空文字へ写像する
+	// （Repository は NULL→空文字。Repository 永続化実装は後続 task 3.1）。ログ / 監査には出さない（NFR 3.2）。
+	SignupURLName string
 	// CreatedAt はレコード生成時刻。
 	CreatedAt time.Time
 	// UpdatedAt は最終更新時刻。
@@ -85,17 +96,17 @@ type TenantRow struct {
 	DisabledBy *uuid.UUID
 }
 
-// TenantView は API レスポンスとして呼び出し側へ返すテナント表現（Req 4.1 / 4.2）。
+// TenantView は API レスポンスとして呼び出し側へ返すテナント表現（Req 4.1 / 4.2 / 4.4）。
 //
 // JSON tag を付与し、Handler（後続 task 6.1）が直接シリアライズできる形にする。
-// EnterpriseName は bound 時のみ存在するため `omitempty` を付与し、pending_bind /
+// EnterpriseName は bound 時のみ存在するため `omitempty` を付与し、pending_bind / binding /
 // disabled の応答には enterprise_name フィールドを含めない（Req 6.5 の存在差非露出にも整合）。
 type TenantView struct {
 	// ID はテナントの primary key。
 	ID uuid.UUID `json:"id"`
 	// Name はテナント名。
 	Name string `json:"name"`
-	// Status は現在のライフサイクル状態（pending_bind / bound / disabled）。
+	// Status は現在のライフサイクル状態（pending_bind / binding / bound / disabled / Req 4.4）。
 	Status Status `json:"status"`
 	// EnterpriseName は AMAPI Enterprise 識別子（bound 時のみ。それ以外は省略）。
 	EnterpriseName string `json:"enterprise_name,omitempty"`
@@ -106,9 +117,10 @@ type TenantView struct {
 //
 // enterprise_name は **bound 時のみ** View に載せる（TenantView 契約 / Req 4.2）。
 // 無効化された行は監査目的で DB 上 enterprise_name を保持し続ける（UpdateDisabled は
-// status のみ更新する）が、disabled / pending_bind の GET / List 応答に enterprise_name を
-// 漏らさない（status!=bound の応答に enterprise 識別子を露出しない / Req 4.2 の条件付き返却・
-// Req 6.5 の存在差非露出と整合）。
+// status のみ更新する）が、disabled / pending_bind / binding の GET / List 応答に
+// enterprise_name を漏らさない（status!=bound の応答に enterprise 識別子を露出しない /
+// Req 4.2 の条件付き返却・Req 6.5 の存在差非露出と整合。binding は予約中で enterprise_name
+// 未確定 / NFR 1.2 のため status は 4 値で返しつつ識別子は載せない / Req 4.4）。
 func ViewFromRow(row TenantRow) TenantView {
 	view := TenantView{
 		ID:     row.ID,
@@ -122,10 +134,15 @@ func ViewFromRow(row TenantRow) TenantView {
 }
 
 // CreateInput はテナント作成要求の入力 DTO（Req 1.1 / 1.3）。
-// `POST /api/admin/tenants` の request body に対応する。
+// `POST /api/admin/tenants` の request body（Name のみ）に対応する。
 type CreateInput struct {
 	// Name は作成するテナント名。空白 trim 後に空であれば Service / Handler が弾く（Req 1.3）。
 	Name string `json:"name"`
+	// SignupURLName は CreateSignupURL が返した識別子（発行元束縛の正本 / Req 3.1）。
+	// HTTP request body 由来ではなく Service が CreateSignupURL 成功後に充填し Repository.Insert へ
+	// 永続化させる内部フィールドのため `json:"-"`（body から受け取らない）。Service / Repository
+	// 側の永続化配線は後続 task 5.1 / 3.1 の責務（本 task はフィールド追加のみ）。
+	SignupURLName string `json:"-"`
 }
 
 // BindInput は Enterprise バインド要求の入力 DTO（Req 2.1）。
@@ -170,6 +187,9 @@ const (
 	OperationBind Operation = "bind"
 	// OperationDisable はテナント無効化操作。
 	OperationDisable Operation = "disable"
+	// OperationRecover は中断したバインド予約（binding 行）の回収操作（Req 2.4）。
+	// RecoverStaleBindings が binding→pending_bind 回収時の Record に用いる（Service 配線は後続 task 5.2）。
+	OperationRecover Operation = "recover"
 )
 
 // Result は監査対象操作の結果（成功 / 失敗）（NFR 2.1）。
@@ -192,7 +212,7 @@ type Event struct {
 	Actor uuid.UUID
 	// TenantID は操作対象テナントの id（NFR 2.1）。
 	TenantID uuid.UUID
-	// Operation は操作種別（create / bind / disable）（NFR 2.1）。
+	// Operation は操作種別（create / bind / disable / recover）（NFR 2.1 / Req 2.4）。
 	Operation Operation
 	// Result は操作結果（success / failure）（NFR 2.1）。
 	Result Result
