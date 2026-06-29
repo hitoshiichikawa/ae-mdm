@@ -107,21 +107,28 @@ func TestTenantAuditWiring_SuccessEventPersistsAndIsListable(t *testing.T) {
 	}
 }
 
-// TestTenantAuditWiring_NonexistentTenantFailureIsRejectedByFK は、**存在しない非 nil tenant_id** を
-// 載せた失敗監査イベントが `audit_logs.tenant_id` の FK で拒否され、アダプタが当該エラーを伝播する
-// （fail-closed / Req 3.1 / 3.2）ことを実 DB で検証する。
+// TestTenantAuditWiring_PersistErrorIsPropagated は、実 audit.Repository での永続化失敗が、アダプタ境界で
+// 握りつぶされず呼び出し側へ error として伝播する（fail-closed / Req 3.1 / 3.2）ことを実 DB で検証する。
+// 永続化失敗の誘発には **存在しない非 nil tenant_id** を用いる（`audit_logs.tenant_id` の FK 違反）。
 //
-// これは現状の既知の制約を実挙動として固定するテストである: bind / disable の lookup failure 等、
-// 実在しないテナント id を載せた失敗監査は永続化されず `/api/admin/audit-logs` に残らない。
-// 根本対処（FK 緩和 or 失敗時 tenant_id=NULL 規則）はスキーマ責務をまたぐため本 PR スコープ外で、
-// impl-notes.md「確認事項 5」で別 Issue 化を申し送る。本テストはその制約の境界（FK 拒否 + error 伝播）を
-// 明示的に観測し、回帰時に検知できるようにする。
-func TestTenantAuditWiring_NonexistentTenantFailureIsRejectedByFK(t *testing.T) {
+// spy ベースの unit test（`recorder_test.go` の TestRecorder_Record_PropagatesPersistError）は合成 error の
+// 伝播を、本テストは **実 DB の制約違反**という現実の永続化失敗経路で fail-closed を補完する。
+//
+// NOTE（既知の横断制約 / 本テストでは「望ましい挙動」として固定しない）: bind / disable の lookup failure 等、
+// `tenants` に存在しない非 nil tenant_id を載せた失敗監査は、現状この FK 拒否により `/api/admin/audit-logs`
+// に残らない。これは Req 1 の Objective（失敗監査を失わない）に対する gap だが、根本対処は
+// `audit_logs.tenant_id` の FK スキーマ（#5 の領分）か、lookup failure 時に存在しない tenant id を載せない
+// tenant Service 側ロジック（#38 の領分）の判断を要し、いずれも本 Issue（利用・配線のみ）の Out of Scope。
+// アダプタ単独では Req 2.2（tenant_id 写像義務）と Req 5.2（変換＋委譲のみ・retry / 存在確認禁止）に阻まれ
+// 解消できないため、impl-notes.md「確認事項 5」で別 Issue 化を申し送る。本テストはこの gap を「期待結果」
+// として assert せず（旧 `List(tenant_bind) want 0` 断言を撤去 / PR #56 round-3 指摘対応）、あくまで
+// fail-closed の error 伝播のみを検証する。
+func TestTenantAuditWiring_PersistErrorIsPropagated(t *testing.T) {
 	// Arrange
-	rec, svc, ids, ctx, cleanup := setupTenantAuditWiring(t)
+	rec, _, ids, ctx, cleanup := setupTenantAuditWiring(t)
 	defer cleanup()
 
-	nonexistentTenant := uuid.New() // tenants に seed していない id
+	nonexistentTenant := uuid.New() // tenants に seed していない id（実 DB の FK 違反を誘発する）
 	ev := tenant.Event{
 		Actor:     ids.adminAID, // actor は実在（FK 違反の原因を tenant_id に限定する）
 		TenantID:  nonexistentTenant,
@@ -132,17 +139,8 @@ func TestTenantAuditWiring_NonexistentTenantFailureIsRejectedByFK(t *testing.T) 
 	// Act
 	err := rec.Record(ctx, ev)
 
-	// Assert: FK 違反で永続化が失敗し、アダプタは握りつぶさず error を伝播する（Req 3.1 / 3.2）。
+	// Assert: 実 Repository の永続化失敗（FK 違反）をアダプタが握りつぶさず error 伝播する（Req 3.1 / 3.2）。
 	if err == nil {
-		t.Fatalf("存在しない tenant_id の失敗監査が FK で拒否されず成功した（FK 制約 or 写像挙動の回帰の疑い）")
-	}
-
-	// Assert: 当該失敗イベントは audit_logs に残らない（List に現れない）。
-	got, listErr := svc.List(ctx, audit.Filter{EventType: tenantaudit.EventTypeBind})
-	if listErr != nil {
-		t.Fatalf("List(): %v", listErr)
-	}
-	if len(got) != 0 {
-		t.Errorf("FK 拒否された失敗監査が永続化されている: List(tenant_bind) 件数 = %d, want 0", len(got))
+		t.Fatalf("実 DB の永続化失敗がアダプタ境界で握りつぶされた（error 伝播されず / fail-closed 違反の疑い）")
 	}
 }

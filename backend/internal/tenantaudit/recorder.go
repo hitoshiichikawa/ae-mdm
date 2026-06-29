@@ -110,14 +110,20 @@ func (r *Recorder) Record(ctx context.Context, e tenant.Event) error {
 // logPersisted は永続化に成功した tenant 監査イベントの結果を構造化ログへ出力する（NFR 2.1）。
 //
 // 出力フィールドは operation / result / actor_id / tenant_id / confirmation_completed と、
-// 拒否時のみ deny_reason に限定する（いずれも機密値を含まない / NFR 2.3）。永続化は成功して
-// いるが操作結果が失敗 / 拒否（ResultFailure）のイベントは原因分析のため Warn、操作成功は Info
-// で出力する（interim LoggerRecorder と同じ結果識別規約 / NFR 2.1 / 2.2）。tenant.Event は機密値
+// 拒否時のみ deny_reason に限定する（いずれも機密値を含まない / NFR 2.3）。tenant.Event は機密値
 // フィールドを構造的に持たないため、安全フィールドのみを載せる一次防御に依拠する（Req 4 / #38 NFR 2.3）。
+//
+// **result 値も Warn / Info の level 判定も、audit row へ実際に永続化した結果（mapResult 後）に揃える。**
+// raw な e.Result をそのまま載せると、unknown / zero 値が mapResult の fail-closed により audit row 上は
+// failure なのに、ログ上は Info かつ result="" / "partial" となり、観測ログと監査証跡が乖離する
+// （NFR 2.1 の結果識別と fail-closed の観測性が崩れる）。永続化済みだが結果が失敗（ResultFailure）の
+// イベントは原因分析のため Warn、成功は Info で出力する。
 func (r *Recorder) logPersisted(e tenant.Event) {
+	// 永続化した audit row と同じ結果区分で観測ログを出す（mapResult と単一の真実源を共有する）。
+	result := mapResult(e.Result)
 	fields := []any{
 		"operation", string(e.Operation),
-		"result", string(e.Result),
+		"result", string(result),
 		logger.ActorID(e.Actor),
 		logger.TenantID(e.TenantID),
 		"confirmation_completed", e.ConfirmationCompleted,
@@ -125,7 +131,7 @@ func (r *Recorder) logPersisted(e tenant.Event) {
 	if e.DenyReason != "" {
 		fields = append(fields, "deny_reason", e.DenyReason)
 	}
-	if e.Result == tenant.ResultFailure {
+	if result == audit.ResultFailure {
 		r.log.Warn("tenant audit event persisted", fields...)
 		return
 	}

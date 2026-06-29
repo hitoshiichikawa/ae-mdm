@@ -9,8 +9,8 @@ tenant ドメインの監査イベント（作成 / bind / 無効化）を、int
 ## 実装した型・パッケージ
 
 - 新規パッケージ `internal/tenantaudit`（domain-glue）
-  - `recorder.go`: `Recorder` 型（`tenant.EventRecorder` を満たす）/ `NewRecorder(audit.Service)` /
-    写像 helper（`mapEventType` / `mapResult` / `buildDetail`）/ EventType 定数
+  - `recorder.go`: `Recorder` 型（`tenant.EventRecorder` を満たす）/ `NewRecorder(audit.Service, logger.Logger)` /
+    写像 helper（`mapEventType` / `mapResult` / `buildDetail`）/ EventType 定数 / 成功経路の観測ログ（`logPersisted`）
   - `recorder_test.go`: AC と 1:1 のユニットテスト（spy audit.Service で永続化のみ fake 化）
 - 配置理由: tenant / audit 双方を import するため core 2 パッケージへ相互 import を持ち込まず、
   `package main` だと単体テスト不能になるため独立パッケージにした（Req 5 / #38 design と整合）。
@@ -35,8 +35,9 @@ tenant ドメインの監査イベント（作成 / bind / 無効化）を、int
 
 ## 配線差分（cmd/api/main.go）
 
-- `tenantRecorder := tenant.NewLoggerRecorder(log)` → `tenantRecorder := tenantaudit.NewRecorder(auditSvc)`
-  （main.go:236 付近。`auditSvc` は同 main.go:211 で構築済みのものを再利用 / Req 5.3 / NFR 1）。
+- `tenantRecorder := tenant.NewLoggerRecorder(log)` → `tenantRecorder := tenantaudit.NewRecorder(auditSvc, log)`
+  （main.go:239 付近。`auditSvc` は同 main.go:212 で構築済みのものを再利用、`log` は bootstrap 済み logger を
+  成功経路の観測ログ用に渡す / Req 5.3 / NFR 1 / NFR 2.1）。
 - section (8) のコメントを「audit Service 未実装のため interim logger」→「audit Service へ
   配線済み」の実態に更新（#54 Req 1 / 5.3）。
 - import に `internal/tenantaudit` を追加。
@@ -75,7 +76,7 @@ tenant ドメインの監査イベント（作成 / bind / 無効化）を、int
 | Req 5.3（配線注入） | `cmd/api/main.go` | `cmd/api` build pass |
 | NFR 1.1（ユースケース本体不変） | `service.go` 未変更 | 既存 `internal/tenant` テスト pass |
 | NFR 1.2（種別固定値） | `recorder.go` EventType 定数 | `TestEventTypeConstants_FixedStringValues` |
-| NFR 2.1（観測性） | 既存 audit Service の構造化ログ | 既存 `internal/audit` テスト pass |
+| NFR 2.1（観測性） | 永続化成功時は `recorder.go` `logPersisted`（結果は永続化値 `mapResult` に揃える）/ 失敗時は既存 audit Service `warnPersistFailure` | `TestRecorder_Record_LogsOutcomeOnPersistSuccess`（unknown/zero→failure/Warn 含む） / 既存 `internal/audit` テスト pass |
 
 ## 検証結果
 
@@ -164,5 +165,34 @@ Red→Green 確認: `mapEventType` の default 分岐を一時的に壊すと
      決められないため、Req 1.2 / 2.2 と `audit_logs` スキーマ責務をまたぐ別 Issue を推奨。
 
 ITERATION-1 STATUS: complete
+
+## Iteration ラウンド 3（PR #56 レビュー対応）
+
+レビュー（codex）6 件すべてが裁定で legitimate とされた。対応内訳:
+
+- **[medium] `logPersisted` の結果区分が audit row と乖離（対応済み / 修正 commit）**: `logPersisted` が raw な
+  `e.Result` を載せ、`e.Result == tenant.ResultFailure` のみ Warn 判定していたため、unknown / zero 値が
+  `mapResult` の fail-closed により audit row 上は failure なのにログ上は Info / `result=""` となり観測ログと
+  監査証跡が乖離していた。`logPersisted` を **永続化値（`mapResult` 後）に揃える**よう修正し、result 値と
+  Warn / Info の level 判定の双方を audit row と一致させた（NFR 2.1 / fail-closed の観測性）。
+  `TestRecorder_Record_LogsOutcomeOnPersistSuccess` に zero 値 / 未知値ケース（→ failure / Warn）を追加し
+  Red→Green を確認。既存の success / failure ケースの挙動は不変。
+- **[high] 存在しない tenant_id の失敗監査が FK で永続化されない件のテスト固定（テスト再焦点化）**: 根本対処は
+  本 Issue スコープ外（下記「確認事項 5」のとおり (a) `audit_logs` FK スキーマ=#5 領分 / (b) lookup failure 時の
+  tenant id 写像=#38 領分 / (c) Req 2.2・Req 5.2 によりアダプタ単独では不可）で round-1 から不変。round-2 指摘は
+  結合テストが `List(tenant_bind) want 0` を断言し「失敗監査が残らない」状態を**望ましい挙動として固定**していた点。
+  当該テストを `TestTenantAuditWiring_PersistErrorIsPropagated` に改名し、**fail-closed の error 伝播（Req 3.1 / 3.2）を
+  実 DB の FK 違反経路で検証する**目的へ再焦点化。gap を「期待結果」として固定する `List want 0` 断言を撤去した
+  （AC に紐付かない断言の除去であり、テストを弱めて pass させる行為ではない）。gap 自体は確認事項 5 で別 Issue 化を継続提案。
+- **[medium] design.md / tasks.md 不在（対応なし / 返信で boundary 説明）**: 本 Issue は Triage で `needs_architect:false`
+  と判定された単一実装パスのため Architect 段（設計 PR ゲート）を経ておらず design.md / tasks.md が存在しない。これらは
+  Architect が**別の設計 PR**（人間レビュー済み）で作成する成果物であり、Developer が impl PR で新規作成・書き換えする
+  ことは agent 連携ルール・本 iteration モードの双方で禁止。requirements ⇄ 実装 / テストの追跡は本ファイル
+  「AC Traceability」表で提供済み。design/tasks が必要なら再 triage（`needs_architect:true`）または別 Issue を推奨。
+- **[low] impl-notes / review-notes の `NewRecorder` シグネチャ齟齬（対応済み / docs 修正）**: impl-notes.md:12 / 38 と
+  review-notes.md:18 の `NewRecorder(audit.Service)` / `NewRecorder(auditSvc)` を、実コード `NewRecorder(auditSvc, log)`
+  （`logger.Logger` 第 2 引数）に合わせて修正した。
+
+ITERATION-3 STATUS: complete
 
 STATUS: complete

@@ -15,7 +15,7 @@
 - 1.1 — `main.go` で `auditSvc` を注入した `tenantaudit.NewRecorder` が `tenant.Service` に配線され、成功イベントが `audit.Service.Record` へ委譲される / `TestRecorder_Record_OperationMapping`（create/bind 成功ケースで recordCalls==1 を検証）
 - 1.2 — `mapResult` が `tenant.ResultFailure` を `audit.ResultFailure` へ写像し失敗区分で記録要求 / `TestRecorder_Record_OperationMapping`（disable 失敗ケース wantResult=ResultFailure）
 - 1.3 — 同一 `auditSvc` が `/api/admin/audit-logs` 閲覧経路の backing であり、アダプタ委譲により永続化＝閲覧可能化が成立（既存 #5/#37 実装）/ `main.go` 配線 + 委譲で観測可能
-- 1.4 — `tenant.NewLoggerRecorder(log)` → `tenantaudit.NewRecorder(auditSvc)` への差し替え（`main.go` diff）
+- 1.4 — `tenant.NewLoggerRecorder(log)` → `tenantaudit.NewRecorder(auditSvc, log)` への差し替え（`main.go` diff）
 - 2.1 — `recorder.go` `ActorID: e.Actor` / `TestRecorder_Record_OperationMapping`（ActorID 検証）
 - 2.2 — `TenantID: e.TenantID` / 同上（TenantID 検証）
 - 2.3 — `mapResult`（success/failure 双方）/ `TestRecorder_Record_OperationMapping` + `TestRecorder_Record_ResultSuccessMapping`

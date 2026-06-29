@@ -416,6 +416,26 @@ func TestRecorder_Record_LogsOutcomeOnPersistSuccess(t *testing.T) {
 			wantWarnCalls: 1,
 			wantResultStr: string(tenant.ResultFailure),
 		},
+		{
+			// 境界防御の観測整合: zero 値の Result は mapResult が audit row 上 failure へ倒すため、
+			// 観測ログも raw な result="" / Info ではなく、永続化結果に揃えた failure / Warn で出す
+			// （NFR 2.1 の結果識別と fail-closed の観測性 / 監査証跡とログの乖離防止）。
+			name:          "zero 値の Result が永続化されたとき audit row と整合して Warn で failure を出す",
+			result:        tenant.Result(""),
+			denyReason:    "",
+			wantInfoCalls: 0,
+			wantWarnCalls: 1,
+			wantResultStr: string(audit.ResultFailure),
+		},
+		{
+			// 同上: 未知の Result 文字列も mapResult が failure へ倒すため、観測ログも failure / Warn。
+			name:          "未知の Result 文字列が永続化されたとき audit row と整合して Warn で failure を出す",
+			result:        tenant.Result("partial"),
+			denyReason:    "",
+			wantInfoCalls: 0,
+			wantWarnCalls: 1,
+			wantResultStr: string(audit.ResultFailure),
+		},
 	}
 
 	for _, tt := range tests {
