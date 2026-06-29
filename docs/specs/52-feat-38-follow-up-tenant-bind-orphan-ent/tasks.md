@@ -9,7 +9,7 @@
   - _Boundary: migration 0017_
 
 - [ ] 2. types.go の 4 値化と signup_url_name フィールド追加
-- [ ] 2.1 Status enum 4 値化・DTO 拡張・sentinel 補強
+- [x] 2.1 Status enum 4 値化・DTO 拡張・sentinel 補強
   - `StatusBinding Status = "binding"` を追加し、`Valid()` / `ParseStatus` を 4 値対応にする（NFR 1.1）
   - `TenantRow` / `CreateInput` に `SignupURLName string` を追加（Repository は NULL を空文字へ写像する既存 enterprise_name パターン踏襲）
   - `Operation` enum に `OperationRecover Operation = "recover"` を追加（Req 2.4）
