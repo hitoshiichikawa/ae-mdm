@@ -10,7 +10,7 @@
   - _Boundary: TenantIDByEnterpriseName_
 
 - [ ] 2. notification パッケージの型・冪等排除・検証（types / dedupe / verifier）
-- [ ] 2.1 パッケージ型定義と Verifier (P)
+- [x] 2.1 パッケージ型定義と Verifier (P)
   - `internal/notification/doc.go`: パッケージ概要（audit/doc.go に倣う）
   - `internal/notification/types.go`: `Envelope` / `NotificationType`（ENROLLMENT / STATUS_REPORT / COMMAND）/ `UnassignedNotification` / `Filter` / `NotificationHandler` IF / `TenantResolver` IF
   - `internal/notification/verifier.go`: `Parse(*pubsub.Message) (Envelope, error)`。空 payload（Req 2.6）/ 種別判定不能（Req 2.6）/ 検証失敗（Req 2.5）を `*errors.Error{IsTransient:false}`（破棄 ack 相当）で分類。enterprise_name 空/欠落は Envelope 内で空のまま通す（Req 3.4 は Dispatcher が退避判定）。機密値を error/ログに補間しない（NFR 3.1）
