@@ -4,8 +4,8 @@
 （Create/参照 → Bind/Disable） → Handler → 認可ガード結合テスト。各実装タスクは対応する
 テストを同タスク内に含める（per-task Reviewer 運用での `missing test` reject 回避）。
 
-- [ ] 1. ドメイン型と監査記録ポート（`internal/tenant` パッケージ scaffold）
-- [ ] 1.1 `internal/tenant/types.go` と `internal/tenant/audit_log.go` を追加 (P)
+- [x] 1. ドメイン型と監査記録ポート（`internal/tenant` パッケージ scaffold）
+- [x] 1.1 `internal/tenant/types.go` と `internal/tenant/audit_log.go` を追加 (P)
   - `Status` enum（`pending_bind` / `bound` / `disabled`）と 3 値以外を弾く `ParseStatus`/`Valid` を定義（NFR 1.1）
   - `TenantRow`（DB 行）/ `TenantView`（API 応答）/ `CreateInput` / `BindInput` / `DisableInput` / `SignupURL` DTO を定義
   - `EventRecorder` interface（`Record(ctx, Event)`）と `Event{Actor,TenantID,Operation,Result,ConfirmationCompleted,DenyReason}` を定義（NFR 2.1）
@@ -15,8 +15,8 @@
   - _Requirements: NFR 1.1, NFR 2.1, NFR 2.3_
   - _Boundary: tenant.types, tenant.EventRecorder_
 
-- [ ] 2. マイグレーション 0016（enterprise_name 一意制約 + 無効化監査列）
-- [ ] 2.1 `db/migrations/0016_tenants_bind_disable_metadata.{up,down}.sql` を追加 (P)
+- [x] 2. マイグレーション 0016（enterprise_name 一意制約 + 無効化監査列）
+- [x] 2.1 `db/migrations/0016_tenants_bind_disable_metadata.{up,down}.sql` を追加 (P)
   - up: `tenants` に `disabled_at timestamptz NULL` / `disabled_by uuid NULL` を `ADD COLUMN IF NOT EXISTS` で追加
   - up: `CREATE UNIQUE INDEX IF NOT EXISTS uq_tenants_enterprise_name ON tenants (enterprise_name) WHERE enterprise_name IS NOT NULL`（同一 Enterprise の二重バインド防止 / Req 2.1 invariant 補強）
   - down: 上記 index と 2 列を `DROP ... IF EXISTS` で逆操作（既存 `migrations_reversible_test.go` の up→down 往復検証に乗る）
@@ -24,8 +24,8 @@
   - _Requirements: 2.1, NFR 1.1, NFR 3.1_
   - _Boundary: db.migrations_
 
-- [ ] 3. Tenant Repository（raw SQL + SuperAdmin ctx + 競合制御）
-- [ ] 3.1 `internal/tenant/repository.go` を実装
+- [x] 3. Tenant Repository（raw SQL + SuperAdmin ctx + 競合制御）
+- [x] 3.1 `internal/tenant/repository.go` を実装
   - `Repository` interface（`Insert` / `Get` / `List` / `UpdateBound` / `UpdateDisabled`）と pgxpool 実装
   - 全メソッドで `superAdminContext(ctx)` + `db.BeginTxFunc` を使う（`internal/auth/repository.go:81` と同型）
   - `Insert`: status=`pending_bind` で 1 行 INSERT（NFR 1.1 / 3.1）
@@ -36,8 +36,8 @@
   - _Requirements: 1.1, 2.1, 2.3, 3.1, 3.4, 4.1, 4.2, 4.3, 4.4, 6.5, NFR 1.1, NFR 3.1_
   - _Depends: 1.1, 2.1_
 
-- [ ] 4. Tenant Service: 作成・参照・前提ガード
-- [ ] 4.1 `internal/tenant/service.go` に Create / Get / List / EnterpriseNameForTenant を実装
+- [x] 4. Tenant Service: 作成・参照・前提ガード
+- [x] 4.1 `internal/tenant/service.go` に Create / Get / List / EnterpriseNameForTenant を実装
   - `Service` interface 定義 + 本番実装 struct（deps: `Repository` / `amapi.Client` / `EventRecorder` / `config.Config`）
   - `Create`: name 空白 trim 後空なら `CodeInvalidRequest`（Req 1.3）→ `amapi.CreateSignupURL` → `Repository.Insert`(pending_bind) → `signup_url` 返却（Req 1.1 / 1.2）。`CreateSignupURL` が非 transient error なら永続化せずエラー伝達（Req 1.4）。成功/失敗を `EventRecorder.Record`（Req 1.5 / NFR 2.1）。拒否経路（不正入力等）は構造化ログを出力（NFR 2.2）
   - `Get`/`List`: Repository へ委譲し `TenantView` に変換（Req 4.1 / 4.2 / 4.3 / 4.4）
@@ -47,8 +47,8 @@
   - _Boundary: tenant.Service_
   - _Depends: 3.1_
 
-- [ ] 5. Tenant Service: Enterprise バインド・無効化（状態機械）
-- [ ] 5.1 `internal/tenant/service.go` に Bind / Disable を追加実装
+- [x] 5. Tenant Service: Enterprise バインド・無効化（状態機械）
+- [x] 5.1 `internal/tenant/service.go` に Bind / Disable を追加実装
   - `Bind`: `Repository.Get` で現状態判定 → pending_bind 以外は 409(bound 重複 / Req 2.5) / 422(disabled / Req 2.6) / 404(不在) → pending_bind なら `amapi.CreateEnterprise(signupURLName, cfg.AMAPIProjectID)` → 失敗時は永続化せずエラー伝達 + 行を pending_bind 維持（Req 2.4 / NFR 1.3）→ 成功時 `Repository.UpdateBound`、affected=0 は 409（Req 2.1 / 2.2 / 2.5）。成否を Record（Req 2.7）
   - `Disable`: 二段階確認テキスト（`DisableInput.Confirmation` が対象 `tenants.name` と完全一致）を検証、不一致は `CodeBusinessRule`(確認未完了 / Req 3.2)。確認 OK で `Repository.UpdateDisabled`、affected=0 は 409(二重無効化 / Req 3.4)。disabled は終端で再有効化遷移を持たない。成否を Record（Req 3.1 / 3.3 / 3.5）
   - 未定義状態遷移は前提判定で拒否し `CodeBusinessRule` を返す（NFR 1.2）。全拒否経路（不正遷移 / 確認未完了 / 競合）で構造化ログを出力（NFR 2.2）
@@ -57,8 +57,8 @@
   - _Boundary: tenant.Service_
   - _Depends: 4.1_
 
-- [ ] 6. Tenant Handler（`/api/admin/tenants` 5 endpoint + Mount）
-- [ ] 6.1 `internal/tenant/handler.go` を実装
+- [x] 6. Tenant Handler（`/api/admin/tenants` 5 endpoint + Mount）
+- [x] 6.1 `internal/tenant/handler.go` を実装
   - `Handler` struct（deps: `Service` / `logger.Logger`）+ `NewHandler` + `Mount(r chi.Router)`（`internal/auth/handler.go:52` と同方式で `Routers.Admin` 配下へ sub-route 登録 / Req 6.1）
   - 5 endpoint: `POST /tenants`（name 空 JSON → 400 / Req 1.3）/ `POST /tenants/{id}/bind` / `DELETE /tenants/{id}`（確認テキスト欠落 → Service で 422 / Req 3.2）/ `GET /tenants`（Req 4.1）/ `GET /tenants/{id}`（Req 4.2 / 4.3）
   - actor_id を `httpserver.AuthClaimsFromContext`（`middleware.go:104`）で取得し Service に渡す
@@ -68,8 +68,8 @@
   - _Boundary: tenant.Handler_
   - _Depends: 5.1_
 
-- [ ] 7. `/api/admin` 認可ガード継承の結合テスト
-- [ ] 7.1 `backend/test/integration/` に Tenant エンドポイントのガード継承テストを追加
+- [x] 7. `/api/admin` 認可ガード継承の結合テスト
+- [x] 7.1 `backend/test/integration/` に Tenant エンドポイントのガード継承テストを追加
   - 既存 `http_subrouter_mount_test.go` / admin chain 構築（`server.go` の `NewServer` + `Routers.Admin`）を流用し、`tenant.Handler.Mount` 済みルータを構築
   - 未認証（AuthClaims 不在）で `/api/admin/tenants` 系 → 401（Req 6.4）
   - tenant-console aud の AuthClaims → 403（Req 6.2）
