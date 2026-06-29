@@ -71,4 +71,18 @@
   - **tasks.md 6.1 の authorizer 齟齬**: tasks.md 6.1 の配線記述は `NewService(repo, amapiClient, auditSvc, authorizer, tenantSvc, log)` と authorizer を含むが、design.md は authz を Handler に置く（Service は持たない）。本実装は design.md に従い `NewService(repo, client, recorder, tenants, log)` とした。task 6.1 実装時に配線シグネチャの齟齬を解消する必要があるため記録に留める（tasks.md は書き換えない）。
   - **インクリメンタル interface**: 上記のとおり本 task では Service を 2 メソッドで確定。task 4.1 が同 interface に 4 メソッドを追加し最終形（design.md 6 メソッド）へ拡張する前提。
 
+### Task 4
+
+- 採用方針: `service.go` の `Service` interface に `Get` / `List` / `Delete` / `Assign` の 4 メソッドを追加し、design.md の最終形（6 メソッド）へ拡張。Repository（`Get` / `List` / `Delete` / `AssignPolicyToDevice`）は task 2 で実装済みのため **呼び出すのみ**。`service_test.go` に各メソッドの正常系・異常系・境界値テストを追記（既存テストは不変）。
+- 重要な判断:
+  - **Repository 戻り値 → Service 写像の使い分け（impl-notes task 2 残存課題に厳密準拠）**: `Get` の `ErrPolicyNotFound`（Code 付き 404）は **そのまま伝達**。`Delete` / `Assign` の `affected==0` は Service 側で `ErrPolicyNotFound`（404）へ写像。`Delete` の `ErrDeleteConflict`（409）/ `Assign` の他テナント policy 複合 FK 違反（Repository が `ErrPolicyNotFound` 404 へ写像済み）は **そのまま伝達**。これにより他テナント device（affected=0）と他テナント policy（FK 違反）の双方が存在差非露出の NotFound に倒れる（Req 3.2 / 3.3 / 4.2 / 4.3 / 4.5）。
+  - **read 系は監査なし**: `Get` / `List` は監査 `record` を呼ばない（Req 5.x は作成・更新・削除・割当のみが対象 / Req 4.4 は read のみ）。変更系（`Delete` / `Assign`）は成否いずれの経路でも監査する（既存 Create/Update と同方針 / Req 5.3）。
+  - **新規 EventType + record helper の汎用化**: `eventTypePolicyDelete` / `eventTypePolicyAssign` を追加（design Data Models の命名に一致）。既存 `record` を name 空文字時に name field を省略する形へ小改修（Create/Update は常に name 非空のため挙動不変）。割当は device_id を Detail に載せる必要があるため `recordAssign` を追加し、共通の `emitAudit` helper へ集約。監査 Detail / logDeny に raw body 機密値を載せない（Req 5.4 / NFR 3.1 / 3.2）。
+  - **authorizer 非保持・AMAPI device patch なし**: Service は authorizer を持たず actor / tenantID を引数で受ける（authz は Handler=task 5 の責務 / design Components）。`Assign` は `devices.applied_policy_id` の DB 更新までで AMAPI device patch は行わない（design 確認事項 1 推奨案 / テストでも AMAPI 非呼び出しを担保）。
+  - **row→view 写像**: `Get` 用に `rowToView`（CreatedAt / UpdatedAt / Version を row から充填）/ `List` 用に `rowToSummary`（Body を載せず軽量化 / Req 5.4）を追加。`var _ Service = (*service)(nil)` の compile-time チェックが 6 メソッドで成立。
+- 残存課題（次 task=5 Handler に影響する事項）:
+  - Handler（task 5）が `ValidationFailedError` の details 展開 / `authz.AuthorizeAndLog`（RBAC）/ `errors.WriteHTTP`（存在差非露出の HTTP 写像）/ JSON decode / path param parse / actor・tenantID の claims 取得を担う（Service は `httpserver` を import しない）。
+  - **tasks.md 6.1 の NewService 配線シグネチャ齟齬は task 3 で既出**: tasks.md 6.1 は `NewService(repo, amapiClient, auditSvc, authorizer, tenantSvc, log)` と authorizer を含むが、design.md は authz を Handler に置く（本実装の `NewService(repo, client, recorder, tenants, log)` には authorizer 無し）。task 6.1 実装時に配線シグネチャの齟齬を解消する必要がある（spec は書き換えていない）。
+  - **確認事項**: 割当 endpoint の所有を Policy / Device どちらに置くか（design 確認事項 1）は本 task では DB 更新までに限定する暫定実装。Device Service 実装時の移設可否は PR レビューで人間判断を仰ぐ（spec は書き換えていない）。
+
 STATUS: complete
