@@ -21,7 +21,7 @@
   - _Requirements: 2.3, 2.1, NFR 1.1_
   - _Boundary: policy mapper_
 
-- [ ] 2. policies CRUD + 端末割当の Repository を実装
+- [x] 2. policies CRUD + 端末割当の Repository を実装
 - [x] 2.1 `repository.go` + `repository_test.go` を実装
   - `db.BeginTxFunc(ctx, pool, ...)` + raw pgx で `Insert` / `Update` / `Get` / `List` / `Delete` / `AssignPolicyToDevice` を実装（tenant-scoped context のまま RLS に分離を委ねる / SuperAdmin 昇格しない）
   - `Get` / 割当 lookup の 0 行は `CodeNotFound`（汎用 message / Req 4.4 / 4.5）。RLS により他テナント行は SELECT 0 行（Req 4.2 / 4.4）
