@@ -72,6 +72,31 @@
   UnassignedQueue の実 DB 挙動（退避 INSERT / Filter SELECT の実値・received_at 降順）は
   task 5 で検証する。Dispatcher は cmd/worker へ未配線（構築・注入可能な形で提供するに留める）。
 
+### Task 4
+
+- **採用方針**: `internal/notification/admin_handler.go` に chi.Router 内包の `AdminHandler`
+  （`NewAdminHandler(queue UnassignedQueue, log)`）を audit.AdminHandler と同型で追加し、
+  cmd/api の (9) ブロックで `routers.Admin.Mount("/notifications/unassigned", h)` 配線した。
+- **重要な判断**:
+  - **authorizer / tenant_id query を持たない**: audit.AdminHandler は cross-tenant の
+    `tenant_id` query を authz.Authorizer で二重防御するが、本 endpoint は task 4.1 の
+    署名指定（`NewAdminHandler(queue, log)`）どおり authorizer を取らず、401/403 を
+    RequireAdminConsoleAndSuperAdmin middleware に全面委譲する（Req 4.3 / 4.4 / NFR 3.1）。
+    filter は from/to/type のみで `tenant_id` 句を持たない（design.md API Contract と一致）。
+  - **type 許可値検証**: type は `ENROLLMENT/STATUS_REPORT/COMMAND` の完全一致のみ許可し、
+    許可外（`USAGE_LOGS_UPLOADED` 等）/ 大小文字違い（`enrollment`）は 400 + `invalid type`
+    で不正項目を提示する（Req 4.5）。from/to は audit.parseRFC3339Query と同方針の
+    `invalid from` / `invalid to` 固定文言で 400（query 生値を補間しない / NFR 3.1）。
+  - **payload の二重 encode 回避**: UnassignedNotificationDTO.Payload は `json.RawMessage`
+    として jsonb 生 bytes を透過し（string への二重 encode を避ける）、空は
+    payloadOrEmptyJSON で `{}` に倒す（unassigned.go と整合）。received_at は RFC3339。
+  - **503 写像**: UnassignedQueue.List の DB 失敗（`CodeUnavailable`）は WriteHTTP の
+    EffectiveHTTPStatus で 503 になる。failure_kind=query_error を構造化 WARN に出す
+    （audit と識別軸を揃える / NFR 3.1）。
+- **残存課題**: 配線 smoke（cmd/api への Mount 経路）と退避 → 閲覧の往復は task 5 の結合
+  テスト（Req 6.4）でカバーする（本 task は handler 単体 + 配線コードのみ / mock queue で検証）。
+  Dispatcher 本体の worker 経路 wire-in は #35 scope 外で据え置き。
+
 ## 確認事項
 
 - **逆引き DB テストの配置（spec 表記との差異 / 非ブロッキング）**: tasks.md 1.1 は
