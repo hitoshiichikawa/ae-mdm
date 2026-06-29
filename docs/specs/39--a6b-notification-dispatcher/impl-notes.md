@@ -43,6 +43,35 @@
   task 5（結合テスト）が未着手。dedupe / verifier の実 DB 挙動（ON CONFLICT 冪等・既処理判定の
   実値）は task 5 で検証する。
 
+### Task 3
+
+- **採用方針**: notification パッケージに unassigned.go（UnassignedQueue）/ dispatcher.go
+  （Dispatcher）を追加。退避リポジトリは audit.buildSelectQuery / dedupe の test seam を、
+  Dispatcher は design.md フロー図（L76〜）と error 写像（ShouldAck の IsTransient 規約）を踏襲した。
+- **重要な判断**:
+  - **退避経路の dedupe 記録タイミング**: design フロー図の Unassigned 段は「INSERT + dedupe
+    記録 + ack」と読めるため、handler 成功後と同様に **退避 INSERT 成功後**に MarkProcessed する
+    実装にした（退避 INSERT に冪等制約を置かない本 Issue では、これにより再配信時の二重退避を
+    dedupe で抑止する / Req 3.3 と 1.1 の整合）。退避 INSERT 失敗・退避後の dedupe 記録失敗は
+    いずれも transient で nack 保持（Req 1.4 / NFR 2.2 = 取りこぼし防止）。
+  - **enterprise_name 空の早期退避**: Verifier が空文字で通す wire-format 前提（task 2）に従い、
+    Dispatcher は env.EnterpriseName=="" のとき逆引きを **行わず** found=false 相当で退避経路へ
+    倒す（Req 3.4 / DB 非アクセス / TenantResolver.err があっても呼ばれないことをテストで担保）。
+  - **tenant context 確立**: 解決成功時のみ `db.WithTenantContext(ctx, {TenantID})` を確立して
+    から handler を呼ぶ（Req 3.1 / NFR 2.1）。退避経路・未登録種別・既処理は tenant context を
+    確立せず、いずれのテナントリソースも更新しない（NFR 2.2）。
+  - **jsonb NOT NULL 列**: migration 0010 は `payload jsonb NOT NULL DEFAULT '{}'` / `enterprise_name
+    text NOT NULL`。空 payload は payloadOrEmptyJSON で `{}` に、空 enterprise_name は空文字を
+    そのまま bind する（audit.emptyJSONObject と同方針 / Req 3.5）。
+  - **DB 依存挙動の単体化方針**: dedupe_test.go と同様、実 DB 挙動は task 5 結合テストに委ね、
+    unassigned は pure helper（SQL 文字列契約 / buildUnassignedListQuery の WHERE 句構築 /
+    payload・transient 写像）を、Dispatcher は mock 5 種（verifier/dedupe/unassigned/resolver/
+    handler）で段階分岐 × ack/nack を表駆動検証。ack/nack 判定は errors.ShouldAck を通した。
+- **残存課題**: task 4（admin_handler / cmd/api 配線）・task 5（結合テスト）が未着手。
+  Dispatcher の subscriber への wire-in は #35 scope 外（暫定 handler 据え置き / design Risk）。
+  UnassignedQueue の実 DB 挙動（退避 INSERT / Filter SELECT の実値・received_at 降順）は
+  task 5 で検証する。Dispatcher は cmd/worker へ未配線（構築・注入可能な形で提供するに留める）。
+
 ## 確認事項
 
 - **逆引き DB テストの配置（spec 表記との差異 / 非ブロッキング）**: tasks.md 1.1 は
