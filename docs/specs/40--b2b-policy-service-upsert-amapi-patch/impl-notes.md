@@ -58,4 +58,17 @@
   - `Insert`/`Update` は `body` を `map[string]any` のまま bind（pgx が jsonb へ encode）。Service は AMAPI 反映成功後の raw body snapshot をそのまま `PolicyRow.Body` に詰めて渡す前提。
   - `version` は DB 列が integer だが `PolicyRow.Version int64` で往復。AMAPI 払い出し version をそのまま使う想定で、Repository 側で範囲チェックはしない（Service / AMAPI が値の妥当性を担保）。
 
+### Task 3
+
+- 採用方針: `service.go`（upsert ユースケース Create / Update）+ `service_test.go` を新規追加。順序は「mapper 変換 + Validate 結合の検証ゲート（早期 return）→ enterprise_name 解決 → AMAPI UpsertPolicy → 成功後 snapshot 永続化 → 監査記録」で固定し、検証失敗・AMAPI 失敗時は snapshot を確定保存しない（Req 1.4 / 2.5）。tenant.Service を手本に `logDeny` / `record` helper と nil-log フォールバックを踏襲。
+- 重要な判断:
+  - **インクリメンタル interface（設計どおり）**: `Service` interface は本 task の `Create` / `Update` の 2 メソッドのみ宣言・実装し、`var _ Service = (*service)(nil)` を 2 メソッドで成立させた。design.md の 6 メソッド版は最終形であり、Get/List/Delete/Assign は task 4.1 が同 interface へ追加する。これにより policy package が本 task 単独で build / test 可能。
+  - **検証エラー全件搬送（`ValidationFailedError`）**: `errors.Error` に details が無いため、policy 固有の `ValidationFailedError{Errors []ValidationError}` を service.go に定義。mapper の変換不能 `[]ValidationError` と `Validate` の `ValidationResult.Errors` を結合して全件保持（Req 2.4）。top-level Code 規則は「KindInvalidField が 1 件でもあれば 400 / 全件 KindBusinessRule なら 422」とし、`Unwrap` で top-level Code 付き `*errors.Error` を公開して `errors.As` / `WriteHTTP` が HTTP status を解決できるようにした（Handler=task 5 が型 assertion で details を展開する想定）。Message に raw body 生値は載せない（Req 5.4）。
+  - **consumer-defines-interface の最小 port**: Service deps は `policy.Repository` / `upsertClient`（UpsertPolicy 1 本）/ `eventRecorder`（Record 1 本 / audit.Service が満たす）/ `enterpriseResolver`（EnterpriseNameForTenant 1 本 / tenant.Service が満たす）/ `logger.Logger` のみ。**authorizer は Service に持たせない**（authz は Handler=task 5 の責務 / design Components）。
+  - **AMAPI policyName**: Create は `uuid.New()` を採番し短い policyId（`id.String()`）を `UpsertPolicy` へ渡し、`PolicyRow.AMAPIPolicyName` には full path（`enterpriseName + "/policies/" + id`）を保存（enterpriseName を二重連結しない）。Update は既存行を `Repository.Get` で取得後、既存 `AMAPIPolicyName` の末尾 policyId を再利用して反映する。
+- 残存課題 / 確認事項（PR レビューで人間判断を仰ぐ。spec は書き換えていない）:
+  - **version の供給元が未明示**: `amapi.Client.UpsertPolicy` は version を返さず、tasks.md 3.1 の順序にも `GetPolicy` は含まれない。MVP の合理的既定として **Create=初期値 0 / Update=既存行 version 据え置き** を採った。AMAPI 払い出し version の同期が必要なら別 task（Get/List 実装時の `GetPolicy` 反映等）で扱うべきで、PR レビューで供給元方針を確認されたい。
+  - **tasks.md 6.1 の authorizer 齟齬**: tasks.md 6.1 の配線記述は `NewService(repo, amapiClient, auditSvc, authorizer, tenantSvc, log)` と authorizer を含むが、design.md は authz を Handler に置く（Service は持たない）。本実装は design.md に従い `NewService(repo, client, recorder, tenants, log)` とした。task 6.1 実装時に配線シグネチャの齟齬を解消する必要があるため記録に留める（tasks.md は書き換えない）。
+  - **インクリメンタル interface**: 上記のとおり本 task では Service を 2 メソッドで確定。task 4.1 が同 interface に 4 メソッドを追加し最終形（design.md 6 メソッド）へ拡張する前提。
+
 STATUS: complete
