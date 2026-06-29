@@ -33,9 +33,11 @@
     （Code=CodeBusinessRule）で分類、enterprise_name 不明は非エラーで空文字通過（退避判定は
     Dispatcher / Req 3.4）。
   - **dedupe の test seam**: DB 依存の実挙動は task 5 結合テストに委ね、unit では pure helper
-    3 つ（`wrapDedupePersistErr` の transient 写像 / `mapIsProcessedScan` の bool 写像 /
-    `markProcessedSQL`・`isProcessedSQL` の文字列契約 assert）を fake error で検証した
+    （`wrapDedupePersistErr` の transient 写像 / `mapIsProcessedScan` の bool 写像 /
+    `claimSQL`・`releaseSQL`・`isProcessedSQL` の文字列契約 assert）を fake error で検証した
     （audit の SQL 文字列 assert / tenant の fake repo 手法と同型）。
+    （注: 当初は `markProcessedSQL` ベースの記録だったが、PR iteration round 1 で並行直列化を
+    満たすため `claimSQL`/`releaseSQL` ベースの claim-first へ移行済み。本節の SQL 名はそれを反映。）
   - **IsTransient リテラル構築**: `errors.Wrap` は IsTransient を立てないため、task 1 の
     `TenantIDByEnterpriseName` 同様 `&errors.Error{Code:CodeUnavailable, IsTransient:true}` を
     リテラル構築した。
@@ -140,9 +142,9 @@
   （`enterprises/{id}/...`）の `enterprises/{id}` 接頭辞** を読む解釈で実装した。task 3
   （Dispatcher）/ task 5（結合テスト）はこの Envelope 契約を前提に組むこと。実 AMAPI の
   attribute/payload 形式が異なる場合は本前提の見直しが必要（spec 本文は書き換えていない）。
-- **stray tool 残骸（非ブロッキング）**: 本ファイル末尾に task 1 の write 由来とみられる
-  `</content>` / `</invoke>` 行が `## 確認事項` セクション外に残っているが、本 task では
-  触らず放置した（malformed tool 残骸であり確認事項本文ではない）。
+- **stray tool 残骸（解消済み）**: 当初 task 1 の write 由来とみられる `</content>` /
+  `</invoke>` 行が本ファイル末尾に残っていたが、後続編集で除去済み（現ファイル末尾には
+  存在しない）。本項は履歴として残す。
 
 ## PR Iteration round 1（PR #59 / round-2 review 対応 / #39）
 
@@ -189,5 +191,69 @@ PR 返信で提起）。
   本修正は Req 2.4（未対応/未登録は取りこぼさずログ + 完了扱い）を退避 Req 3.2 より優先する読みと
   types.go の設計意図に合わせ、判定を Resolve の前へ移した。両 Req が同時成立（未登録 × tenant 未解決）
   する場合の優先順位がフロー図で未確定のため、設計 PR で図の更新を推奨する（impl PR では図を書き換えない）。
+
+## PR Iteration round 2（PR #59 / codex review sha `d23cfe9` 対応 / #39）
+
+codex の静的レビュー（VERDICT: needs-iteration）への対応。`requirements.md` / `design.md` /
+`tasks.md` は impl PR のため書き換えていない（矛盾は PR 返信と本セクション末尾「確認事項（PR
+iteration round 2）」で提起）。
+
+- **[medium] dispatcher.go handler 失敗時の release/ack 不整合 → 一時的失敗のみ release**:
+  `dispatchToHandler` は handler error 時に **一律** `releaseClaim` していたため、恒常的
+  （non-transient）失敗で `ShouldAck` が ack に倒すケースでも claim が消え、後続 duplicate が
+  再 dispatch され得た。release を `errors.IsTransient(err)` が true のときだけ実行するよう修正
+  （`dispatcher.go`）。これで dedupe には「成功した処理」または「恒常的に諦めた処理」だけが残る。
+  - 写像の一元化: ack/nack 判定（`ShouldAck`）と「一時的失敗のときだけ副作用を取り消す」判定が
+    drift しないよう、純粋述語 `errors.IsTransient(err error) bool` を `internal/errors/worker_mapping.go`
+    に追加し、`ShouldAck` の nack 判定も同述語へ委譲した（`IsTransient(err) == !ShouldAck(err, nil)`
+    を `TestIsTransient_MatchesShouldAck` で不変条件として固定）。
+  - 回帰テスト: 単体 `dispatcher_test.go` に「恒常的 handler 失敗のとき claim を残して ack」ケースを
+    追加（`wantReleaseHit: 0` / `wantAck: true`）。既存「transient handler 失敗 → release → nack」
+    ケースは挙動不変。
+- **[medium] transient 再処理保持の結合検証が fake の Release 回数依存 → 実 DB で固定**:
+  `backend/test/integration/notification_dispatch_test.go` に
+  `TestNotificationDispatch_TransientHandlerFailure_Reprocessable` を追加。最初の 1 回だけ transient
+  失敗する `retryableHandler` を実 `NewDedupe` に結線し、(1) 1 回目失敗後に実 `notification_dedupe`
+  の `IsProcessed=false`（claim が実 DELETE で release 済み）、(2) 同一 MessageID 再配信で handler が
+  2 回目に呼ばれ ack 完了、(3) 成功後は `IsProcessed=true`（claim 保持）を検証する（Req 5.1 / 5.3 /
+  5.2 の中核分岐を fake 呼び出し回数ではなく実 DB 挙動で固定）。
+- **[low] impl-notes / dedupe テストの `markProcessedSQL` 表記の陳腐化 → 修正**:
+  Task 2 ノートの SQL 名表記を現行の `claimSQL`/`releaseSQL`/`isProcessedSQL` に更新（claim-first
+  移行を反映）。`dedupe_test.go` は既に `TestClaimSQL_*` / `TestReleaseSQL_*` で検証済み。
+
+### deferred / 確認事項（PR iteration round 2）
+
+- **[high] claim-first の crash/release 窓（Req 5.3）は既存スキーマでは塞げない構造的制約**:
+  codex は「claim 永続化後・handler 成功前の worker 停止、または `Release` 自体の DB 失敗で orphan
+  claim が残り、再配信が `IsProcessed` で既処理 ack され通知喪失しうる」窓を本 PR 内で塞ぐよう求めた。
+  しかしこの窓を根治するには `notification_dedupe` に in-progress / lease を表す **状態列**が必要で、
+  新規マイグレーションは本 Issue の **Out of Scope**（requirements「Out of Scope」/ design L46）。
+  - claim-first を捨てて record-after-success（旧 `MarkProcessed`）へ戻すと、並行同一 MessageID の
+    二重 dispatch を許し **Req 1.3 / 6.1 を破る**（結合テスト
+    `TestNotificationDispatch_ConcurrentDuplicateMessageID_DispatchedOnce` が回帰検出する）。
+    Req 1.3（並行直列化）と Req 5.3（crash 無喪失）は単一状態スキーマでは同時には満たせない。
+  - したがって本 PR では claim-first を維持し、当該経路は `releaseClaim` の **ERROR ログ**で
+    事後追跡可能にするに留める。根治は **`status` 列追加の follow-up Issue**（reclaim-after-timeout）
+    を起票して対応することを推奨（round 1 から継続の確認事項）。
+- **[low] `tasks.md` の陳腐化 / 不足（impl PR のため未編集）**:
+  - L21 系: 完了済み task の `Dedupe` IF / 正常経路が旧 `MarkProcessed` 前提のままで、実装の
+    `Claim`/`Release` と食い違う。
+  - L61: task 5.1 の `_Requirements:_` に bound テナント解決時の tenant context 確立（Req 3.1）が
+    未記載。
+  - L73: stage-a-verify が `./internal/notification/... ./internal/tenant/...` のみで、Req 6.1〜6.4 を
+    担う `backend/test/integration` をコンパイル/実行対象に含めていない。結合テストは
+    `go test ./test/integration/... -run NotificationDispatch`（要 `INTEGRATION_TEST_DATABASE_URL` /
+    `INTEGRATION_TEST_MIGRATE_URL`）で実行する。
+  - いずれも `tasks.md` の編集が必要だが impl PR では spec を書き換えない（CLAUDE.md 規約）。
+    **設計 PR iteration または follow-up での `tasks.md` 更新**を推奨する。
+- **[low] `review-notes.md` の `MarkProcessed`/`markProcessedSQL` 参照は round 1 時点の記録**:
+  review-notes.md は round 1 レビュー（HEAD `88d032d`）の記録で、その時点の実装は `MarkProcessed`
+  ベースだった。後続の claim-first 移行（`2e321e5` / `d23cfe9`）でコードが変わったため現 HEAD と
+  乖離している。Reviewer の判定記録の書き換えは Developer の所掌外のため本 PR では変更せず、
+  次回 Reviewer ゲートで現 HEAD に対する review-notes が再生成される前提とする（PR 返信で明示）。
+
+検証: `go build ./...` / `go vet ./internal/notification/... ./internal/errors/... ./test/integration/...`
+green。単体 `internal/notification` / `internal/errors`（`-race`）green。結合テストは本環境に
+PostgreSQL が無いため `requireDBURLs` で skip（build / vet は pass）。
 
 STATUS: complete

@@ -297,6 +297,19 @@ func TestDispatcherHandle(t *testing.T) {
 			wantEnqueueHit: 0,
 		},
 		{
+			name:           "恒常的 handler 失敗のとき claim を残して ack 完了扱いにする（後続 duplicate の再 dispatch を防ぐ / 5.1 の対偶）",
+			verifier:       &fakeVerifier{env: validEnvelope(Enrollment)},
+			dedupe:         &fakeDedupe{},
+			unassigned:     &fakeUnassigned{},
+			resolver:       &fakeResolver{id: resolvedTenantID, found: true},
+			handler:        &fakeHandler{err: permanentErr()},
+			wantAck:        true, // non-transient → ShouldAck=ack（恒常的失敗は再配信しても結果が変わらない）
+			wantHandlerHit: 1,
+			wantClaimHit:   1,
+			wantReleaseHit: 0, // 恒常的失敗は claim を残す（ack 済み = 後続 duplicate を既処理判定で抑止）
+			wantEnqueueHit: 0,
+		},
+		{
 			name:           "handler 失敗かつ release 失敗でも元の error で nack 保持する（claim orphan は ERROR ログ）",
 			verifier:       &fakeVerifier{env: validEnvelope(Enrollment)},
 			dedupe:         &fakeDedupe{releaseErr: transientErr()},

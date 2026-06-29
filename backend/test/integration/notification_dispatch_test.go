@@ -15,6 +15,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/hitoshiichikawa/ae-mdm/internal/config"
+	pkgerrors "github.com/hitoshiichikawa/ae-mdm/internal/errors"
 	"github.com/hitoshiichikawa/ae-mdm/internal/notification"
 	platformdb "github.com/hitoshiichikawa/ae-mdm/internal/platform/db"
 	"github.com/hitoshiichikawa/ae-mdm/internal/platform/pubsub"
@@ -81,11 +82,41 @@ func (h *countingHandler) tenantContext() (bool, uuid.UUID) {
 	return h.tenantCtxSeen, h.gotTenantID
 }
 
+// retryableHandler は最初の failUntil 回まで一時的（IsTransient=true）error を返し、それ以降は成功する
+// mock handler。transient handler 失敗 → 実 Dedupe.Release → 再配信で再処理可能（Req 5.1 / 5.3）を、
+// fake の呼び出し回数ではなく実 notification_dedupe で固定するために使う（countingHandler は常に成功）。
+type retryableHandler struct {
+	mu        sync.Mutex
+	hits      int
+	failUntil int
+}
+
+// Handle は NotificationHandler を満たす。hits <= failUntil の間は transient error を返す。
+func (h *retryableHandler) Handle(_ context.Context, _ notification.Envelope) error {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.hits++
+	if h.hits <= h.failUntil {
+		return &pkgerrors.Error{Code: pkgerrors.CodeUnavailable, Message: "transient handler failure", IsTransient: true}
+	}
+	return nil
+}
+
+// count は呼び出し回数をスレッドセーフに返す。
+func (h *retryableHandler) count() int {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.hits
+}
+
 // dispatchFixture は結合テストで使う実依存（dedupe / unassigned / tenant Service）と mock handler を
 // 束ねた構築物。各テストの Arrange を共通化する。
 type dispatchFixture struct {
 	ctx        context.Context
 	dispatcher *notification.Dispatcher
+	verifier   notification.Verifier        // 別 handler 構成の Dispatcher を組み直す用
+	dedupe     notification.Dedupe          // 同上 + 実 DB の claim/release 検証用
+	resolver   notification.TenantResolver  // 同上（実 tenant 逆引き Service）
 	unassigned notification.UnassignedQueue
 	handlers   map[notification.NotificationType]*countingHandler
 	tenantRepo tenant.Repository
@@ -132,6 +163,9 @@ func setupDispatch(t *testing.T) dispatchFixture {
 	return dispatchFixture{
 		ctx:        ctx,
 		dispatcher: dispatcher,
+		verifier:   verifier,
+		dedupe:     dedupe,
+		resolver:   tenantSvc,
 		unassigned: unassigned,
 		handlers:   handlers,
 		tenantRepo: tenantRepo,
@@ -249,6 +283,59 @@ func TestNotificationDispatch_ConcurrentDuplicateMessageID_DispatchedOnce(t *tes
 	// 唯一 dispatch された経路で bound テナントの tenant context が確立されていること（Req 3.1）。
 	if seen, id := f.handlers[notification.Enrollment].tenantContext(); !seen || id != tenantID {
 		t.Errorf("handler 到達時の tenant context = (seen=%v, id=%v); want (true, %v)（Req 3.1）", seen, id, tenantID)
+	}
+}
+
+// TestNotificationDispatch_TransientHandlerFailure_Reprocessable は一時的 handler 失敗時に claim が
+// **実 DB から release** され、同一 MessageID の再配信で再処理されること（Req 5.1 / 5.3 の中核分岐）を
+// 実 notification_dedupe で検証する。fake の Release 呼び出し回数ではなく、実 DELETE 後に
+// IsProcessed=false へ戻り 2 回目の Handle で handler が再度呼ばれること（喪失せず再処理）を固定する。
+func TestNotificationDispatch_TransientHandlerFailure_Reprocessable(t *testing.T) {
+	// Arrange: bound テナントと、最初の 1 回だけ transient 失敗する handler を結線した Dispatcher を組む。
+	f := setupDispatch(t)
+	defer f.cleanup()
+	f.seedBoundTenant(t, boundEnterpriseName)
+	handler := &retryableHandler{failUntil: 1}
+	registry := map[notification.NotificationType]notification.NotificationHandler{
+		notification.Enrollment: handler,
+	}
+	dispatcher := notification.NewDispatcher(f.verifier, f.dedupe, f.unassigned, f.resolver, registry, nil)
+	msg := newMessage("msg-transient-retry-001", notification.Enrollment, boundEnterpriseName)
+
+	// Act 1: 1 回目は handler が transient 失敗 → nack 保持（error 返却 / Req 5.1）。
+	err1 := dispatcher.Handle(f.ctx, msg)
+	if err1 == nil {
+		t.Fatalf("Handle(1 回目): nil; want 一時的失敗の error（nack 保持 / Req 5.1）")
+	}
+	if pkgerrors.ShouldAck(err1, nil) {
+		t.Fatalf("Handle(1 回目) は nack（ShouldAck=false）であるべき: err=%v", err1)
+	}
+
+	// Assert: claim が実 DB から release され、既処理判定が false に戻る（再処理可能 / Req 5.3）。
+	processed, err := f.dedupe.IsProcessed(f.saCtx, msg.ID)
+	if err != nil {
+		t.Fatalf("IsProcessed(1 回目後): %v", err)
+	}
+	if processed {
+		t.Fatalf("transient 失敗後に dedupe 記録が残存; want 削除済み（喪失せず再処理可能 / Req 5.1 / 5.3）")
+	}
+
+	// Act 2: 同一 MessageID を再配信。handler は今度は成功する。
+	if err := dispatcher.Handle(f.ctx, msg); err != nil {
+		t.Fatalf("Handle(2 回目): %v; want ack 完了（再処理成功 / Req 5.3）", err)
+	}
+
+	// Assert: handler は 2 回呼ばれた（= 1 回目の失敗が喪失せず再処理された / Req 5.3）。
+	if got := handler.count(); got != 2 {
+		t.Errorf("handler 呼び出し回数 = %d; want 2（transient 失敗 → 再配信で再処理 / Req 5.1 / 5.3）", got)
+	}
+	// 再処理成功後は claim が残り既処理判定が true（成功で dedupe 記録される / Req 5.2）。
+	processed, err = f.dedupe.IsProcessed(f.saCtx, msg.ID)
+	if err != nil {
+		t.Fatalf("IsProcessed(2 回目後): %v", err)
+	}
+	if !processed {
+		t.Errorf("再処理成功後に dedupe 記録が無い; want 記録済み（成功は claim を残す / Req 5.2）")
 	}
 }
 

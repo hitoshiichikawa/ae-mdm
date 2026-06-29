@@ -5,6 +5,7 @@ import (
 
 	"github.com/google/uuid"
 
+	pkgerrors "github.com/hitoshiichikawa/ae-mdm/internal/errors"
 	"github.com/hitoshiichikawa/ae-mdm/internal/logger"
 	"github.com/hitoshiichikawa/ae-mdm/internal/platform/db"
 	"github.com/hitoshiichikawa/ae-mdm/internal/platform/pubsub"
@@ -178,9 +179,11 @@ func (d *Dispatcher) enqueueUnassigned(ctx context.Context, env Envelope) error 
 //   - claim を handler 実行の **前** に取る: INSERT ON CONFLICT で並行する同一 MessageID を直列化し、
 //     勝者（claimed=true）のみ handler を呼ぶ（Req 1.1 / 1.3 = 二重実行を防ぐ）。
 //   - claim の DB 失敗 → transient nack（Req 1.4）。claimed=false（並行重複）→ handler を呼ばず ack。
-//   - handler 失敗: claim を release してから error をそのまま返し ShouldAck に ack/nack を委ねる
-//     （transient → nack で再配信時に再処理 / Req 5.1 / 5.3）。release により「成功した処理のみ
-//     dedupe 記録を残す」invariant を維持する。
+//   - handler 失敗: error をそのまま返し ShouldAck に ack/nack を委ねる。claim の release は
+//     **一時的失敗（errors.IsTransient=true）のときだけ**行い、再配信時の再処理を許す（Req 5.1 /
+//     5.3）。恒常的失敗（non-transient = ShouldAck が ack に倒す）は claim を残し、後続 duplicate を
+//     既処理判定で抑止する（ack 済みなのに claim を消して再 dispatch する不整合を防ぐ）。これにより
+//     dedupe には「成功した処理」または「恒常的に諦めた処理」だけが残る。
 //   - 成功: claim をそのまま残して ack（Req 1.1 / 5.2）。
 //
 // 残存リスク（既知 / status 列導入の follow-up Issue 相当）: claim を永続化した後・handler 成功
@@ -212,9 +215,13 @@ func (d *Dispatcher) dispatchToHandler(ctx context.Context, env Envelope, tenant
 	// アクセスは本 context の tenant_id に閉じる。
 	handlerCtx := db.WithTenantContext(ctx, db.TenantContext{TenantID: tenantID})
 	if err := handler.Handle(handlerCtx, env); err != nil {
-		// handler 失敗は claim を取り消す（transient は再配信で再処理 / Req 5.1 / 5.3）。
-		// これにより dedupe には「成功した処理」だけが残る。
-		d.releaseClaim(ctx, env.MessageID)
+		// 一時的失敗のときだけ claim を取り消す（再配信で再処理させる / Req 5.1 / 5.3）。恒常的
+		// （non-transient）失敗は ShouldAck が ack に倒すため claim を残し、後続 duplicate を既処理
+		// 判定で抑止する（ack 済みなのに claim を消して再 dispatch する不整合を防ぐ）。release 条件は
+		// errors.IsTransient へ一元化し、worker 最外層の ack/nack 写像と claim 寿命を常に整合させる。
+		if pkgerrors.IsTransient(err) {
+			d.releaseClaim(ctx, env.MessageID)
+		}
 		d.log.Warn("notification: handler failed",
 			logger.MessageID(env.MessageID),
 			"notification_type", string(env.NotificationType))
