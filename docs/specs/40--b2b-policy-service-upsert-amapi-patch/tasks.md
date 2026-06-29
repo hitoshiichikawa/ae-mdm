@@ -45,7 +45,7 @@
   - _Depends: 1.2, 2.1_
 
 - [ ] 4. ポリシー参照・削除・端末割当ユースケースを Service に実装
-- [ ] 4.1 `service.go` の `Get` / `List` / `Delete` / `Assign` を実装 + `service_test.go` 追記
+- [x] 4.1 `service.go` の `Get` / `List` / `Delete` / `Assign` を実装 + `service_test.go` 追記
   - `Get` / `List` は tenant-scoped Repository へ委譲し自テナント行のみ返す。不在は NotFound（Req 4.4 / 4.5）
   - `Delete` は Repository.Delete 委譲。割当済み端末ありの Conflict（409）を伝達し、削除イベントを監査（Req 5.3）。確認事項 3 の推奨案（409 拒否）に従う
   - `Assign` は Repository.AssignPolicyToDevice 委譲。自テナント不在 policy（複合 FK 違反）/ device（affected=0）を NotFound に写像（Req 3.1 / 3.2 / 3.3 / 4.2 / 4.3）。割当は DB 更新までで AMAPI device patch は行わない（design 確認事項 1 推奨案）
