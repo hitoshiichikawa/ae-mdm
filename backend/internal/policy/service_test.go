@@ -640,6 +640,46 @@ func TestService_Create_Validation(t *testing.T) {
 		}
 	})
 
+	t.Run("passwordPolicies の 2 件目が不正のとき検証ゲートで拒否し AMAPI も Repository も呼ばない（Req 2.5 / PR #60 round5）", func(t *testing.T) {
+		// Arrange: 先頭要素は妥当だが 2 件目の passwordMinimumLength が範囲外（17）。
+		// raw body 全体が BuildPolicyBody 経由で AMAPI へ pass-through されるため、追加要素の
+		// 不正値が AMAPI へ到達しないよう検証ゲートで弾く必要がある。
+		h := newServiceHarness()
+		actor, tenantID := uuid.New(), uuid.New()
+		body := map[string]any{
+			keyEncryptionPolicy: "ENABLED_WITH_PASSWORD",
+			keyPasswordPolicies: []any{
+				map[string]any{keyPwdMinimumLength: float64(8)},  // 妥当（先頭）
+				map[string]any{keyPwdMinimumLength: float64(17)}, // 範囲外（追加要素）
+			},
+		}
+
+		// Act
+		_, err := h.svc.Create(context.Background(), actor, tenantID, PolicyRequest{Name: testPolicyName, Body: body})
+
+		// Assert: invalid_field で 400、追加要素の field が配列添字付きで提示される。
+		if got := codeOf(t, err); got != pkgerrors.CodeInvalidRequest {
+			t.Fatalf("expected CodeInvalidRequest (400) for invalid extra password element, got %s", got)
+		}
+		var vferr *ValidationFailedError
+		if !stderrors.As(err, &vferr) {
+			t.Fatalf("expected *ValidationFailedError, got %T", err)
+		}
+		foundExtra := false
+		for _, e := range vferr.Errors {
+			if e.Domain == DomainPassword && e.Field == "passwordPolicies[1].passwordMinimumLength" {
+				foundExtra = true
+			}
+		}
+		if !foundExtra {
+			t.Errorf("expected an invalid_field for passwordPolicies[1].passwordMinimumLength, got %+v", vferr.Errors)
+		}
+		// AMAPI / Repository は呼ばれない（不正値が AMAPI へ到達しない / Req 2.5）。
+		if h.amapi.callCount() != 0 || h.repo.insertCount() != 0 {
+			t.Errorf("expected no AMAPI / Repository calls, got amapi=%d insert=%d", h.amapi.callCount(), h.repo.insertCount())
+		}
+	})
+
 	t.Run("複数領域の不正が混在するとき全件提示し invalid_field 混在で top-level Code は 400", func(t *testing.T) {
 		// Arrange: 上限超過(BusinessRule) + encryptionPolicy 不正(invalid_field) + 型不整合(invalid_field) を混在。
 		h := newServiceHarness()

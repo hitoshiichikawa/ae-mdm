@@ -95,8 +95,17 @@ func mapApplications(raw map[string]any, in *PolicyInput, errs *[]ValidationErro
 	}
 }
 
-// mapPasswordAndSecurity は encryptionPolicy（top-level）と passwordPolicies[0] の
-// passwordMinimumLength / passwordQuality を Password / Security 領域へ写像する。
+// mapPasswordAndSecurity は encryptionPolicy（top-level）と passwordPolicies 配列を
+// Password / Security 領域へ写像・検証する。
+//
+// passwordPolicies は AMAPI では複数要素（scope 別の PasswordRequirements）を取り得る配列で、
+// BuildPolicyBody が raw body 全体を AMAPI へ pass-through するため（同ファイル:BuildPolicyBody）、
+// 全要素を検証して不正値の AMAPI 到達を防ぐ（Req 2.1 / 2.3 / 2.5 / PR #60 round5）。
+//   - 先頭要素（index 0）は PolicyInput.Password / Security.PasswordQuality へ写像し、範囲・enum
+//     検証を Validator（checkPasswordLength / checkSecurity）の正規経路に委ねる。
+//   - 2 件目以降（index 1..）は PolicyInput が単一値しか保持できないため、mapper 内で型・範囲・
+//     enum を検証する。許容範囲・enum 集合は Validator の定数（MinPasswordLength /
+//     MaxPasswordLength / allowedPasswordQualities）を共有し、閾値の真実源を 1 箇所に保つ。
 func mapPasswordAndSecurity(raw map[string]any, in *PolicyInput, errs *[]ValidationError) {
 	// encryptionPolicy（top-level 文字列）。存在すれば Security を初期化する。
 	if rawEnc, ok := raw[keyEncryptionPolicy]; ok {
@@ -108,7 +117,6 @@ func mapPasswordAndSecurity(raw map[string]any, in *PolicyInput, errs *[]Validat
 		}
 	}
 
-	// passwordPolicies は配列。MVP では先頭要素から minimumLength / passwordQuality を抽出する。
 	rawPwd, ok := raw[keyPasswordPolicies]
 	if !ok {
 		return
@@ -118,16 +126,26 @@ func mapPasswordAndSecurity(raw map[string]any, in *PolicyInput, errs *[]Validat
 		*errs = append(*errs, invalidField(DomainPassword, keyPasswordPolicies, "passwordPolicies は配列である必要があります"))
 		return
 	}
-	if len(policies) == 0 {
-		return
-	}
-	first, ok := policies[0].(map[string]any)
-	if !ok {
-		*errs = append(*errs, invalidField(DomainPassword, keyPasswordPolicies, "passwordPolicies の要素はオブジェクトである必要があります"))
-		return
-	}
 
-	if rawLen, ok := first[keyPwdMinimumLength]; ok {
+	for i, rawElem := range policies {
+		elem, ok := rawElem.(map[string]any)
+		if !ok {
+			*errs = append(*errs, invalidField(DomainPassword, passwordElemField(i, ""), "passwordPolicies の要素はオブジェクトである必要があります"))
+			continue
+		}
+		if i == 0 {
+			mapFirstPasswordPolicy(elem, in, errs)
+			continue
+		}
+		validateExtraPasswordPolicy(i, elem, errs)
+	}
+}
+
+// mapFirstPasswordPolicy は passwordPolicies[0] の minimumLength / passwordQuality を PolicyInput へ
+// 写像する。型不整合は invalid field として収集し、範囲・enum 検証は Validator が PolicyInput 経由で
+// 担う（mapper と Validator の二重検証・二重報告を避けるため先頭要素のみ写像する）。
+func mapFirstPasswordPolicy(elem map[string]any, in *PolicyInput, errs *[]ValidationError) {
+	if rawLen, ok := elem[keyPwdMinimumLength]; ok {
 		n, ok := toInt(rawLen)
 		if !ok {
 			*errs = append(*errs, invalidField(DomainPassword, "MinimumLength", "passwordMinimumLength は整数である必要があります"))
@@ -135,12 +153,38 @@ func mapPasswordAndSecurity(raw map[string]any, in *PolicyInput, errs *[]Validat
 			in.Password = &PasswordPolicy{MinimumLength: n}
 		}
 	}
-	if rawQuality, ok := first[keyPasswordQuality]; ok {
+	if rawQuality, ok := elem[keyPasswordQuality]; ok {
 		quality, ok := rawQuality.(string)
 		if !ok {
 			*errs = append(*errs, invalidField(DomainSecurity, "PasswordQuality", "passwordQuality は文字列である必要があります"))
 		} else {
 			ensureSecurity(in).PasswordQuality = quality
+		}
+	}
+}
+
+// validateExtraPasswordPolicy は passwordPolicies[1..] の追加要素の型・範囲・enum を検証する
+// （Req 2.3 / 2.5 / PR #60 round5）。PolicyInput へは写像せず（Validator は単一値しか検証しない）、
+// raw body 全体が AMAPI へ pass-through される前に不正値を拒否する。範囲・enum 判定は Validator の
+// checkPasswordLength / checkSecurity と同一閾値（MinPasswordLength / MaxPasswordLength /
+// allowedPasswordQualities）で行い、不正要素を配列添字付き field で機械可読に提示する。
+func validateExtraPasswordPolicy(index int, elem map[string]any, errs *[]ValidationError) {
+	if rawLen, ok := elem[keyPwdMinimumLength]; ok {
+		n, ok := toInt(rawLen)
+		if !ok {
+			*errs = append(*errs, invalidField(DomainPassword, passwordElemField(index, keyPwdMinimumLength), "passwordMinimumLength は整数である必要があります"))
+		} else if n < MinPasswordLength || n > MaxPasswordLength {
+			*errs = append(*errs, invalidField(DomainPassword, passwordElemField(index, keyPwdMinimumLength), "パスワード最小桁数が許容範囲（0〜16）外です"))
+		}
+	}
+	if rawQuality, ok := elem[keyPasswordQuality]; ok {
+		quality, ok := rawQuality.(string)
+		if !ok {
+			*errs = append(*errs, invalidField(DomainSecurity, passwordElemField(index, keyPasswordQuality), "passwordQuality は文字列である必要があります"))
+		} else if quality != "" {
+			if _, allowed := allowedPasswordQualities[quality]; !allowed {
+				*errs = append(*errs, invalidField(DomainSecurity, passwordElemField(index, keyPasswordQuality), "PasswordQuality が許容値集合外です"))
+			}
 		}
 	}
 }
@@ -228,6 +272,17 @@ func invalidField(domain Domain, field, message string) ValidationError {
 // （machine-readable に当該要素を特定できるようにする / validator.go の kioskField と整合）。
 func kioskFieldAt(index int) string {
 	return "applications[" + itoa(index) + "]"
+}
+
+// passwordElemField は passwordPolicies 配列要素のフィールド名を添字（+任意のサブキー）付きで返す。
+// 例: passwordPolicies[1] / passwordPolicies[1].passwordMinimumLength。どの要素のどの項目が不正かを
+// 機械可読に特定できるようにする（kioskFieldAt と同方針 / Req 2.4）。
+func passwordElemField(index int, subKey string) string {
+	base := keyPasswordPolicies + "[" + itoa(index) + "]"
+	if subKey == "" {
+		return base
+	}
+	return base + "." + subKey
 }
 
 // itoa は小さな非負添字を文字列化する軽量 helper（strconv 依存を避ける範囲の用途）。

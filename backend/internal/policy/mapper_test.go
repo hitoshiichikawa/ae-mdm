@@ -169,6 +169,141 @@ func TestRawToPolicyInput_TypeMismatch(t *testing.T) {
 	}
 }
 
+// --- PR #60 round5: passwordPolicies 全要素検証（Req 2.3 / 2.5） ---
+
+// TestRawToPolicyInput_MultiElementPasswordPolicies は passwordPolicies の 2 件目以降の要素も
+// 型・範囲・enum 検証され、不正値が（BuildPolicyBody 経由で）AMAPI へ到達する前に拒否される
+// ことを検証する（異常系 / Req 2.3 / 2.5 / PR #60 round5）。
+func TestRawToPolicyInput_MultiElementPasswordPolicies(t *testing.T) {
+	tests := []struct {
+		name       string
+		raw        map[string]any
+		wantDomain Domain
+		wantField  string
+	}{
+		{
+			name: "2 件目の passwordMinimumLength が範囲外のとき invalid field（配列添字付き）",
+			raw: map[string]any{
+				"passwordPolicies": []any{
+					map[string]any{"passwordMinimumLength": float64(8)},  // 妥当（先頭）
+					map[string]any{"passwordMinimumLength": float64(17)}, // 範囲外（0〜16 超過）
+				},
+			},
+			wantDomain: DomainPassword,
+			wantField:  "passwordPolicies[1].passwordMinimumLength",
+		},
+		{
+			name: "2 件目の passwordMinimumLength が整数でないとき invalid field（配列添字付き）",
+			raw: map[string]any{
+				"passwordPolicies": []any{
+					map[string]any{"passwordMinimumLength": float64(8)},
+					map[string]any{"passwordMinimumLength": "eight"}, // 型不整合
+				},
+			},
+			wantDomain: DomainPassword,
+			wantField:  "passwordPolicies[1].passwordMinimumLength",
+		},
+		{
+			name: "2 件目の passwordQuality が enum 許容値外のとき invalid field（配列添字付き）",
+			raw: map[string]any{
+				"passwordPolicies": []any{
+					map[string]any{"passwordQuality": "NUMERIC"},
+					map[string]any{"passwordQuality": "BOGUS_QUALITY"}, // enum 外
+				},
+			},
+			wantDomain: DomainSecurity,
+			wantField:  "passwordPolicies[1].passwordQuality",
+		},
+		{
+			name: "2 件目の passwordQuality が文字列でないとき invalid field（配列添字付き）",
+			raw: map[string]any{
+				"passwordPolicies": []any{
+					map[string]any{"passwordQuality": "NUMERIC"},
+					map[string]any{"passwordQuality": float64(1)}, // 型不整合
+				},
+			},
+			wantDomain: DomainSecurity,
+			wantField:  "passwordPolicies[1].passwordQuality",
+		},
+		{
+			name: "2 件目が配列要素としてオブジェクトでないとき invalid field（配列添字付き）",
+			raw: map[string]any{
+				"passwordPolicies": []any{
+					map[string]any{"passwordMinimumLength": float64(8)},
+					"not-an-object", // 要素がオブジェクトでない
+				},
+			},
+			wantDomain: DomainPassword,
+			wantField:  "passwordPolicies[1]",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Act
+			_, errs := RawToPolicyInput(tt.raw)
+
+			// Assert
+			e, found := findError(errs, tt.wantDomain, tt.wantField)
+			if !found {
+				t.Fatalf("追加要素の invalid field を期待したが (domain=%s field=%s) のエラーが無い: %+v", tt.wantDomain, tt.wantField, errs)
+			}
+			if e.Kind != KindInvalidField {
+				t.Errorf("Kind = %s, want %s", e.Kind, KindInvalidField)
+			}
+		})
+	}
+}
+
+// TestRawToPolicyInput_MultiElementPasswordPolicies_AllValid は複数要素がすべて妥当な場合に
+// 変換エラーが発生せず、先頭要素が PolicyInput へ写像されることを検証する（正常系 / 回帰防止）。
+func TestRawToPolicyInput_MultiElementPasswordPolicies_AllValid(t *testing.T) {
+	// Arrange: 2 要素ともに範囲内・enum 許容値内
+	raw := map[string]any{
+		"passwordPolicies": []any{
+			map[string]any{"passwordMinimumLength": float64(8), "passwordQuality": "NUMERIC"},
+			map[string]any{"passwordMinimumLength": float64(6), "passwordQuality": "ALPHABETIC"},
+		},
+	}
+
+	// Act
+	in, errs := RawToPolicyInput(raw)
+
+	// Assert
+	if len(errs) != 0 {
+		t.Fatalf("全要素妥当な passwordPolicies で変換エラーが発生: %+v", errs)
+	}
+	// 先頭要素が PolicyInput へ写像される（Validator の範囲・enum 検証経路へ載る）。
+	if in.Password == nil || in.Password.MinimumLength != 8 {
+		t.Errorf("Password.MinimumLength = %v, want 8（先頭要素を写像）", in.Password)
+	}
+	if in.Security == nil || in.Security.PasswordQuality != "NUMERIC" {
+		t.Errorf("Security.PasswordQuality = %+v, want NUMERIC（先頭要素を写像）", in.Security)
+	}
+}
+
+// TestRawToPolicyInput_FirstPasswordElementRangeDeferredToValidator は先頭要素の範囲外を mapper が
+// エラー化せず（型は妥当なので）PolicyInput へ写像し、範囲検証を Validator へ委ねることを検証する
+// （境界 / mapper と Validator の二重検証を避ける契約の明示）。
+func TestRawToPolicyInput_FirstPasswordElementRangeDeferredToValidator(t *testing.T) {
+	// Arrange: 先頭要素の minimumLength が範囲外（17）。型は整数なので mapper は写像のみ。
+	raw := map[string]any{
+		"passwordPolicies": []any{
+			map[string]any{"passwordMinimumLength": float64(17)},
+		},
+	}
+
+	// Act
+	in, errs := RawToPolicyInput(raw)
+
+	// Assert: mapper は範囲エラーを出さず（Validator の責務）、値を写像する。
+	if len(errs) != 0 {
+		t.Fatalf("先頭要素は mapper で範囲検証しない想定だがエラーが発生: %+v", errs)
+	}
+	if in.Password == nil || in.Password.MinimumLength != 17 {
+		t.Errorf("Password.MinimumLength = %v, want 17（Validator が範囲検証する）", in.Password)
+	}
+}
+
 // TestRawToPolicyInput_NoRawValueLeak は型不整合エラーの Message に raw body の生値を
 // 載せないことを検証する（Req 5.4 / NFR 3.2 を見据えた変換層の安全側設計）。
 func TestRawToPolicyInput_NoRawValueLeak(t *testing.T) {
