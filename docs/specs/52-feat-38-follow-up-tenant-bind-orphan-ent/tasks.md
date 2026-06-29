@@ -1,7 +1,7 @@
 # Implementation Plan
 
 - [ ] 1. migration 0017（tenant_status enum 4 値化 + signup_url_name 列）
-- [ ] 1.1 0017 up/down SQL を追加する
+- [x] 1.1 0017 up/down SQL を追加する
   - `0017_tenant_binding_state_and_signup_url.up.sql`: `ALTER TYPE tenant_status ADD VALUE IF NOT EXISTS 'binding'` と `ALTER TABLE tenants ADD COLUMN IF NOT EXISTS signup_url_name text` を冪等に記述（0016 と同じ ALTER のみパターン）
   - `0017_*.down.sql`: `signup_url_name` 列を `DROP COLUMN IF EXISTS` で巻き戻し。enum 値 `binding` は PostgreSQL で直接削除できないため no-op を SQL コメントで明示（0001 down の `DROP TYPE` が全 down シーケンスで enum 型ごと削除する旨を記述）
   - 既存 `migrations_reversible_test`（全 down→up + ErrNoChange）が pass することをローカル DB で確認する（テスト追加ではなく既存テストの非破壊検証）
