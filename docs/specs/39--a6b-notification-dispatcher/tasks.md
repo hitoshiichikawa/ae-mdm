@@ -9,7 +9,7 @@
   - _Requirements: 3.1, 3.2, 3.4_
   - _Boundary: TenantIDByEnterpriseName_
 
-- [ ] 2. notification パッケージの型・冪等排除・検証（types / dedupe / verifier）
+- [x] 2. notification パッケージの型・冪等排除・検証（types / dedupe / verifier）
 - [x] 2.1 パッケージ型定義と Verifier (P)
   - `internal/notification/doc.go`: パッケージ概要（audit/doc.go に倣う）
   - `internal/notification/types.go`: `Envelope` / `NotificationType`（ENROLLMENT / STATUS_REPORT / COMMAND）/ `UnassignedNotification` / `Filter` / `NotificationHandler` IF / `TenantResolver` IF
