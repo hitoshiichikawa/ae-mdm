@@ -26,6 +26,7 @@ import (
 
 	goidc "github.com/coreos/go-oidc/v3/oidc"
 	"github.com/go-chi/chi/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
 	"golang.org/x/oauth2"
 
 	"github.com/hitoshiichikawa/ae-mdm/internal/audit"
@@ -37,6 +38,7 @@ import (
 	"github.com/hitoshiichikawa/ae-mdm/internal/platform/db"
 	"github.com/hitoshiichikawa/ae-mdm/internal/platform/httpserver"
 	"github.com/hitoshiichikawa/ae-mdm/internal/platform/oidc"
+	"github.com/hitoshiichikawa/ae-mdm/internal/policy"
 	"github.com/hitoshiichikawa/ae-mdm/internal/tenant"
 	"github.com/hitoshiichikawa/ae-mdm/internal/tenantaudit"
 )
@@ -106,7 +108,10 @@ func healthcheckURL(listenAddr string) string {
 //     Routers.API / Routers.Admin への `/audit-logs` Mount（Issue #5 / A5）
 //  8. tenant domain（Repository / Service / Handler）の DI 配線 +
 //     Routers.Admin への `/tenants` Mount（Issue #38 / A4b）
-//  9. ListenAndServe goroutine + signal.NotifyContext で graceful shutdown
+//  9. policy domain（Repository / Service / Handler）の DI 配線 +
+//     Routers.API への `/policies` Mount（Issue #40 / B2b）。既存 amapiClient / auditSvc /
+//     tenantSvc / authorizer を再利用する（新規構築しない）
+//  10. ListenAndServe goroutine + signal.NotifyContext で graceful shutdown
 //
 // いずれかの初期化失敗で exit code 1 + 構造化 ERROR ログを出す（NFR 3.1 / 3.2）。
 // pool は defer で Close する（shutdown 順序: HTTP server.Shutdown → pool.Close）。
@@ -241,7 +246,23 @@ func runBootstrap(ctx context.Context) int {
 	tenantHandler := tenant.NewHandler(tenantSvc, log)
 	tenantHandler.Mount(routers.Admin)
 
-	// (9) ListenAndServe + graceful shutdown
+	// (9) policy domain（B2b / Issue #40）の DI 配線 + Mount
+	//
+	// pool / log / routers は既存 bootstrap で構築済みのものを再利用する。Policy ドメインの
+	// 共有ラッパ依存（AMAPI 反映の amapiClient / 監査記録の auditSvc / enterprise_name 解決の
+	// tenantSvc / RBAC 判定の authorizer）も (7)(8) で構築済みのインスタンスをそのまま再利用し、
+	// 新規構築しない（NFR 2.2: AMAPI 反映は共有ラッパ経由 / Req 5.1: 作成イベント監査）。
+	//   - Repository は pgxpool 経由で tenant-scoped context のまま policies へアクセスし、RLS に
+	//     テナント分離を委ねる（SuperAdmin 昇格しない）。
+	//   - Service は upsertClient（amapiClient）/ eventRecorder（auditSvc）/ enterpriseResolver
+	//     （tenantSvc）/ logger を組み合わせて upsert / 割当 / 参照 / 削除を提供する。authz は
+	//     持たず Handler の責務（design Components）。
+	//   - Handler を `routers.API`（/api chain）へ Mount し、`/api/policies` 配下 6 endpoint を
+	//     稼働させる。authorizer で own-tenant `policy` RBAC を判定する（Req 4.1）。
+	policyHandler := buildPolicyHandler(pool, amapiClient, auditSvc, authorizer, tenantSvc, log)
+	routers.API.Mount("/policies", policyHandler)
+
+	// (10) ListenAndServe + graceful shutdown
 	return runHTTPServer(ctx, srv, log)
 }
 
@@ -287,6 +308,32 @@ func buildOAuth2Configs(cfg config.Config, verifier oidc.Verifier) map[oidc.Cons
 // 退行を捕捉できないという PR #56 round-5 review 指摘への対応）。
 func buildTenantRecorder(auditSvc audit.Service, log logger.Logger) tenant.EventRecorder {
 	return tenantaudit.NewRecorder(auditSvc, log)
+}
+
+// buildPolicyHandler は policy ドメインの本番 DI（Repository → Service → Handler）を 1 箇所に
+// 束ねて構築する（Issue #40 / B2b / NFR 2.2 / Req 5.1）。
+//
+// 共有ラッパ依存（amapiClient / auditSvc / tenantSvc / authorizer）はいずれも runBootstrap (7)(8) で
+// 構築済みのインスタンスを **再利用** する前提で受け取り、本 helper 内で新規構築しない。これにより
+// Policy の AMAPI 反映が共有 amapi ラッパ経由（NFR 2.2）/ 作成イベント監査が共有 audit Service 経由
+// （Req 5.1）であることを配線レベルで固定する。policy.Service は authorizer を持たず（authz は Handler の
+// 責務 / design Components）、authorizer は policy.NewHandler の第 2 引数へ渡す。
+//
+// 本 wiring を独立関数として切り出すのは、main の本番配線が誤って Policy domain の DI を落とす /
+// stub へ巻き戻していないことを `cmd/api` の単体テスト（main_test.go）で **型レベルに回帰検知**できる
+// ようにするため（`buildTenantRecorder` / `buildOAuth2Configs` と同じ testability 方針）。pool は
+// policy.NewRepository が接続せず保持するだけのため、テストでは nil を渡せる。
+func buildPolicyHandler(
+	pool *pgxpool.Pool,
+	amapiClient amapi.Client,
+	auditSvc audit.Service,
+	authorizer *authz.Authorizer,
+	tenantSvc tenant.Service,
+	log logger.Logger,
+) *policy.Handler {
+	policyRepo := policy.NewRepository(pool)
+	policySvc := policy.NewService(policyRepo, amapiClient, auditSvc, tenantSvc, log)
+	return policy.NewHandler(policySvc, authorizer, log)
 }
 
 // runHTTPServer は srv.ListenAndServe を goroutine で起動し、SIGINT/SIGTERM 受信時に

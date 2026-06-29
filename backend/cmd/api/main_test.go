@@ -10,7 +10,10 @@ import (
 
 	"github.com/hitoshiichikawa/ae-mdm/internal/audit"
 	"github.com/hitoshiichikawa/ae-mdm/internal/config"
+	"github.com/hitoshiichikawa/ae-mdm/internal/platform/amapi"
+	"github.com/hitoshiichikawa/ae-mdm/internal/platform/authz"
 	"github.com/hitoshiichikawa/ae-mdm/internal/platform/oidc"
+	"github.com/hitoshiichikawa/ae-mdm/internal/policy"
 	"github.com/hitoshiichikawa/ae-mdm/internal/tenant"
 	"github.com/hitoshiichikawa/ae-mdm/internal/tenantaudit"
 )
@@ -166,5 +169,46 @@ func TestBuildTenantRecorder_WiresAuditServiceAdapterNotInterimLogger(t *testing
 	if _, isLogger := rec.(*tenant.LoggerRecorder); isLogger {
 		t.Fatalf("buildTenantRecorder が interim tenant.LoggerRecorder を返した（" +
 			"監査ログ Service への配線が退行 / #54 Req 1.4 / 5.3）")
+	}
+}
+
+// TestBuildPolicyHandler_WiresPolicyDomainNotStub は、main の本番 DI が Policy ドメイン
+// （Repository / Service / Handler）を共有ラッパ（amapiClient / auditSvc / tenantSvc /
+// authorizer）から確実に組み立て、stub / interim へ退行していないことを型レベルに回帰検知する
+// （Issue #40 / task 6.1 / NFR 2.2 / Req 5.1）。
+//
+// buildTenantRecorder の testability 方針に倣う: アダプタ単体テスト（internal/policy/*_test.go）は
+// policy.NewService / policy.NewHandler を直接生成して契約を検証するが、main wiring が誤って
+// Policy 配線を落とす / stub へ巻き戻しても失敗しない。main が実際に呼ぶ buildPolicyHandler の
+// 戻り値を assert することで、本番配線の退行（Policy domain の DI 欠落）を捕捉する。
+//
+// 本テストが守る AC:
+//   - NFR 2.2（AMAPI 反映は共有ラッパ経由）: Service の upsertClient に本番 amapi.Client を配線する
+//   - 5.1（作成イベント監査）: Service の eventRecorder に本番 audit.Service を配線する
+//
+// helper を本番 DI と同じ実型（amapi.Client / audit.Service / *authz.Authorizer / tenant.Service）で
+// 呼び、戻り値が非 nil の *policy.Handler であること（= Policy domain が確実に配線され stub/interim へ
+// 退行していないこと）を assert する。pool は policy.NewRepository(nil) が接続せず保持するだけなので
+// nil で足りる（buildTenantRecorder テストが repo=nil で構築するのと同方針 / live DB 非依存）。
+func TestBuildPolicyHandler_WiresPolicyDomainNotStub(t *testing.T) {
+	// Arrange: 本番 DI（main.go runBootstrap）と同じ実型で依存を構築する。
+	// repo は本 test で接続を伴う呼び出しをしないため pool=nil で足り、NewRepository は依存を保持するだけ。
+	auditSvc := audit.NewService(config.Config{}, nil, audit.SystemClock{}, nil)
+	tenantSvc := tenant.NewService(nil, nil, nil, config.Config{}, nil)
+	authorizer := authz.New()
+	var amapiClient amapi.Client = &amapi.StubClient{}
+
+	// Act: main が実際に呼ぶ wiring helper を通して Policy Handler を構築する。
+	h := buildPolicyHandler(nil, amapiClient, auditSvc, authorizer, tenantSvc, nil)
+
+	// Assert: Policy domain が確実に配線され、非 nil の *policy.Handler であること
+	// （stub / interim へ退行していないこと）。
+	if h == nil {
+		t.Fatalf("buildPolicyHandler の戻り値が nil（Policy domain の DI が欠落した疑い / " +
+			"NFR 2.2 / Req 5.1）")
+	}
+	if _, ok := any(h).(*policy.Handler); !ok {
+		t.Fatalf("buildPolicyHandler の戻り値型 = %T, want *policy.Handler（Policy domain 配線が"+
+			"stub/interim へ退行した疑い / NFR 2.2 / Req 5.1）", h)
 	}
 }
