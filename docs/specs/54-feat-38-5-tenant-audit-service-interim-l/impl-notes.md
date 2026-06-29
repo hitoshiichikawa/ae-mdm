@@ -227,4 +227,37 @@ ITERATION-3 STATUS: complete
 
 ITERATION-4 STATUS: complete
 
+## Iteration ラウンド 5（PR #56 レビュー対応）
+
+レビュー（codex）3 件すべてが裁定で legitimate。対応内訳:
+
+- **[medium] main 本番配線の退行が回帰検知されない（対応済み / 修正 commit 30c867b）**: 既存の
+  アダプタ単体テスト（`internal/tenantaudit/*_test.go`）は `tenantaudit.NewRecorder` を直接生成して
+  写像・委譲契約を検証するため、`cmd/api/main.go` の DI が誤って interim の `tenant.NewLoggerRecorder`
+  へ戻っても失敗しなかった（Req 1.4 / 5.3 の本番配線が無防備）。`buildOAuth2Configs` と同じ
+  testability 方針で wiring を `buildTenantRecorder(auditSvc, log) tenant.EventRecorder` helper へ切り出し
+  （挙動不変・従来どおり `tenantaudit.NewRecorder` を返す / NFR 1.1）、`cmd/api/main_test.go` に
+  `TestBuildTenantRecorder_WiresAuditServiceAdapterNotInterimLogger` を追加。main が実際に呼ぶ helper の
+  戻り値型が `*tenantaudit.Recorder` であること（かつ `*tenant.LoggerRecorder` でないこと）を assert する。
+  helper を LoggerRecorder へ regress させると当該 assertion が fail することを確認済み（Red→Green）。
+- **[high] 存在しない tenant_id の失敗監査が FK で永続化されない件（要件/設計ギャップとして申し送り継続）**:
+  round-1 / 3 / 4 から不変で本 PR スコープ内では修正不能（「確認事項 5」参照）。round-5 指摘は
+  対象失敗分岐を **Create の Insert 失敗後（`service.go:162`）** まで含めて具体化した。Create の Insert 失敗は
+  「採番済みだが永続化されなかった tenant id」を載せるため、bind / disable の lookup failure と同様に
+  `audit_logs.tenant_id` FK 違反で残らない。根本対処は依然として (a) `audit_logs` FK スキーマ=#5 領分 /
+  (b) 失敗時の tenant id 写像規則（NULL + resource_id 退避）の要件確定=#38 / 本 Issue の Req 2.2 と
+  `audit_logs` スキーマ責務をまたぐ判断 / (c) Req 2.2（tenant_id 写像義務）・Req 5.2（変換+委譲のみ・
+  存在確認禁止）によりアダプタ単独では不可、のいずれかを要する。これは Req 2.2 と Req 1.2 Objective と
+  FK 制約が三つ巴で衝突する **要件レベルの矛盾**であり、impl PR iteration では requirements.md を書き換え
+  られないため確定できない。本 round が最終（5/5）のため、**別 Issue 化 + 人間/PM 判断**を強く推奨する
+  （確認事項 5 の提案 (i) FK 緩和 / (ii) 失敗監査は `tenant_id=NULL` + `resource_id=<試行 id>` 規則の要件化）。
+- **[medium] design.md / tasks.md 不在（対応なし・返信で boundary 説明）**: round-1 / 3 / 4 と同様。
+  本 Issue は Triage で `needs_architect:false` の単一実装パスのため Architect 段（設計 PR ゲート）を
+  経ておらず design.md / tasks.md が存在しない。これらは Architect が別の設計 PR（人間レビュー済み）で
+  作成する成果物であり、Developer が impl PR iteration で新規作成・書き換えすることは agent 連携ルール・
+  本 iteration モードの双方で禁止（1 PR = design or impl）。requirements ⇄ 実装 / テストの追跡は本ファイル
+  「AC Traceability」表で提供済み。design / tasks が必要なら再 triage（`needs_architect:true`）を推奨。
+
+ITERATION-5 STATUS: complete
+
 STATUS: complete
