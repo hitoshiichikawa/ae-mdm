@@ -17,7 +17,7 @@
   - `internal/notification/verifier_test.go`: 各種別の正常 parse / 空 payload / 種別判定不能 / 検証失敗 / enterprise_name 空 の分類テスト
   - _Requirements: 2.5, 2.6, 3.4, NFR 3.1_
   - _Boundary: NotificationVerifier_
-- [ ] 2.2 Dedupe（notification_dedupe 冪等記録）
+- [x] 2.2 Dedupe（notification_dedupe 冪等記録）
   - `internal/notification/dedupe.go`: `Dedupe` IF（`IsProcessed` / `MarkProcessed`）と pgxpool 実装。`MarkProcessed` は `INSERT INTO notification_dedupe (message_id, notification_type) VALUES ($1,$2) ON CONFLICT (message_id) DO NOTHING`（並行同一 MessageID の直列化を PK + ON CONFLICT で担保 / Req 1.3）。`superAdminContext` + `BeginTxFunc`（RLS SuperAdmin only / 既存スキーマ 0010/0011 を消費、新規 migration なし）。永続化失敗は `CodeUnavailable, IsTransient:true`（Req 1.4）
   - `internal/notification/dedupe_test.go`: IsProcessed 検出/通過、MarkProcessed の ON CONFLICT 冪等（fake/mock repo）、永続化失敗の transient 写像
   - _Requirements: 1.1, 1.2, 1.3, 1.4, NFR 3.1_
