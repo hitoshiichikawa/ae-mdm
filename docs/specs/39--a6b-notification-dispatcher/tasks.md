@@ -25,7 +25,7 @@
   - _Depends: 2.1_
 
 - [ ] 3. 退避キューと Dispatcher 本体（unassigned / dispatcher）
-- [ ] 3.1 UnassignedQueue（退避 INSERT + List）
+- [x] 3.1 UnassignedQueue（退避 INSERT + List）
   - `internal/notification/unassigned.go`: `UnassignedQueue` IF（`Enqueue` / `List`）と pgxpool 実装。`Enqueue` は `unassigned_notifications` へ id(uuid 採番) / message_id / notification_type / enterprise_name / payload(jsonb) を INSERT（tenant scoped テーブルに触れない / NFR 2.2 / Req 3.5）。`List` は Filter（from/to/type）適用、0 件は非 nil 空 slice。`superAdminContext` + `BeginTxFunc`
   - `internal/notification/unassigned_test.go`: Enqueue 後の List 取得、Filter（from/to/type）適用、0 件空 slice
   - _Requirements: 3.2, 3.3, 3.5, 4.1, 4.2, NFR 2.2, NFR 3.1_
