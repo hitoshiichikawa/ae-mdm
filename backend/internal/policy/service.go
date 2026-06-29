@@ -13,12 +13,11 @@ import (
 )
 
 // Service は Policy upsert / 割当 / 参照 / 削除のユースケースと検証ゲート・AMAPI
-// オーケストレーション・監査記録の単一所有者（design.md「policy.Service」節 / tasks.md task 3）。
+// オーケストレーション・監査記録の単一所有者（design.md「policy.Service」節）。
 //
-// **インクリメンタル interface（task 3）**: 本 task では upsert 系の Create / Update のみを
-// 宣言・実装する。design.md の最終形は Get / List / Delete / Assign を含む 6 メソッドだが、
-// それらは後続 task 4.1 が同 interface へ追加する。本 interface を 2 メソッドに限定することで
-// policy package が本 task 単独で build / test 可能になる（impl-notes 確認事項参照）。
+// **最終形 interface（task 4.1 で 6 メソッドへ拡張済み）**: task 3 では upsert 系の
+// Create / Update のみだったが、task 4.1 で参照系（Get / List）と変更系（Delete / Assign）の
+// 4 メソッドを追加し、design.md の最終形（6 メソッド）に揃えた。
 type Service interface {
 	// Create はポリシーを新規作成し、検証ゲート → AMAPI upsert → snapshot 永続化 → 監査記録の
 	// 順で実行する（Req 1.1 / 1.3 / 2.x / 5.1）。
@@ -45,6 +44,44 @@ type Service interface {
 	//
 	// actor / tenantID は Create と同義。policyID は更新対象のポリシー id。
 	Update(ctx context.Context, actor, tenantID, policyID uuid.UUID, in PolicyRequest) (PolicyView, error)
+
+	// List は自テナントのポリシー一覧を返す（Req 4.4）。
+	//
+	//   - tenant-scoped Repository.List へ委譲し、RLS により自テナント行のみを返す。
+	//   - 0 件のときは非 nil の空 slice を返す（Handler が `[]` をそのままシリアライズできる）。
+	//   - read 操作のため監査記録は行わない（Req 5.x は作成・更新・削除・割当のみが対象）。
+	List(ctx context.Context, tenantID uuid.UUID) ([]PolicySummary, error)
+
+	// Get は自テナントのポリシー詳細を返す。不在は NotFound（Req 4.4 / 4.5）。
+	//
+	//   - tenant-scoped Repository.Get へ委譲し、RLS で他テナント行は 0 行 → 存在差を露出しない
+	//     ErrPolicyNotFound（404）に写像済みのまま伝達する（Req 4.5）。
+	//   - read 操作のため監査記録は行わない。
+	Get(ctx context.Context, tenantID, policyID uuid.UUID) (PolicyView, error)
+
+	// Delete はポリシーを削除し、削除イベントを監査する（Req 5.3）。
+	//
+	//   - Repository.Delete へ委譲する。affected=0（不在 / 他テナント越境）は存在差を露出しない
+	//     ErrPolicyNotFound（404）へ Service 側で写像する（Req 4.4 / 4.5）。
+	//   - 割当済み端末が存在する policy の削除は Repository が ErrDeleteConflict（409）を Code 付きで
+	//     返すため、そのまま伝達する（design 確認事項 3 推奨案 / Req 5.3）。
+	//   - 成否いずれの経路でも削除イベントを監査記録する（Req 5.3）。監査 Detail に機密値を載せない
+	//     （Req 5.4）。
+	//
+	// actor は監査イベントの実行者識別子。tenantID は claims 由来の所有テナント。
+	Delete(ctx context.Context, actor, tenantID, policyID uuid.UUID) error
+
+	// Assign は端末の適用対象ポリシーを確定する（Req 3.x / 4.2 / 4.3）。
+	//
+	//   - Repository.AssignPolicyToDevice へ委譲し devices.applied_policy_id を UPDATE する。
+	//     割当は DB 更新までで AMAPI への device patch は行わない（design 確認事項 1 推奨案）。
+	//   - 他テナント device 指定は affected=0（err==nil）で返るため Service が ErrPolicyNotFound
+	//     （404）へ写像する（Req 3.3）。他テナント policy 指定は複合 FK 違反を Repository が
+	//     ErrPolicyNotFound（404 / 存在差非露出）へ写像済みのまま伝達する（Req 3.2 / 4.2 / 4.5）。
+	//   - 成否いずれの経路でも割当イベントを監査記録する。監査 Detail に機密値を載せない（Req 5.4）。
+	//
+	// actor は実行者識別子。tenantID は claims 由来。deviceID は割当先端末、policyID は割当ポリシー。
+	Assign(ctx context.Context, actor, tenantID, deviceID, policyID uuid.UUID) error
 }
 
 // upsertClient は Service が AMAPI 反映に用いる最小ポート（consumer-defines-interface）。
@@ -145,6 +182,10 @@ const (
 	eventTypePolicyCreate audit.EventType = "policy_create"
 	// eventTypePolicyUpdate はポリシー更新監査イベント種別。
 	eventTypePolicyUpdate audit.EventType = "policy_update"
+	// eventTypePolicyDelete はポリシー削除監査イベント種別（Req 5.3）。
+	eventTypePolicyDelete audit.EventType = "policy_delete"
+	// eventTypePolicyAssign はポリシーの端末割当監査イベント種別。
+	eventTypePolicyAssign audit.EventType = "policy_assign"
 )
 
 // service は Service interface の本番実装。
@@ -316,6 +357,101 @@ func (s *service) Update(ctx context.Context, actor, tenantID, policyID uuid.UUI
 	}, nil
 }
 
+// List は Service.List の実装。
+func (s *service) List(ctx context.Context, tenantID uuid.UUID) ([]PolicySummary, error) {
+	// tenant-scoped Repository へ委譲（RLS で自テナント行のみ / Req 4.4）。read のため監査なし。
+	rows, err := s.repo.List(ctx, tenantID)
+	if err != nil {
+		return nil, err
+	}
+	summaries := make([]PolicySummary, 0, len(rows))
+	for _, row := range rows {
+		summaries = append(summaries, rowToSummary(row))
+	}
+	return summaries, nil
+}
+
+// Get は Service.Get の実装。
+func (s *service) Get(ctx context.Context, tenantID, policyID uuid.UUID) (PolicyView, error) {
+	// tenant-scoped Repository へ委譲。不在 / 他テナント越境は Repository が ErrPolicyNotFound
+	// （存在差非露出 / 404）に写像済みのため、そのまま伝達する（Req 4.4 / 4.5）。read のため監査なし。
+	row, err := s.repo.Get(ctx, tenantID, policyID)
+	if err != nil {
+		return PolicyView{}, err
+	}
+	return rowToView(row), nil
+}
+
+// Delete は Service.Delete の実装。
+func (s *service) Delete(ctx context.Context, actor, tenantID, policyID uuid.UUID) error {
+	// Repository.Delete へ委譲する。割当済み端末ありの policy は Repository が ErrDeleteConflict
+	// （409）を Code 付きで返すため、そのまま伝達する（design 確認事項 3 / Req 5.3）。
+	affected, err := s.repo.Delete(ctx, tenantID, policyID)
+	if err != nil {
+		s.logDeny(actor, tenantID, policyID, "policy delete failed")
+		s.record(ctx, actor, tenantID, policyID, eventTypePolicyDelete, audit.ResultFailure, "")
+		return err
+	}
+	if affected == 0 {
+		// 不在 / 他テナント越境（RLS / WHERE tenant_id で 0 行）→ 存在差非露出の NotFound（Req 4.4 / 4.5）。
+		s.logDeny(actor, tenantID, policyID, "policy delete affected no rows")
+		s.record(ctx, actor, tenantID, policyID, eventTypePolicyDelete, audit.ResultFailure, "")
+		return ErrPolicyNotFound
+	}
+
+	// 削除成功を監査記録する（Req 5.3）。Detail は安全 field のみ（機密値を載せない / Req 5.4）。
+	s.record(ctx, actor, tenantID, policyID, eventTypePolicyDelete, audit.ResultSuccess, "")
+	return nil
+}
+
+// Assign は Service.Assign の実装。
+func (s *service) Assign(ctx context.Context, actor, tenantID, deviceID, policyID uuid.UUID) error {
+	// Repository.AssignPolicyToDevice へ委譲し devices.applied_policy_id を UPDATE する。
+	// 割当は DB 更新までで AMAPI device patch は行わない（design 確認事項 1 推奨案）。
+	affected, err := s.repo.AssignPolicyToDevice(ctx, tenantID, deviceID, policyID)
+	if err != nil {
+		// 他テナント policy 指定（複合 FK 違反）は Repository が ErrPolicyNotFound（404）へ写像済み
+		// のため、そのまま伝達する（Req 3.2 / 4.2 / 4.5）。
+		s.logDeny(actor, tenantID, policyID, "policy assign failed")
+		s.recordAssign(ctx, actor, tenantID, deviceID, policyID, audit.ResultFailure)
+		return err
+	}
+	if affected == 0 {
+		// 他テナント device 指定（affected=0 / err==nil）→ 存在差非露出の NotFound（Req 3.3 / 4.3）。
+		s.logDeny(actor, tenantID, policyID, "policy assign affected no rows")
+		s.recordAssign(ctx, actor, tenantID, deviceID, policyID, audit.ResultFailure)
+		return ErrPolicyNotFound
+	}
+
+	// 割当成功を監査記録する。Detail は安全 field（policy_id / device_id / result）のみ（Req 5.4）。
+	s.recordAssign(ctx, actor, tenantID, deviceID, policyID, audit.ResultSuccess)
+	return nil
+}
+
+// rowToView は PolicyRow を API 詳細レスポンス（PolicyView）へ変換する（Get / Create / Update 共通の
+// 写像。CreatedAt / UpdatedAt / Version を row から充填する）。
+func rowToView(row PolicyRow) PolicyView {
+	return PolicyView{
+		ID:        row.ID,
+		Name:      row.Name,
+		Body:      row.Body,
+		Version:   row.Version,
+		CreatedAt: row.CreatedAt,
+		UpdatedAt: row.UpdatedAt,
+	}
+}
+
+// rowToSummary は PolicyRow を一覧レスポンス（PolicySummary）へ変換する。本体 JSON snapshot
+// （Body）は載せず、識別に必要な最小 field のみを返す（Req 5.4 / NFR 3.2 / List 経路）。
+func rowToSummary(row PolicyRow) PolicySummary {
+	return PolicySummary{
+		ID:        row.ID,
+		Name:      row.Name,
+		Version:   row.Version,
+		UpdatedAt: row.UpdatedAt,
+	}
+}
+
 // validate は raw body を mapper で PolicyInput へ変換し、変換不能（型不整合）と Validator の
 // 検証不正を結合して全件提示する（Req 2.1 / 2.2 / 2.3 / 2.4 / 2.5）。
 //
@@ -343,7 +479,25 @@ func (s *service) validate(rawBody map[string]any) *ValidationFailedError {
 // （tenant.record と同方針 / 成否いずれの経路でも Record を呼ぶ Req 5.1 / 5.2）。
 func (s *service) record(ctx context.Context, actor, tenantID, policyID uuid.UUID, eventType audit.EventType, result audit.ResultType, name string) {
 	detail := map[string]any{
-		"name":   name,
+		"result": string(result),
+	}
+	// name を持たない操作（Delete / Assign）では name field を省略する（冗長な空 name を載せない）。
+	if name != "" {
+		detail["name"] = name
+	}
+	resourceID := ""
+	if policyID != uuid.Nil {
+		resourceID = policyID.String()
+		detail["policy_id"] = resourceID
+	}
+	s.emitAudit(ctx, actor, tenantID, eventType, resourceID, result, detail)
+}
+
+// recordAssign は割当イベントの監査記録を行う（Req 5.x）。policy_assign は ResourceID=policy_id とし、
+// Detail に割当先 device_id も安全 field として載せる（design Data Models）。raw body の機密値は
+// 一切載せない（Req 5.4 / NFR 3.2）。
+func (s *service) recordAssign(ctx context.Context, actor, tenantID, deviceID, policyID uuid.UUID, result audit.ResultType) {
+	detail := map[string]any{
 		"result": string(result),
 	}
 	resourceID := ""
@@ -351,6 +505,16 @@ func (s *service) record(ctx context.Context, actor, tenantID, policyID uuid.UUI
 		resourceID = policyID.String()
 		detail["policy_id"] = resourceID
 	}
+	if deviceID != uuid.Nil {
+		detail["device_id"] = deviceID.String()
+	}
+	s.emitAudit(ctx, actor, tenantID, eventTypePolicyAssign, resourceID, result, detail)
+}
+
+// emitAudit は組み立て済みの監査 Detail から audit.Event を構築して eventRecorder へ渡す共通 helper。
+// Record の失敗は WARN ログに留め、ユースケース本体の業務結果を覆さない（tenant.record と同方針 /
+// 成否いずれの経路でも Record を呼ぶ Req 5.1 / 5.2 / 5.3）。
+func (s *service) emitAudit(ctx context.Context, actor, tenantID uuid.UUID, eventType audit.EventType, resourceID string, result audit.ResultType, detail map[string]any) {
 	ev := audit.Event{
 		TenantID:   tenantID,
 		ActorID:    actor,
@@ -407,6 +571,6 @@ func policyIDFromAMAPIName(amapiPolicyName string, policyID uuid.UUID) string {
 	return policyID.String()
 }
 
-// 型 assertion 用に service が Service interface（本 task では Create / Update の 2 メソッド）を
-// 満たすことを compile-time で確認する。task 4.1 が Get / List / Delete / Assign を追加する。
+// 型 assertion 用に service が Service interface（最終形 6 メソッド: Create / Update / List / Get /
+// Delete / Assign）を満たすことを compile-time で確認する。
 var _ Service = (*service)(nil)

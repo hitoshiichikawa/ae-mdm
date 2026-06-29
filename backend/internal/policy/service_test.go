@@ -76,6 +76,31 @@ type fakeRepository struct {
 
 	getRow PolicyRow
 	getErr error
+
+	// List 用（task 4.1）
+	listRows []PolicyRow
+	listErr  error
+
+	// Delete 用（task 4.1）
+	deleteCalls []deleteCall
+	deleteAff   int64
+	deleteErr   error
+
+	// Assign 用（task 4.1）
+	assignCalls []assignCall
+	assignAff   int64
+	assignErr   error
+}
+
+type deleteCall struct {
+	TenantID uuid.UUID
+	PolicyID uuid.UUID
+}
+
+type assignCall struct {
+	TenantID uuid.UUID
+	DeviceID uuid.UUID
+	PolicyID uuid.UUID
 }
 
 func (r *fakeRepository) Insert(_ context.Context, row PolicyRow) error {
@@ -105,15 +130,35 @@ func (r *fakeRepository) Get(_ context.Context, _ uuid.UUID, _ uuid.UUID) (Polic
 }
 
 func (r *fakeRepository) List(_ context.Context, _ uuid.UUID) ([]PolicyRow, error) {
-	return nil, nil
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.listErr != nil {
+		return nil, r.listErr
+	}
+	// Repository 実装は 0 件でも非 nil 空 slice を返す契約のため、それに倣う。
+	out := make([]PolicyRow, len(r.listRows))
+	copy(out, r.listRows)
+	return out, nil
 }
 
-func (r *fakeRepository) Delete(_ context.Context, _ uuid.UUID, _ uuid.UUID) (int64, error) {
-	return 0, nil
+func (r *fakeRepository) Delete(_ context.Context, tenantID uuid.UUID, policyID uuid.UUID) (int64, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.deleteCalls = append(r.deleteCalls, deleteCall{TenantID: tenantID, PolicyID: policyID})
+	if r.deleteErr != nil {
+		return 0, r.deleteErr
+	}
+	return r.deleteAff, nil
 }
 
-func (r *fakeRepository) AssignPolicyToDevice(_ context.Context, _, _, _ uuid.UUID) (int64, error) {
-	return 0, nil
+func (r *fakeRepository) AssignPolicyToDevice(_ context.Context, tenantID, deviceID, policyID uuid.UUID) (int64, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.assignCalls = append(r.assignCalls, assignCall{TenantID: tenantID, DeviceID: deviceID, PolicyID: policyID})
+	if r.assignErr != nil {
+		return 0, r.assignErr
+	}
+	return r.assignAff, nil
 }
 
 func (r *fakeRepository) insertCount() int {
@@ -126,6 +171,21 @@ func (r *fakeRepository) updateCount() int {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return len(r.updated)
+}
+
+func (r *fakeRepository) deleteCount() int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return len(r.deleteCalls)
+}
+
+func (r *fakeRepository) lastAssignCall() (assignCall, bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if len(r.assignCalls) == 0 {
+		return assignCall{}, false
+	}
+	return r.assignCalls[len(r.assignCalls)-1], true
 }
 
 // ---- Fake eventRecorder（監査記録の有無 / 内容を検証 / Req 5.x） ----
@@ -689,6 +749,346 @@ func TestService_Update(t *testing.T) {
 		// Assert（Req 4.4 / 4.5）。
 		if got := codeOf(t, err); got != pkgerrors.CodeNotFound {
 			t.Fatalf("expected CodeNotFound on affected=0, got %s", got)
+		}
+	})
+}
+
+// ===== Get: 自テナント参照 / 不在は NotFound / read のため監査なし（Req 4.4 / 4.5） =====
+
+func TestService_Get(t *testing.T) {
+	t.Run("自テナントの policy 詳細を row から充填して返す", func(t *testing.T) {
+		// Arrange
+		h := newServiceHarness()
+		tenantID, policyID := uuid.New(), uuid.New()
+		h.repo.getRow = PolicyRow{
+			ID:              policyID,
+			TenantID:        tenantID,
+			Name:            testPolicyName,
+			AMAPIPolicyName: testEnterpriseName + "/policies/" + policyID.String(),
+			Body:            map[string]any{"foo": "bar"},
+			Version:         7,
+		}
+
+		// Act
+		view, err := h.svc.Get(context.Background(), tenantID, policyID)
+
+		// Assert: row の field（id / name / body / version）が view に充填される（Req 4.4）。
+		if err != nil {
+			t.Fatalf("expected success, got %v", err)
+		}
+		if view.ID != policyID || view.Name != testPolicyName || view.Version != 7 {
+			t.Errorf("unexpected view: %+v", view)
+		}
+		if view.Body["foo"] != "bar" {
+			t.Errorf("expected body passed through, got %+v", view.Body)
+		}
+	})
+
+	t.Run("不在 policy の Get は存在差を露出しない NotFound を伝達する", func(t *testing.T) {
+		// Arrange: Repository が ErrPolicyNotFound（RLS 0 行 / 他テナント越境）を返す。
+		h := newServiceHarness()
+		tenantID, policyID := uuid.New(), uuid.New()
+		h.repo.getErr = ErrPolicyNotFound
+
+		// Act
+		_, err := h.svc.Get(context.Background(), tenantID, policyID)
+
+		// Assert（Req 4.4 / 4.5）。
+		if got := codeOf(t, err); got != pkgerrors.CodeNotFound {
+			t.Fatalf("expected CodeNotFound, got %s", got)
+		}
+	})
+
+	t.Run("read 操作のため監査記録を行わない", func(t *testing.T) {
+		// Arrange
+		h := newServiceHarness()
+		tenantID, policyID := uuid.New(), uuid.New()
+		h.repo.getRow = PolicyRow{ID: policyID, TenantID: tenantID, Name: testPolicyName}
+
+		// Act
+		_, _ = h.svc.Get(context.Background(), tenantID, policyID)
+
+		// Assert: 参照操作は監査対象外（Req 5.x は作成・更新・削除・割当のみ）。
+		if evs := h.recorder.recorded(); len(evs) != 0 {
+			t.Errorf("expected no audit events for read, got %d", len(evs))
+		}
+	})
+}
+
+// ===== List: 自テナント一覧 / 空 slice / read のため監査なし（Req 4.4） =====
+
+func TestService_List(t *testing.T) {
+	t.Run("自テナントの policy 一覧を summary へ写像して返す", func(t *testing.T) {
+		// Arrange: 2 件の自テナント行（Body は summary に載らない）。
+		h := newServiceHarness()
+		tenantID := uuid.New()
+		id1, id2 := uuid.New(), uuid.New()
+		h.repo.listRows = []PolicyRow{
+			{ID: id1, TenantID: tenantID, Name: "policy A", Version: 1, Body: map[string]any{"secret": testSecretValue}},
+			{ID: id2, TenantID: tenantID, Name: "policy B", Version: 2, Body: map[string]any{"secret": testSecretValue}},
+		}
+
+		// Act
+		summaries, err := h.svc.List(context.Background(), tenantID)
+
+		// Assert（Req 4.4）。
+		if err != nil {
+			t.Fatalf("expected success, got %v", err)
+		}
+		if len(summaries) != 2 {
+			t.Fatalf("expected 2 summaries, got %d", len(summaries))
+		}
+		if summaries[0].ID != id1 || summaries[0].Name != "policy A" || summaries[0].Version != 1 {
+			t.Errorf("unexpected summary[0]: %+v", summaries[0])
+		}
+	})
+
+	t.Run("0 件のとき非 nil の空 slice を返す", func(t *testing.T) {
+		// Arrange
+		h := newServiceHarness()
+		tenantID := uuid.New()
+		h.repo.listRows = nil
+
+		// Act
+		summaries, err := h.svc.List(context.Background(), tenantID)
+
+		// Assert: nil ではなく空 slice（Handler が `[]` をシリアライズできる）。
+		if err != nil {
+			t.Fatalf("expected success, got %v", err)
+		}
+		if summaries == nil {
+			t.Fatal("expected non-nil empty slice, got nil")
+		}
+		if len(summaries) != 0 {
+			t.Errorf("expected 0 summaries, got %d", len(summaries))
+		}
+	})
+
+	t.Run("read 操作のため監査記録を行わない", func(t *testing.T) {
+		// Arrange
+		h := newServiceHarness()
+		tenantID := uuid.New()
+		h.repo.listRows = []PolicyRow{{ID: uuid.New(), TenantID: tenantID, Name: "policy A"}}
+
+		// Act
+		_, _ = h.svc.List(context.Background(), tenantID)
+
+		// Assert
+		if evs := h.recorder.recorded(); len(evs) != 0 {
+			t.Errorf("expected no audit events for list, got %d", len(evs))
+		}
+	})
+
+	t.Run("Repository が error を返すとき伝達する", func(t *testing.T) {
+		// Arrange: DB 不通等。
+		h := newServiceHarness()
+		tenantID := uuid.New()
+		listErr := pkgerrors.New(pkgerrors.CodeUnavailable, "db unavailable")
+		h.repo.listErr = listErr
+
+		// Act
+		_, err := h.svc.List(context.Background(), tenantID)
+
+		// Assert
+		if !stderrors.Is(err, listErr) {
+			t.Errorf("expected list error propagated, got %v", err)
+		}
+	})
+}
+
+// ===== Delete: 成功監査 / 不在は NotFound / 割当済み Conflict 伝達 + 失敗監査（Req 5.3 / 4.4 / 4.5） =====
+
+func TestService_Delete(t *testing.T) {
+	t.Run("削除成功時に Repository.Delete を委譲し成功監査を記録する", func(t *testing.T) {
+		// Arrange
+		h := newServiceHarness()
+		actor, tenantID, policyID := uuid.New(), uuid.New(), uuid.New()
+		h.repo.deleteAff = 1
+
+		// Act
+		err := h.svc.Delete(context.Background(), actor, tenantID, policyID)
+
+		// Assert: 委譲 + 成功監査（Req 5.3）。
+		if err != nil {
+			t.Fatalf("expected success, got %v", err)
+		}
+		if h.repo.deleteCount() != 1 {
+			t.Fatalf("expected Repository.Delete called once, got %d", h.repo.deleteCount())
+		}
+		evs := h.recorder.recorded()
+		if len(evs) != 1 || evs[0].Result != audit.ResultSuccess || evs[0].EventType != eventTypePolicyDelete {
+			t.Fatalf("expected 1 success policy_delete audit event, got %+v", evs)
+		}
+		if evs[0].ResourceID != policyID.String() {
+			t.Errorf("expected ResourceID=policy_id, got %q", evs[0].ResourceID)
+		}
+	})
+
+	t.Run("自テナント不在（affected=0）のとき NotFound を返し失敗監査を記録する", func(t *testing.T) {
+		// Arrange: WHERE tenant_id で 0 行（不在 / 他テナント越境）。
+		h := newServiceHarness()
+		actor, tenantID, policyID := uuid.New(), uuid.New(), uuid.New()
+		h.repo.deleteAff = 0
+
+		// Act
+		err := h.svc.Delete(context.Background(), actor, tenantID, policyID)
+
+		// Assert（Req 4.4 / 4.5）。
+		if got := codeOf(t, err); got != pkgerrors.CodeNotFound {
+			t.Fatalf("expected CodeNotFound on affected=0, got %s", got)
+		}
+		evs := h.recorder.recorded()
+		if len(evs) != 1 || evs[0].Result != audit.ResultFailure || evs[0].EventType != eventTypePolicyDelete {
+			t.Fatalf("expected 1 failure policy_delete audit event, got %+v", evs)
+		}
+	})
+
+	t.Run("割当済み端末ありの削除（Conflict）を 409 で伝達し失敗監査を記録する", func(t *testing.T) {
+		// Arrange: Repository が ErrDeleteConflict（FK 違反 / 409）を返す。
+		h := newServiceHarness()
+		actor, tenantID, policyID := uuid.New(), uuid.New(), uuid.New()
+		h.repo.deleteErr = ErrDeleteConflict
+
+		// Act
+		err := h.svc.Delete(context.Background(), actor, tenantID, policyID)
+
+		// Assert: 409 を伝達（Req 5.3 / design 確認事項 3）。
+		if got := codeOf(t, err); got != pkgerrors.CodeConflict {
+			t.Fatalf("expected CodeConflict (409), got %s", got)
+		}
+		if !stderrors.Is(err, ErrDeleteConflict) {
+			t.Errorf("expected ErrDeleteConflict propagated, got %v", err)
+		}
+		// 削除失敗も監査対象（Req 5.3）。
+		evs := h.recorder.recorded()
+		if len(evs) != 1 || evs[0].Result != audit.ResultFailure || evs[0].EventType != eventTypePolicyDelete {
+			t.Fatalf("expected 1 failure policy_delete audit event, got %+v", evs)
+		}
+	})
+
+	t.Run("監査 Detail に機密値を載せない", func(t *testing.T) {
+		// Arrange
+		h := newServiceHarness()
+		actor, tenantID, policyID := uuid.New(), uuid.New(), uuid.New()
+		h.repo.deleteAff = 1
+
+		// Act
+		_ = h.svc.Delete(context.Background(), actor, tenantID, policyID)
+
+		// Assert: Detail に testSecretValue が含まれない（Req 5.4）。Delete は raw body を持たないが、
+		// 安全 field のみ（policy_id / result）が載ることを担保する。
+		for _, ev := range h.recorder.recorded() {
+			assertNoSecretInDetail(t, ev.Detail)
+			if _, ok := ev.Detail["policy_id"]; !ok {
+				t.Error("expected policy_id in delete audit detail")
+			}
+		}
+	})
+}
+
+// ===== Assign: 成功で applied_policy_id 確定 / 他テナント不在は NotFound（Req 3.x / 4.2 / 4.3） =====
+
+func TestService_Assign(t *testing.T) {
+	t.Run("割当成功時に AssignPolicyToDevice へ委譲し成功監査を記録する", func(t *testing.T) {
+		// Arrange
+		h := newServiceHarness()
+		actor, tenantID, deviceID, policyID := uuid.New(), uuid.New(), uuid.New(), uuid.New()
+		h.repo.assignAff = 1
+
+		// Act
+		err := h.svc.Assign(context.Background(), actor, tenantID, deviceID, policyID)
+
+		// Assert: 委譲（tenantID / deviceID / policyID）+ 成功監査（Req 3.1）。
+		if err != nil {
+			t.Fatalf("expected success, got %v", err)
+		}
+		call, ok := h.repo.lastAssignCall()
+		if !ok || call.TenantID != tenantID || call.DeviceID != deviceID || call.PolicyID != policyID {
+			t.Fatalf("unexpected assign call: %+v ok=%v", call, ok)
+		}
+		evs := h.recorder.recorded()
+		if len(evs) != 1 || evs[0].Result != audit.ResultSuccess || evs[0].EventType != eventTypePolicyAssign {
+			t.Fatalf("expected 1 success policy_assign audit event, got %+v", evs)
+		}
+	})
+
+	t.Run("割当成功時に AMAPI を呼ばない（DB 更新までに限定）", func(t *testing.T) {
+		// Arrange: 割当は AMAPI device patch を行わない（design 確認事項 1）。
+		h := newServiceHarness()
+		actor, tenantID, deviceID, policyID := uuid.New(), uuid.New(), uuid.New(), uuid.New()
+		h.repo.assignAff = 1
+
+		// Act
+		_ = h.svc.Assign(context.Background(), actor, tenantID, deviceID, policyID)
+
+		// Assert
+		if h.amapi.callCount() != 0 {
+			t.Errorf("expected AMAPI not called on assign, got %d", h.amapi.callCount())
+		}
+	})
+
+	t.Run("他テナント device 指定（affected=0）のとき NotFound を返し失敗監査を記録する", func(t *testing.T) {
+		// Arrange: WHERE id AND tenant_id で 0 行 → (0, nil)（Req 3.3 / 4.3）。
+		h := newServiceHarness()
+		actor, tenantID, deviceID, policyID := uuid.New(), uuid.New(), uuid.New(), uuid.New()
+		h.repo.assignAff = 0
+		h.repo.assignErr = nil
+
+		// Act
+		err := h.svc.Assign(context.Background(), actor, tenantID, deviceID, policyID)
+
+		// Assert（Req 3.3 / 4.3 / 4.5）。
+		if got := codeOf(t, err); got != pkgerrors.CodeNotFound {
+			t.Fatalf("expected CodeNotFound on affected=0, got %s", got)
+		}
+		evs := h.recorder.recorded()
+		if len(evs) != 1 || evs[0].Result != audit.ResultFailure || evs[0].EventType != eventTypePolicyAssign {
+			t.Fatalf("expected 1 failure policy_assign audit event, got %+v", evs)
+		}
+	})
+
+	t.Run("他テナント policy 指定（複合 FK 違反）のとき NotFound を伝達し失敗監査を記録する", func(t *testing.T) {
+		// Arrange: Repository が ErrPolicyNotFound（FK 違反 / 存在差非露出）を返す（Req 3.2 / 4.2）。
+		h := newServiceHarness()
+		actor, tenantID, deviceID, policyID := uuid.New(), uuid.New(), uuid.New(), uuid.New()
+		h.repo.assignErr = ErrPolicyNotFound
+
+		// Act
+		err := h.svc.Assign(context.Background(), actor, tenantID, deviceID, policyID)
+
+		// Assert（Req 3.2 / 4.2 / 4.5）。
+		if got := codeOf(t, err); got != pkgerrors.CodeNotFound {
+			t.Fatalf("expected CodeNotFound on FK violation, got %s", got)
+		}
+		if !stderrors.Is(err, ErrPolicyNotFound) {
+			t.Errorf("expected ErrPolicyNotFound propagated, got %v", err)
+		}
+		evs := h.recorder.recorded()
+		if len(evs) != 1 || evs[0].Result != audit.ResultFailure {
+			t.Fatalf("expected 1 failure audit event, got %+v", evs)
+		}
+	})
+
+	t.Run("割当監査 Detail に device_id を載せ機密値を載せない", func(t *testing.T) {
+		// Arrange
+		h := newServiceHarness()
+		actor, tenantID, deviceID, policyID := uuid.New(), uuid.New(), uuid.New(), uuid.New()
+		h.repo.assignAff = 1
+
+		// Act
+		_ = h.svc.Assign(context.Background(), actor, tenantID, deviceID, policyID)
+
+		// Assert: Detail に device_id / policy_id が載り、機密値は載らない（Req 5.4）。
+		evs := h.recorder.recorded()
+		if len(evs) != 1 {
+			t.Fatalf("expected 1 audit event, got %d", len(evs))
+		}
+		assertNoSecretInDetail(t, evs[0].Detail)
+		if evs[0].Detail["device_id"] != deviceID.String() {
+			t.Errorf("expected device_id in assign detail, got %+v", evs[0].Detail)
+		}
+		if evs[0].Detail["policy_id"] != policyID.String() {
+			t.Errorf("expected policy_id in assign detail, got %+v", evs[0].Detail)
 		}
 	})
 }
