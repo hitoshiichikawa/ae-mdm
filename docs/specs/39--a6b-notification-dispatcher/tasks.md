@@ -50,7 +50,7 @@
   - _Depends: 3.1_
 
 - [ ] 5. dispatch 経路の結合テスト（実 PostgreSQL）
-- [ ] 5.1 notification_dispatch 結合テスト
+- [x] 5.1 notification_dispatch 結合テスト
   - `backend/test/integration/notification_dispatch_test.go`: 既存 helpers_test.go の requireDBURLs / migration 適用パターンに倣う。subscriber を介さず `Dispatcher.Handle` を直接駆動（Pub/Sub emulator 依存を避ける）。実 dedupe/unassigned repository + 実 tenant 逆引き、種別 handler は呼び出し回数を数える mock
   - 同一 MessageID を 2 回 Handle → 種別 handler 呼び出しが 1 回のみ（Req 6.1）
   - 未登録 enterprise_name の通知 → `unassigned_notifications` に INSERT され ack（Req 6.2）
