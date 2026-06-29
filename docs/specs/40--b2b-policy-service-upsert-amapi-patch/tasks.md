@@ -34,7 +34,7 @@
   - _Depends: 1.1_
 
 - [ ] 3. ポリシー upsert ユースケース（検証→AMAPI→snapshot→監査）を Service に実装
-- [ ] 3.1 `service.go` の `Create` / `Update` を実装 + `service_test.go`
+- [x] 3.1 `service.go` の `Create` / `Update` を実装 + `service_test.go`
   - 順序: mapper で Raw→PolicyInput → `policy.Validate` 検証ゲート → 検証失敗なら AMAPI/Repository を呼ばず早期 return（Req 2.5）→ `amapi.UpsertPolicy`（#34）→ 成功後に Repository へ snapshot 永続化（Req 1.3 / 1.5）→ `audit.Service.Record`（成否とも / Req 5.1 / 5.2）
   - AMAPI 再試行不可エラーは snapshot を確定保存せずそのまま伝達（Req 1.4）。検証エラーは `ValidationError.Kind.Code()` で 400/422 に写像し全件提示（Req 2.2 / 2.3 / 2.4）
   - enterprise_name は `tenant.Service.EnterpriseNameForTenant`（#38）で解決（tenant-scoped context）
