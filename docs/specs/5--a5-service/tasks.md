@@ -16,8 +16,8 @@
 >
 > 並列実行可能なタスクには `(P)` を付け、`_Boundary:_` で担当 Components を明示する。
 
-- [ ] 1. Audit ドメイン型 + Service（記録 / 閲覧 + 保持期間下限）+ 単体テスト
-- [ ] 1.1 Audit types + Clock + failure_kinds (P)
+- [x] 1. Audit ドメイン型 + Service（記録 / 閲覧 + 保持期間下限）+ 単体テスト
+- [x] 1.1 Audit types + Clock + failure_kinds (P)
   - `backend/internal/audit/types.go` を新規追加。`EventType string` / `ResultType string`
     （`ResultSuccess` / `ResultFailure` の 2 値）/ `Event`(ID / TenantID / ActorID / EventType /
     ResourceID / Detail `map[string]any` / Result / OccurredAt) / `Filter`(TenantID `*uuid.UUID` /
@@ -31,7 +31,7 @@
     platform/authz / platform/httpserver / config / logger / errors のみ import 可）を godoc に記載
   - _Requirements: 1.1, 1.2, 1.3, 1.4, 2.2, 2.3, 2.4, 2.5, 3.2_
   - _Boundary: AuditTypes_
-- [ ] 1.2 Audit Service 実装 + 単体テスト
+- [x] 1.2 Audit Service 実装 + 単体テスト
   - `backend/internal/audit/service.go` を新規追加。`Service interface { Record(ctx, Event) error;
     List(ctx, Filter) ([]Event, error) }`（update/delete IF は **公開しない** / Req 1.5）と
     `NewService(cfg config.Config, repo Repository, clock Clock) Service` を実装
@@ -57,8 +57,8 @@
   - _Boundary: AuditService_
   - _Depends: 1.1_
 
-- [ ] 2. Audit Repository（append-only INSERT + 保持下限付き SELECT / raw pgx）+ 単体テスト
-- [ ] 2.1 Repository 実装 + 動的 SQL 組み立ての単体テスト
+- [x] 2. Audit Repository（append-only INSERT + 保持下限付き SELECT / raw pgx）+ 単体テスト
+- [x] 2.1 Repository 実装 + 動的 SQL 組み立ての単体テスト
   - `backend/internal/audit/repository.go` を新規追加。`Repository interface { Insert(ctx, Event) error;
     Select(ctx, Filter, effectiveFrom time.Time) ([]Event, error) }`（UPDATE/DELETE メソッドは **持たない**
     / Req 1.5 / 6.1）と `NewRepository(pool *pgxpool.Pool) Repository` を実装（手本: `auth.repository`）
@@ -89,8 +89,8 @@
   - _Boundary: AuditRepository_
   - _Depends: 1.1_
 
-- [ ] 3. tenant-console Handler（own-tenant 閲覧 + Authorizer 連携）+ 単体テスト
-- [ ] 3.1 Handler 実装 + httptest 単体テスト
+- [x] 3. tenant-console Handler（own-tenant 閲覧 + Authorizer 連携）+ 単体テスト
+- [x] 3.1 Handler 実装 + httptest 単体テスト
   - `backend/internal/audit/handler.go` を新規追加。`Handler`（chi.Router 互換 / `ServeHTTP`）と
     `NewHandler(svc Service, authorizer *authz.Authorizer, log logger.Logger) *Handler` を実装。
     `cmd/api` が `routers.API.Mount("/audit-logs", handler)` で配線する（実 path `/api/audit-logs`）
@@ -128,8 +128,8 @@
   - _Boundary: AuditHandler_
   - _Depends: 1.2_
 
-- [ ] 4. admin-console Handler（cross-tenant 閲覧）+ 単体テスト
-- [ ] 4.1 AdminHandler 実装 + httptest 単体テスト
+- [x] 4. admin-console Handler（cross-tenant 閲覧）+ 単体テスト
+- [x] 4.1 AdminHandler 実装 + httptest 単体テスト
   - `backend/internal/audit/admin_handler.go` を新規追加。`AdminHandler`（chi.Router 互換）と
     `NewAdminHandler(svc Service, authorizer *authz.Authorizer, log logger.Logger) *AdminHandler` を実装。
     `cmd/api` が `routers.Admin.Mount("/audit-logs", adminHandler)` で配線する（実 path
@@ -163,8 +163,8 @@
   - _Boundary: AuditAdminHandler_
   - _Depends: 1.2_
 
-- [ ] 5. cmd/api への DI 配線 + Mount
-- [ ] 5.1 audit Service/Handler/AdminHandler の構築と Routers への Mount
+- [x] 5. cmd/api への DI 配線 + Mount
+- [x] 5.1 audit Service/Handler/AdminHandler の構築と Routers への Mount
   - `backend/cmd/api/main.go` を修正。`httpserver.NewServer(...)` の戻り値を `srv, routers, err`
     （現状 `srv, _, err` で破棄）に変更し、`routers` を受け取る
   - bootstrap の (6) http server 構築後に audit ドメインを配線:
@@ -188,8 +188,8 @@
   - _Boundary: APIWiring_
   - _Depends: 3.1, 4.1_
 
-- [ ] 6. 結合テスト（実 DB + RLS / append-only / 保持下限 / 空結果）
-- [ ] 6.1 audit integration test
+- [x] 6. 結合テスト（実 DB + RLS / append-only / 保持下限 / 空結果）
+- [x] 6.1 audit integration test
   - `backend/test/integration/audit_test.go` を新規追加（手本: `auth_repository_test.go` / `helpers_test.go`
     の `requireDBURLs` / `applyMigrationsUp` / `truncateAll` / `newAppPool` / `seedTenant` /
     `seedAdminUser`。DATABASE_URL 未設定で `t.Skip`）。実 `audit.NewRepository(pool)` /
