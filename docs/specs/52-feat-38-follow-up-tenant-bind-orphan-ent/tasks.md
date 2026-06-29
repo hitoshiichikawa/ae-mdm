@@ -19,7 +19,7 @@
   - _Boundary: types.go_
   - _Depends: 1.1_
 
-- [ ] 3. repository.go の予約・解放・回収メソッドと signup_url_name 永続化
+- [x] 3. repository.go の予約・解放・回収メソッドと signup_url_name 永続化
 - [x] 3.1 ReserveBinding / ReleaseBinding / UpdateBound(WHERE 変更) / Insert 永続化
   - `ReserveBinding`（`UPDATE ... status='binding' WHERE id=$ AND status='pending_bind'`、affected 返却 / Req 1.1）と `ReleaseBinding`（`status='pending_bind' WHERE id=$ AND status='binding'` / Req 1.5）を追加（既存 `superAdminContext`+`BeginTxFunc`+affected rows パターン踏襲）
   - `UpdateBound` の WHERE を `status='pending_bind'` から `status='binding'` へ変更（Req 1.4）。uq_tenants_enterprise_name の 23505→CodeConflict 写像は維持
