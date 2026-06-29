@@ -97,6 +97,31 @@
   テスト（Req 6.4）でカバーする（本 task は handler 単体 + 配線コードのみ / mock queue で検証）。
   Dispatcher 本体の worker 経路 wire-in は #35 scope 外で据え置き。
 
+### Task 5
+
+- **採用方針**: `backend/test/integration/notification_dispatch_test.go` を追加。subscriber /
+  Pub/Sub emulator を介さず `Dispatcher.Handle` を直接駆動し、実 `NewDedupe` / `NewUnassignedQueue` +
+  実 `tenant.NewService`（逆引き）を結線、種別 handler は呼び出し回数を数える mock で dispatch
+  経路を回帰検証（design.md Testing Strategy / Risk「worker wire-in scope 外」と整合）。
+- **重要な判断**:
+  - **bound テナント fixture は Insert→UpdateBound で採番**: `seedDummyData` は status='bound' でも
+    enterprise_name を設定しないため逆引きが成立しない。`tenant_repository_test.go` の
+    Insert→UpdateBound パターンで enterprise_name を保存した bound テナントを作り、payload の
+    `name` 接頭辞（`enterprises/{id}`）を tenant の enterprise_name と一致させて Verifier の
+    wire-format 解釈（task 2）に厳密に合わせた。
+  - **Req 6.4 は閲覧 API 経由を優先**: admin_handler を test server に Mount し、SuperAdmin
+    TenantContext を注入する middleware を被せて HTTP GET で取得・絞り込みを検証した（401/403 は
+    RequireAdminConsoleAndSuperAdmin の責務のため、`audit_test.go` の injectAuthClaimsMW と同方針で
+    ガードを bypass し閲覧経路に集中）。from/to は RFC3339、type は許可値のみ。
+  - **冪等性は実 DB の ON CONFLICT で検証**: 同一 MessageID を 2 回 Handle し handler 呼び出しが
+    1 回のみ + dedupe 記録で 2 回目が即 ack されることを実 notification_dedupe で確認（mock では
+    なく実 PK + ON CONFLICT 経路 / Req 6.1）。
+  - **DB 不在は t.Skip**: `requireDBURLs` で DATABASE_URL 未設定環境は全テスト skip。build には
+    必ず含まれ、go vet / golangci-lint も pass する（false-fail させない）。
+- **残存課題**: なし（task 5.1 で本 spec の全タスク完了 / 5 も昇格完了）。Dispatcher の cmd/worker
+  への wire-in は #35 scope 外で据え置き（暫定 handler のまま）。実 DB での pass 確認は本環境に
+  PostgreSQL が無いため未実施だが、skip 経路・build・vet・lint は green。
+
 ## 確認事項
 
 - **逆引き DB テストの配置（spec 表記との差異 / 非ブロッキング）**: tasks.md 1.1 は
