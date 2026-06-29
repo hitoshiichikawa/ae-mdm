@@ -57,6 +57,19 @@ type Repository interface {
 	// affected=0 は呼び出し側（Service）が「既に disabled＝二重無効化の競合」と判定する材料
 	// （Req 3.4）。
 	UpdateDisabled(ctx context.Context, id uuid.UUID, actor uuid.UUID) (int64, error)
+
+	// TenantIDByEnterpriseName は enterprise_name から bound テナントの id を逆引きする
+	// （Notification Dispatcher #39 / Req 3.1 / 3.2）。`EnterpriseNameForTenant` の対称メソッド。
+	//
+	// `SELECT id FROM tenants WHERE enterprise_name=$1 AND status='bound'` を SuperAdmin context
+	// で実行する。enterprise_name に対する部分一意 index `uq_tenants_enterprise_name`（非 NULL 行 /
+	// migration 0016）により bound 行は最大 1 件で信頼できる。
+	//
+	// 戻り値は `(uuid.UUID, found bool, error)`。0 件（未割当 = 未 bound / 不在 / 別 enterprise）は
+	// `found=false` を返し、これはエラーではない（呼び出し側 Dispatcher の退避経路 / Req 3.2）。
+	// DB 失敗は `*errors.Error{Code: CodeUnavailable, IsTransient: true}` で wrap し、worker の
+	// nack（再処理保持）判定に委ねる（Req 1.4 / dispatch 失敗の transient 写像）。
+	TenantIDByEnterpriseName(ctx context.Context, enterpriseName string) (uuid.UUID, bool, error)
 }
 
 // repository は Repository の pgxpool ベース実装。
@@ -250,6 +263,45 @@ func (r *repository) UpdateBound(ctx context.Context, id uuid.UUID, enterpriseNa
 		return 0, err
 	}
 	return affected, nil
+}
+
+// TenantIDByEnterpriseName は Repository.TenantIDByEnterpriseName の実装。
+func (r *repository) TenantIDByEnterpriseName(ctx context.Context, enterpriseName string) (uuid.UUID, bool, error) {
+	ctx = superAdminContext(ctx)
+	var (
+		id    uuid.UUID
+		found bool
+	)
+	err := db.BeginTxFunc(ctx, r.pool, func(tx pgx.Tx) error {
+		// 部分一意 index `uq_tenants_enterprise_name`（非 NULL 行 / 0016）により bound 行は最大 1 件。
+		// 0 件（未 bound / 不在 / 別 enterprise）は found=false（退避経路 / Req 3.2）でありエラーにしない。
+		row := tx.QueryRow(ctx,
+			`SELECT id
+			 FROM tenants
+			 WHERE enterprise_name = $1 AND status = 'bound'`,
+			enterpriseName,
+		)
+		if scanErr := row.Scan(&id); scanErr != nil {
+			if stderrors.Is(scanErr, pgx.ErrNoRows) {
+				// 一意に解決できない（= 未割当）。エラーではなく found=false で返す（Req 3.2）。
+				found = false
+				return nil
+			}
+			// DB 失敗は transient（再処理保持 / Req 1.4）として写像し worker の nack に委ねる。
+			return &pkgerrors.Error{
+				Code:        pkgerrors.CodeUnavailable,
+				Message:     "tenant reverse lookup failed",
+				IsTransient: true,
+				Cause:       scanErr,
+			}
+		}
+		found = true
+		return nil
+	})
+	if err != nil {
+		return uuid.Nil, false, err
+	}
+	return id, found, nil
 }
 
 // UpdateDisabled は Repository.UpdateDisabled の実装。

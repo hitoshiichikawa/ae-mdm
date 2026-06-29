@@ -134,6 +134,12 @@ func (f *fakeTenantService) EnterpriseNameForTenant(_ context.Context, _ uuid.UU
 	return "", nil
 }
 
+// TenantIDByEnterpriseName は Service 契約（#39 で追加された逆引きメソッド）を満たすための
+// テストダブル実装。Handler テストは逆引きを駆動しないため未割当（found=false）を返す。
+func (f *fakeTenantService) TenantIDByEnterpriseName(_ context.Context, _ string) (uuid.UUID, bool, error) {
+	return uuid.Nil, false, nil
+}
+
 // 型 assertion: fakeTenantService が Service interface を満たすことを compile-time で確認する。
 var _ Service = (*fakeTenantService)(nil)
 
