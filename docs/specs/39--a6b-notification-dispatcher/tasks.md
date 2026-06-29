@@ -31,7 +31,7 @@
   - _Requirements: 3.2, 3.3, 3.5, 4.1, 4.2, NFR 2.2, NFR 3.1_
   - _Boundary: UnassignedQueue_
   - _Depends: 2.1_
-- [ ] 3.2 Dispatcher（段階 orchestrate + ack/nack 写像）
+- [x] 3.2 Dispatcher（段階 orchestrate + ack/nack 写像）
   - `internal/notification/dispatcher.go`: `pubsub.MessageHandler` を実装（`Handle(ctx, *pubsub.Message) error`）。`NewDispatcher(verifier, dedupe, unassigned, tenantResolver, handlers map[NotificationType]NotificationHandler, log)`。段階: Verify → Dedup（既処理は即 ack / Req 1.2）→ Resolve（`TenantResolver.TenantIDByEnterpriseName`）→ 未割当は Enqueue + ack（Req 3.2 / 3.3）→ tenant context 確立 → 種別 handler 振り分け（Req 2.1-2.3）→ 成功時 dedupe MarkProcessed + ack（Req 1.1 / 5.2）
   - ack/nack 写像: 既処理 / 未割当退避成功 / 未登録種別（Req 2.4）/ 検証失敗・空 payload（Req 2.5 / 2.6）は `IsTransient=false` or nil（ack 完了扱い）。dedupe/退避の永続化失敗（Req 1.4）/ transient handler 失敗（Req 5.1 / 5.3）は `IsTransient=true`（nack 保持）。各段で message_id 構造化ログ（NFR 3.1）
   - tenant 未解決時はいずれのテナントリソースも更新しない（NFR 2.1 / 2.2）
