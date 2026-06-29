@@ -195,4 +195,36 @@ ITERATION-1 STATUS: complete
 
 ITERATION-3 STATUS: complete
 
+## Iteration ラウンド 4（PR #56 レビュー対応）
+
+レビュー（codex）4 件のうち裁定で legitimate 3 件 / excessive 1 件。対応内訳:
+
+- **[medium] 失敗監査の閲覧可能性が未実証（対応済み / 修正 commit）**: round-4 指摘の核心は、既存の
+  失敗経路テスト `TestTenantAuditWiring_PersistErrorIsPropagated` が**存在しない** tenant_id で FK 違反を
+  誘発し error 伝播のみを確認するため、「失敗監査が最終的に `/api/admin/audit-logs` で閲覧可能か」を
+  実証できていなかった点。tenant Service の失敗経路の大半は **実在テナントへの拒否**（lookup 成功後の
+  `already_bound` / `state_invalid` / `bind_conflict` 等。`service.go:230-273`）であり、これらは FK を満たし
+  永続化・閲覧できる。`TestTenantAuditWiring_FailureEventForExistingTenantPersistsAndIsListable` を新規追加し、
+  実在テナントへの失敗（拒否）監査が `Result=failure` のまま永続化 → List で閲覧可能になることを実 DB
+  （`DATABASE_URL` 設定時）で固定した（Req 1.2 / 1.3 / 2.3 / 4.2 を結合経路で補完）。これにより、FK で
+  残らないのは **非実在 tenant_id を載せた失敗監査に限る**ことが切り分けられる（下記 high 項参照）。
+- **[high] 存在しない tenant_id の失敗監査が FK で永続化されない件（要件/設計ギャップとして申し送り継続）**:
+  round-1 / round-3 から不変で本 PR スコープ内では修正不能（「確認事項 5」のとおり (a) `audit_logs` FK
+  スキーマ=#5 領分 / (b) lookup failure 時の tenant id 写像=#38 領分 / (c) Req 2.2・Req 5.2 によりアダプタ
+  単独では不可）。round-4 の medium 対応で「閲覧可能な失敗監査」が実証されたことにより、本 high が指す
+  gap は **非実在 tenant への操作試行に限定される**ことが明確化された。別 Issue 化提案を継続。
+- **[medium] design.md / tasks.md 不在（裁定 excessive / 対応なし・返信で boundary 説明）**: 本 Issue は
+  Triage で `needs_architect:false` の単一実装パスのため Architect 段（設計 PR ゲート）を経ておらず
+  design.md / tasks.md が存在しない。これらは Architect が別の設計 PR（人間レビュー済み）で作成する成果物で
+  あり、Developer が impl PR で新規作成することは agent 連携ルール・本 iteration モードの双方で禁止
+  （1 PR = design or impl）。requirements ⇄ 実装 / テストの追跡は本ファイル「AC Traceability」表で提供済み。
+- **[low] review-notes.md の HEAD commit / Reviewed Scope が陳腐化（対応なし・返信で説明）**: review-notes.md は
+  Reviewer エージェントの round-1 スナップショット（`round=1` / HEAD `2042ca4` 明記）であり、その後の
+  iteration 修正 commit（5a4868f / 057fb63 / 5601312 / 本 round）はすべて当該レビュー後に積まれたため陳腐化は
+  iteration フロー上不可避。Reviewer 成果物の rewrite は Developer の責務外（point-in-time のレビュー記録を
+  事後改変するのは不適切）。最新状態の追跡は本 impl-notes の AC Traceability 表が担い、再レビューが要れば
+  Reviewer の round-2 起動が正道。
+
+ITERATION-4 STATUS: complete
+
 STATUS: complete

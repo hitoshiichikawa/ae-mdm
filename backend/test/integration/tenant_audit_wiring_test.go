@@ -107,6 +107,58 @@ func TestTenantAuditWiring_SuccessEventPersistsAndIsListable(t *testing.T) {
 	}
 }
 
+// TestTenantAuditWiring_FailureEventForExistingTenantPersistsAndIsListable は、**実在テナント**への
+// 失敗監査イベント（拒否を含む。例: 既バインド済みテナントへの bind 拒否）が、結果区分「失敗」として
+// 記録要求され（Req 1.2）、実 audit.Repository を通って `audit_logs` へ永続化され、List（/api/admin/
+// audit-logs の backing）で `Result=failure` のまま閲覧可能になることを検証する（Req 1.3 / 2.3）。
+//
+// PR #56 round-4 レビュー指摘（#2）への対応: 既存の失敗経路テスト（PersistErrorIsPropagated）は
+// **存在しない** tenant_id で FK 違反を誘発し error 伝播のみを確認するため、「失敗監査が最終的に
+// 閲覧可能か」を実証できていなかった。本テストは、tenant Service の失敗経路の大半を占める
+// **実在テナントへの拒否（lookup 成功後の already_bound / state_invalid 等。`service.go:230-273`）**を
+// 対象に、失敗監査が永続化 → 閲覧まで届くことを実 DB で固定する。これにより、FK で残らないのは
+// **非実在 tenant_id を載せた失敗監査に限る**ことが切り分けられる（その gap は #1 / impl-notes
+// 「確認事項 5」で別 Issue 化を継続提案）。
+func TestTenantAuditWiring_FailureEventForExistingTenantPersistsAndIsListable(t *testing.T) {
+	// Arrange
+	rec, svc, ids, ctx, cleanup := setupTenantAuditWiring(t)
+	defer cleanup()
+
+	const denyReason = "tenant already bound" // 非機密の人間可読文言（service.go:230 の拒否理由相当）
+	ev := tenant.Event{
+		Actor:      ids.adminAID,  // 実在 admin_users（actor_id FK を満たす）
+		TenantID:   ids.tenantAID, // 実在 tenants（tenant_id FK を満たす = lookup 成功後の拒否を模す）
+		Operation:  tenant.OperationBind,
+		Result:     tenant.ResultFailure,
+		DenyReason: denyReason,
+	}
+
+	// Act: アダプタ → 実 audit.Service → 実 Repository → audit_logs へ INSERT（失敗区分で永続化）。
+	if err := rec.Record(ctx, ev); err != nil {
+		t.Fatalf("Record() 予期しないエラー: %v（実在テナントへの失敗監査は FK を満たし永続化されるはず）", err)
+	}
+
+	// Assert: tenant_bind で絞り込んだ List に、失敗区分の行が 1 件だけ現れ閲覧可能（Req 1.2 / 1.3）。
+	got, err := svc.List(ctx, audit.Filter{EventType: tenantaudit.EventTypeBind})
+	if err != nil {
+		t.Fatalf("List(): %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("List(tenant_bind) 件数 = %d, want 1（失敗監査が実 Repository 経由で永続化 + 閲覧可能）", len(got))
+	}
+	row := got[0]
+	if row.Result != audit.ResultFailure {
+		t.Errorf("Result = %q, want %q（失敗区分のまま永続化・閲覧 / Req 2.3）", row.Result, audit.ResultFailure)
+	}
+	if row.TenantID != ids.tenantAID {
+		t.Errorf("TenantID = %v, want %v (Req 2.2)", row.TenantID, ids.tenantAID)
+	}
+	// 失敗固有の非機密フィールド（deny_reason）が detail(jsonb) を往復して閲覧可能であること（Req 4.2）。
+	if dr, ok := row.Detail["deny_reason"]; !ok || dr != denyReason {
+		t.Errorf("detail[deny_reason] = %v (ok=%v), want %q", dr, ok, denyReason)
+	}
+}
+
 // TestTenantAuditWiring_PersistErrorIsPropagated は、実 audit.Repository での永続化失敗が、アダプタ境界で
 // 握りつぶされず呼び出し側へ error として伝播する（fail-closed / Req 3.1 / 3.2）ことを実 DB で検証する。
 // 永続化失敗の誘発には **存在しない非 nil tenant_id** を用いる（`audit_logs.tenant_id` の FK 違反）。
