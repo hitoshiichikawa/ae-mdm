@@ -38,6 +38,7 @@ import (
 	"github.com/hitoshiichikawa/ae-mdm/internal/platform/httpserver"
 	"github.com/hitoshiichikawa/ae-mdm/internal/platform/oidc"
 	"github.com/hitoshiichikawa/ae-mdm/internal/tenant"
+	"github.com/hitoshiichikawa/ae-mdm/internal/tenantaudit"
 )
 
 const (
@@ -219,7 +220,9 @@ func runBootstrap(ctx context.Context) int {
 	//
 	// cfg / pool / log は既存 bootstrap で構築済みのものを再利用する。Repository は pgxpool 経由で
 	// SuperAdmin context 下に tenants へアクセスし、Service は AMAPI Client（#34）と監査記録ポート
-	// （Audit Service 未実装のため interim の logger 実装）をオーケストレーションする。Handler を
+	// （(7) で構築済みの audit Service へ tenantaudit アダプタ経由で配線済み / #54）を
+	// オーケストレーションする。これにより tenant の作成 / bind / 無効化イベントが audit_logs へ
+	// 永続化され、`/api/admin/audit-logs` で閲覧可能になる（#54 Req 1 / 5.3）。Handler を
 	// `routers.Admin`（/api/admin chain + RequireAdminConsoleAndSuperAdmin ガード継承）へ Mount し、
 	// `/api/admin/tenants` 配下 5 endpoint を稼働させる（Req 6.1）。
 	//
@@ -233,7 +236,7 @@ func runBootstrap(ctx context.Context) int {
 		return 1
 	}
 	tenantRepo := tenant.NewRepository(pool)
-	tenantRecorder := tenant.NewLoggerRecorder(log)
+	tenantRecorder := tenantaudit.NewRecorder(auditSvc)
 	tenantSvc := tenant.NewService(tenantRepo, amapiClient, tenantRecorder, cfg, log)
 	tenantHandler := tenant.NewHandler(tenantSvc, log)
 	tenantHandler.Mount(routers.Admin)
