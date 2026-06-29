@@ -83,8 +83,9 @@ func (h *countingHandler) tenantContext() (bool, uuid.UUID) {
 }
 
 // retryableHandler は最初の failUntil 回まで一時的（IsTransient=true）error を返し、それ以降は成功する
-// mock handler。transient handler 失敗 → 実 Dedupe.Release → 再配信で再処理可能（Req 5.1 / 5.3）を、
-// fake の呼び出し回数ではなく実 notification_dedupe で固定するために使う（countingHandler は常に成功）。
+// mock handler。transient handler 失敗時は dedupe が記録されない（record-after-success: handler 成功
+// 後にのみ記録）→ 再配信で再処理可能（Req 5.1 / 5.3）を、fake の呼び出し回数ではなく実
+// notification_dedupe で固定するために使う（countingHandler は常に成功）。
 type retryableHandler struct {
 	mu        sync.Mutex
 	hits      int
@@ -114,9 +115,9 @@ func (h *retryableHandler) count() int {
 type dispatchFixture struct {
 	ctx        context.Context
 	dispatcher *notification.Dispatcher
-	verifier   notification.Verifier        // 別 handler 構成の Dispatcher を組み直す用
-	dedupe     notification.Dedupe          // 同上 + 実 DB の claim/release 検証用
-	resolver   notification.TenantResolver  // 同上（実 tenant 逆引き Service）
+	verifier   notification.Verifier       // 別 handler 構成の Dispatcher を組み直す用
+	dedupe     notification.Dedupe         // 同上 + 実 DB の dedupe 記録 / 既処理判定 検証用
+	resolver   notification.TenantResolver // 同上（実 tenant 逆引き Service）
 	unassigned notification.UnassignedQueue
 	handlers   map[notification.NotificationType]*countingHandler
 	tenantRepo tenant.Repository
@@ -242,12 +243,20 @@ func TestNotificationDispatch_DuplicateMessageID_DispatchedOnce(t *testing.T) {
 	}
 }
 
-// TestNotificationDispatch_ConcurrentDuplicateMessageID_DispatchedOnce はシナリオ (a) の並行版
-// （Req 1.3 / 6.1）。同一 MessageID の通知を複数 goroutine から **同時に** Handle しても、claim の
-// 直列化（INSERT ON CONFLICT (message_id) DO NOTHING + RowsAffected 判定）により handler 呼び出しが
-// ちょうど 1 回に留まることを実 DB で検証する。逐次 2 回ではなく真の並行到達を再現することで、
-// claim-first の直列化（dispatch 前に claim を取る設計）を回帰固定する。
-func TestNotificationDispatch_ConcurrentDuplicateMessageID_DispatchedOnce(t *testing.T) {
+// TestNotificationDispatch_ConcurrentDuplicateMessageID_RecordedOnceNoLoss は同一 MessageID の通知を
+// 複数 goroutine から **同時に** Handle したときの並行挙動を実 DB で検証する（Req 1.2 / 1.3 / 5.3）。
+//
+// 本 Dispatcher は handler 成功後に dedupe 記録する record-after-success（design.md L462-467）であり、
+// handler 副作用（IF 経由の本 Issue 外依存）と dedupe 記録を単一 tx に閉じられない。この設計は通知を
+// 喪失させない（Req 5.3 の no-loss 不変条件）ことを、稀な並行同時到達時の handler 一回実行より優先
+// する。したがって真の同時到達では handler が複数回呼ばれうる（at-least-once 配信前提で handler 冪等
+// 性が吸収する / 各 handler 側 Issue の責務）。本テストは claim-first の「同時到達でも handler ちょうど
+// 1 回」ではなく、設計が保証する以下を回帰固定する:
+//   - いずれの goroutine も喪失せず ack 完了（error を返さない / Req 5.3）
+//   - dedupe 記録は PK + ON CONFLICT で 1 行へ収束（IsProcessed=true / Req 1.2 / 1.3 の「直列化」）
+//   - dispatch された経路で bound テナントの tenant context が確立される（Req 3.1）
+//   - 記録確定後の再配信は既処理 fast-path で handler を再実行しない（Req 1.2 / 6.1）
+func TestNotificationDispatch_ConcurrentDuplicateMessageID_RecordedOnceNoLoss(t *testing.T) {
 	// Arrange: bound テナントと、その enterprise_name に解決される ENROLLMENT 通知を 1 件用意する。
 	f := setupDispatch(t)
 	defer f.cleanup()
@@ -271,25 +280,45 @@ func TestNotificationDispatch_ConcurrentDuplicateMessageID_DispatchedOnce(t *tes
 	close(start)
 	wg.Wait()
 
-	// Assert: すべての呼び出しが ack 完了（error なし）で、handler 呼び出しは 1 回のみ（Req 1.3 / 6.1）。
+	// Assert 1: すべての呼び出しが喪失せず ack 完了（error なし / Req 5.3）。
 	for i, err := range errs {
 		if err != nil {
-			t.Errorf("Handle goroutine[%d] が error を返した: %v（並行重複は ack 完了を期待）", i, err)
+			t.Errorf("Handle goroutine[%d] が error を返した: %v（並行重複は喪失せず ack 完了を期待）", i, err)
 		}
 	}
-	if got := f.handlers[notification.Enrollment].count(); got != 1 {
-		t.Errorf("ENROLLMENT handler 呼び出し回数 = %d; want 1（並行同一 MessageID の直列化 / Req 1.3 / 6.1）", got)
+
+	// Assert 2: dedupe 記録は 1 行へ収束し既処理判定が true（PK + ON CONFLICT の直列化 / Req 1.2 / 1.3）。
+	processed, err := f.dedupe.IsProcessed(f.saCtx, msg.ID)
+	if err != nil {
+		t.Fatalf("IsProcessed: %v", err)
 	}
-	// 唯一 dispatch された経路で bound テナントの tenant context が確立されていること（Req 3.1）。
+	if !processed {
+		t.Fatalf("並行処理後に dedupe 記録が無い; want 記録済み（PK + ON CONFLICT で 1 行に収束 / Req 1.2 / 1.3）")
+	}
+
+	// Assert 3: handler は最低 1 回呼ばれ（喪失しない）、dispatch 経路で bound テナント context が確立される（Req 3.1）。
+	burstHits := f.handlers[notification.Enrollment].count()
+	if burstHits < 1 || burstHits > goroutines {
+		t.Errorf("ENROLLMENT handler 呼び出し回数 = %d; want 1..%d（並行同時到達では冪等 handler が複数回呼ばれうる / design.md L462-467）", burstHits, goroutines)
+	}
 	if seen, id := f.handlers[notification.Enrollment].tenantContext(); !seen || id != tenantID {
 		t.Errorf("handler 到達時の tenant context = (seen=%v, id=%v); want (true, %v)（Req 3.1）", seen, id, tenantID)
 	}
+
+	// Assert 4: 記録確定後の再配信は既処理 fast-path で dispatch されず handler を再実行しない（Req 1.2 / 6.1）。
+	if err := f.dispatcher.Handle(f.ctx, msg); err != nil {
+		t.Fatalf("Handle(再配信): %v（既処理は即 ack を期待）", err)
+	}
+	if got := f.handlers[notification.Enrollment].count(); got != burstHits {
+		t.Errorf("再配信後の handler 呼び出し回数 = %d; want %d（記録確定後の再配信は再 dispatch しない / Req 1.2 / 6.1）", got, burstHits)
+	}
 }
 
-// TestNotificationDispatch_TransientHandlerFailure_Reprocessable は一時的 handler 失敗時に claim が
-// **実 DB から release** され、同一 MessageID の再配信で再処理されること（Req 5.1 / 5.3 の中核分岐）を
-// 実 notification_dedupe で検証する。fake の Release 呼び出し回数ではなく、実 DELETE 後に
-// IsProcessed=false へ戻り 2 回目の Handle で handler が再度呼ばれること（喪失せず再処理）を固定する。
+// TestNotificationDispatch_TransientHandlerFailure_Reprocessable は一時的 handler 失敗時に dedupe が
+// **記録されない**（record-after-success: handler 成功後にのみ記録 / design.md L462-467）ため、同一
+// MessageID の再配信で再処理されること（Req 5.1 / 5.3 の中核分岐）を実 notification_dedupe で検証する。
+// fake の呼び出し回数ではなく、1 回目失敗後に IsProcessed=false（未記録）であり、2 回目の Handle で
+// handler が再度呼ばれること（喪失せず再処理）を固定する。
 func TestNotificationDispatch_TransientHandlerFailure_Reprocessable(t *testing.T) {
 	// Arrange: bound テナントと、最初の 1 回だけ transient 失敗する handler を結線した Dispatcher を組む。
 	f := setupDispatch(t)
@@ -311,13 +340,13 @@ func TestNotificationDispatch_TransientHandlerFailure_Reprocessable(t *testing.T
 		t.Fatalf("Handle(1 回目) は nack（ShouldAck=false）であるべき: err=%v", err1)
 	}
 
-	// Assert: claim が実 DB から release され、既処理判定が false に戻る（再処理可能 / Req 5.3）。
+	// Assert: dedupe は記録されておらず、既処理判定が false のまま（再処理可能 / Req 5.3）。
 	processed, err := f.dedupe.IsProcessed(f.saCtx, msg.ID)
 	if err != nil {
 		t.Fatalf("IsProcessed(1 回目後): %v", err)
 	}
 	if processed {
-		t.Fatalf("transient 失敗後に dedupe 記録が残存; want 削除済み（喪失せず再処理可能 / Req 5.1 / 5.3）")
+		t.Fatalf("transient 失敗後に dedupe 記録が存在; want 未記録（成功後にのみ記録 = 喪失せず再処理可能 / Req 5.1 / 5.3）")
 	}
 
 	// Act 2: 同一 MessageID を再配信。handler は今度は成功する。
@@ -329,13 +358,13 @@ func TestNotificationDispatch_TransientHandlerFailure_Reprocessable(t *testing.T
 	if got := handler.count(); got != 2 {
 		t.Errorf("handler 呼び出し回数 = %d; want 2（transient 失敗 → 再配信で再処理 / Req 5.1 / 5.3）", got)
 	}
-	// 再処理成功後は claim が残り既処理判定が true（成功で dedupe 記録される / Req 5.2）。
+	// 再処理成功後は dedupe 記録があり既処理判定が true（handler 成功後に MarkProcessed / Req 5.2）。
 	processed, err = f.dedupe.IsProcessed(f.saCtx, msg.ID)
 	if err != nil {
 		t.Fatalf("IsProcessed(2 回目後): %v", err)
 	}
 	if !processed {
-		t.Errorf("再処理成功後に dedupe 記録が無い; want 記録済み（成功は claim を残す / Req 5.2）")
+		t.Errorf("再処理成功後に dedupe 記録が無い; want 記録済み（成功時に MarkProcessed / Req 5.2）")
 	}
 }
 
@@ -414,9 +443,9 @@ func TestNotificationDispatch_UnregisteredType_NotQuarantined(t *testing.T) {
 
 // TestNotificationDispatch_ConcurrentUnresolvable_QuarantinedOnce は同一 MessageID の未割当通知が
 // 複数 goroutine から **同時に** Handle されても、unassigned_notifications への退避がちょうど 1 行に
-// 留まることを実 DB で検証する（Req 1.3 / 3.3）。退避は dedupe claim と退避 INSERT を同一 tx で
-// 原子的に行うため、並行 / 再配信の重複が退避キューに重複行を作らないことを回帰固定する
-// （旧 claim-first 実装では claim と退避が別操作で、claim 後・退避前に停止すると取りこぼし得た）。
+// 留まることを実 DB で検証する（Req 1.3 / 3.3）。退避は dedupe 記録（markProcessedSQL）と退避 INSERT を
+// 同一 tx で原子的に行うため、並行 / 再配信の重複が退避キューに重複行を作らないことを回帰固定する
+// （退避は handler 非関与の終端処理のため、dispatch 経路と異なり記録と副作用を単一 tx に閉じられる）。
 func TestNotificationDispatch_ConcurrentUnresolvable_QuarantinedOnce(t *testing.T) {
 	// Arrange: bound テナントを作らず（逆引き不能）、登録済み種別の未割当通知を 1 件用意する。
 	f := setupDispatch(t)

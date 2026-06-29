@@ -10,37 +10,26 @@ import (
 	pkgerrors "github.com/hitoshiichikawa/ae-mdm/internal/errors"
 )
 
-// TestClaimSQL_ContainsOnConflictDoNothing は claim INSERT 文が
-// ON CONFLICT (message_id) DO NOTHING を含むことを検証する（Req 1.3 = 並行同一 MessageID の
-// 直列化を PK + ON CONFLICT で担保。audit の SQL 文字列 assert と同型の documenting テスト）。
-func TestClaimSQL_ContainsOnConflictDoNothing(t *testing.T) {
-	// Arrange / Act: claimSQL は const のため直接検証する。
+// TestMarkProcessedSQL_ContainsOnConflictDoNothing は dedupe 記録 INSERT 文が
+// ON CONFLICT (message_id) DO NOTHING を含むことを検証する（Req 1.2 / 1.3 = 並行 / 再配信の同一
+// MessageID 記録を PK + ON CONFLICT で 1 行へ収束。audit の SQL 文字列 assert と同型の
+// documenting テスト）。dispatch 経路では handler 成功後に本 SQL で記録する（record-after-success）。
+func TestMarkProcessedSQL_ContainsOnConflictDoNothing(t *testing.T) {
+	// Arrange / Act: markProcessedSQL は const のため直接検証する。
 
 	// Assert
-	if !strings.Contains(claimSQL, "INSERT INTO notification_dedupe") {
-		t.Errorf("notification_dedupe への INSERT であるべき: got %q", claimSQL)
+	if !strings.Contains(markProcessedSQL, "INSERT INTO notification_dedupe") {
+		t.Errorf("notification_dedupe への INSERT であるべき: got %q", markProcessedSQL)
 	}
-	if !strings.Contains(claimSQL, "ON CONFLICT (message_id) DO NOTHING") {
-		t.Errorf("ON CONFLICT (message_id) DO NOTHING を含むべき（冪等機構 / Req 1.3）: got %q", claimSQL)
+	if !strings.Contains(markProcessedSQL, "ON CONFLICT (message_id) DO NOTHING") {
+		t.Errorf("ON CONFLICT (message_id) DO NOTHING を含むべき（冪等機構 / Req 1.2 / 1.3）: got %q", markProcessedSQL)
 	}
 	// $1 = message_id / $2 = notification_type の 2 引数を bind する。
-	if !strings.Contains(claimSQL, "(message_id, notification_type)") {
-		t.Errorf("message_id / notification_type の 2 列を INSERT すべき: got %q", claimSQL)
+	if !strings.Contains(markProcessedSQL, "(message_id, notification_type)") {
+		t.Errorf("message_id / notification_type の 2 列を INSERT すべき: got %q", markProcessedSQL)
 	}
-	if !strings.Contains(claimSQL, "VALUES ($1, $2)") {
-		t.Errorf("$1 / $2 のプレースホルダで bind すべき: got %q", claimSQL)
-	}
-}
-
-// TestReleaseSQL_DeletesByMessageID は claim 取り消し DELETE 文が message_id を条件に
-// notification_dedupe から削除することを検証する（Req 5.1 / 5.3 = 後続処理失敗時の claim 取り消し）。
-func TestReleaseSQL_DeletesByMessageID(t *testing.T) {
-	// Arrange / Act / Assert
-	if !strings.Contains(releaseSQL, "DELETE FROM notification_dedupe") {
-		t.Errorf("notification_dedupe からの DELETE であるべき: got %q", releaseSQL)
-	}
-	if !strings.Contains(releaseSQL, "WHERE message_id = $1") {
-		t.Errorf("message_id を条件にすべき: got %q", releaseSQL)
+	if !strings.Contains(markProcessedSQL, "VALUES ($1, $2)") {
+		t.Errorf("$1 / $2 のプレースホルダで bind すべき: got %q", markProcessedSQL)
 	}
 }
 

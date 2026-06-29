@@ -21,35 +21,24 @@ type fakeVerifier struct {
 
 func (f *fakeVerifier) Parse(_ *pubsub.Message) (Envelope, error) { return f.env, f.err }
 
-// fakeDedupe は Dedupe の mock。IsProcessed / Claim / Release の戻り値と呼び出し回数を記録する。
+// fakeDedupe は Dedupe の mock。IsProcessed / MarkProcessed の戻り値と呼び出し回数を記録する。
 //
-// claimConflict=true で Claim を claimed=false（既に他者が claim 済み = 並行重複）に倒す。
-// claimErr / releaseErr で各操作の DB 失敗を注入できる。
+// markErr で MarkProcessed（handler 成功後の dedupe 記録）の DB 失敗を、isProcessedErr で既処理
+// 判定の DB 失敗を注入できる。
 type fakeDedupe struct {
 	processed      bool
 	isProcessedErr error
-	claimConflict  bool
-	claimErr       error
-	releaseErr     error
-	claimHit       int
-	releaseHit     int
+	markErr        error
+	markHit        int
 }
 
 func (f *fakeDedupe) IsProcessed(_ context.Context, _ string) (bool, error) {
 	return f.processed, f.isProcessedErr
 }
 
-func (f *fakeDedupe) Claim(_ context.Context, _ string, _ NotificationType) (bool, error) {
-	f.claimHit++
-	if f.claimErr != nil {
-		return false, f.claimErr
-	}
-	return !f.claimConflict, nil
-}
-
-func (f *fakeDedupe) Release(_ context.Context, _ string) error {
-	f.releaseHit++
-	return f.releaseErr
+func (f *fakeDedupe) MarkProcessed(_ context.Context, _ string, _ NotificationType) error {
+	f.markHit++
+	return f.markErr
 }
 
 // fakeUnassigned は UnassignedQueue の mock。Enqueue の戻り値と呼び出し回数を記録する。
@@ -132,12 +121,11 @@ func TestDispatcherHandle(t *testing.T) {
 		// 期待
 		wantAck        bool // ShouldAck の期待値（true=ack 完了扱い / false=nack 保持）
 		wantHandlerHit int
-		wantClaimHit   int // dedupe.Claim 呼び出し回数（dispatch / 退避の前に取る）
-		wantReleaseHit int // dedupe.Release 呼び出し回数（後続処理失敗時の claim 取り消し）
+		wantMarkHit    int // dedupe.MarkProcessed 呼び出し回数（handler 成功後にのみ記録 = record-after-success）
 		wantEnqueueHit int
 	}{
 		{
-			name:           "検証失敗（恒常的）のとき claim せず ack 完了扱いにする（Req 2.5）",
+			name:           "検証失敗（恒常的）のとき記録せず ack 完了扱いにする（Req 2.5）",
 			verifier:       &fakeVerifier{err: permanentErr()},
 			dedupe:         &fakeDedupe{},
 			unassigned:     &fakeUnassigned{},
@@ -145,12 +133,11 @@ func TestDispatcherHandle(t *testing.T) {
 			handler:        &fakeHandler{},
 			wantAck:        true,
 			wantHandlerHit: 0,
-			wantClaimHit:   0,
-			wantReleaseHit: 0,
+			wantMarkHit:    0,
 			wantEnqueueHit: 0,
 		},
 		{
-			name:           "既処理 MessageID のとき claim せず即 ack する（Req 1.2 fast-path）",
+			name:           "既処理 MessageID のとき記録せず即 ack する（Req 1.2 fast-path）",
 			verifier:       &fakeVerifier{env: validEnvelope(Enrollment)},
 			dedupe:         &fakeDedupe{processed: true},
 			unassigned:     &fakeUnassigned{},
@@ -158,12 +145,11 @@ func TestDispatcherHandle(t *testing.T) {
 			handler:        &fakeHandler{},
 			wantAck:        true,
 			wantHandlerHit: 0,
-			wantClaimHit:   0,
-			wantReleaseHit: 0,
+			wantMarkHit:    0,
 			wantEnqueueHit: 0,
 		},
 		{
-			name:           "dedupe 判定の DB 失敗のとき claim せず nack 保持する（Req 1.4）",
+			name:           "dedupe 判定の DB 失敗のとき記録せず nack 保持する（Req 1.4）",
 			verifier:       &fakeVerifier{env: validEnvelope(Enrollment)},
 			dedupe:         &fakeDedupe{isProcessedErr: transientErr()},
 			unassigned:     &fakeUnassigned{},
@@ -171,8 +157,7 @@ func TestDispatcherHandle(t *testing.T) {
 			handler:        &fakeHandler{},
 			wantAck:        false,
 			wantHandlerHit: 0,
-			wantClaimHit:   0,
-			wantReleaseHit: 0,
+			wantMarkHit:    0,
 			wantEnqueueHit: 0,
 		},
 		{
@@ -184,8 +169,7 @@ func TestDispatcherHandle(t *testing.T) {
 			handler:        &fakeHandler{},
 			wantAck:        true,
 			wantHandlerHit: 0,
-			wantClaimHit:   0, // 退避経路の claim は Enqueue 内部（同一 tx）で取るため dispatcher は Claim を呼ばない
-			wantReleaseHit: 0,
+			wantMarkHit:    0, // 退避経路の dedupe 記録は Enqueue 内部（同一 tx）。dispatcher は MarkProcessed を呼ばない
 			wantEnqueueHit: 1,
 		},
 		{
@@ -201,8 +185,7 @@ func TestDispatcherHandle(t *testing.T) {
 			handler:        &fakeHandler{},
 			wantAck:        true,
 			wantHandlerHit: 0,
-			wantClaimHit:   0,
-			wantReleaseHit: 0,
+			wantMarkHit:    0,
 			wantEnqueueHit: 1,
 		},
 		{
@@ -214,12 +197,11 @@ func TestDispatcherHandle(t *testing.T) {
 			handler:        nil, // handlers map に Enrollment を登録しない（未登録種別 = 例: AMAPI test 通知）
 			wantAck:        true,
 			wantHandlerHit: 0,
-			wantClaimHit:   0,
-			wantReleaseHit: 0,
+			wantMarkHit:    0,
 			wantEnqueueHit: 0, // 未登録種別は退避せず ack（退避キューを汚さない / Req 2.4 が Req 3.2 に優先）
 		},
 		{
-			name:           "tenant 逆引きの DB 失敗（transient）のとき claim せず nack 保持する（Req 1.4）",
+			name:           "tenant 逆引きの DB 失敗（transient）のとき記録せず nack 保持する（Req 1.4）",
 			verifier:       &fakeVerifier{env: validEnvelope(Enrollment)},
 			dedupe:         &fakeDedupe{},
 			unassigned:     &fakeUnassigned{},
@@ -227,8 +209,7 @@ func TestDispatcherHandle(t *testing.T) {
 			handler:        &fakeHandler{},
 			wantAck:        false,
 			wantHandlerHit: 0,
-			wantClaimHit:   0, // claim は resolve 後のため未到達
-			wantReleaseHit: 0,
+			wantMarkHit:    0,
 			wantEnqueueHit: 0,
 		},
 		{
@@ -240,12 +221,11 @@ func TestDispatcherHandle(t *testing.T) {
 			handler:        &fakeHandler{},
 			wantAck:        false,
 			wantHandlerHit: 0,
-			wantClaimHit:   0, // claim は Enqueue 内部（同一 tx）。失敗時も同 tx で rollback され dispatcher は release しない
-			wantReleaseHit: 0,
+			wantMarkHit:    0, // 退避経路の dedupe 記録は Enqueue 内部（同一 tx）。失敗時も同 tx で rollback される
 			wantEnqueueHit: 1,
 		},
 		{
-			name:           "未登録種別のとき claim せず取りこぼさず ack 完了扱いにする（Req 2.4）",
+			name:           "未登録種別のとき記録せず取りこぼさず ack 完了扱いにする（Req 2.4）",
 			verifier:       &fakeVerifier{env: validEnvelope(Enrollment)},
 			dedupe:         &fakeDedupe{},
 			unassigned:     &fakeUnassigned{},
@@ -253,38 +233,11 @@ func TestDispatcherHandle(t *testing.T) {
 			handler:        nil, // handlers map に Enrollment を登録しない
 			wantAck:        true,
 			wantHandlerHit: 0,
-			wantClaimHit:   0, // handler 不在のため claim しない（dedupe 記録を残さない）
-			wantReleaseHit: 0,
+			wantMarkHit:    0, // handler 不在のため dispatch せず dedupe も記録しない
 			wantEnqueueHit: 0,
 		},
 		{
-			name:           "並行重複で claim 敗北（dispatch 経路）のとき handler を呼ばず ack する（Req 1.3）",
-			verifier:       &fakeVerifier{env: validEnvelope(Enrollment)},
-			dedupe:         &fakeDedupe{claimConflict: true},
-			unassigned:     &fakeUnassigned{},
-			resolver:       &fakeResolver{id: resolvedTenantID, found: true},
-			handler:        &fakeHandler{},
-			wantAck:        true,
-			wantHandlerHit: 0, // 敗者は handler を呼ばない（二重実行防止）
-			wantClaimHit:   1,
-			wantReleaseHit: 0,
-			wantEnqueueHit: 0,
-		},
-		{
-			name:           "claim の DB 失敗（dispatch 経路）のとき handler を呼ばず nack 保持する（Req 1.4）",
-			verifier:       &fakeVerifier{env: validEnvelope(Enrollment)},
-			dedupe:         &fakeDedupe{claimErr: transientErr()},
-			unassigned:     &fakeUnassigned{},
-			resolver:       &fakeResolver{id: resolvedTenantID, found: true},
-			handler:        &fakeHandler{},
-			wantAck:        false,
-			wantHandlerHit: 0,
-			wantClaimHit:   1,
-			wantReleaseHit: 0,
-			wantEnqueueHit: 0,
-		},
-		{
-			name:           "transient handler 失敗のとき claim を release して nack 保持する（Req 5.1 5.3）",
+			name:           "transient handler 失敗のとき記録せず nack 保持する（再配信で再処理 / Req 5.1 5.3）",
 			verifier:       &fakeVerifier{env: validEnvelope(Enrollment)},
 			dedupe:         &fakeDedupe{},
 			unassigned:     &fakeUnassigned{},
@@ -292,12 +245,11 @@ func TestDispatcherHandle(t *testing.T) {
 			handler:        &fakeHandler{err: transientErr()},
 			wantAck:        false,
 			wantHandlerHit: 1,
-			wantClaimHit:   1,
-			wantReleaseHit: 1, // handler 失敗 → claim 取り消し
+			wantMarkHit:    0, // handler 失敗時は dedupe を記録しない（記録が無いので再配信で再処理される）
 			wantEnqueueHit: 0,
 		},
 		{
-			name:           "恒常的 handler 失敗のとき claim を残して ack 完了扱いにする（後続 duplicate の再 dispatch を防ぐ / 5.1 の対偶）",
+			name:           "恒常的 handler 失敗のとき記録せず ack 完了扱いにする（成功した処理のみ dedupe される / 5.1 の対偶）",
 			verifier:       &fakeVerifier{env: validEnvelope(Enrollment)},
 			dedupe:         &fakeDedupe{},
 			unassigned:     &fakeUnassigned{},
@@ -305,25 +257,23 @@ func TestDispatcherHandle(t *testing.T) {
 			handler:        &fakeHandler{err: permanentErr()},
 			wantAck:        true, // non-transient → ShouldAck=ack（恒常的失敗は再配信しても結果が変わらない）
 			wantHandlerHit: 1,
-			wantClaimHit:   1,
-			wantReleaseHit: 0, // 恒常的失敗は claim を残す（ack 済み = 後続 duplicate を既処理判定で抑止）
+			wantMarkHit:    0, // 恒常的失敗も記録しない（dedupe には成功した処理のみが残る）
 			wantEnqueueHit: 0,
 		},
 		{
-			name:           "handler 失敗かつ release 失敗でも元の error で nack 保持する（claim orphan は ERROR ログ）",
+			name:           "handler 成功後の dedupe 記録失敗（transient）のとき nack 保持する（Req 1.4）",
 			verifier:       &fakeVerifier{env: validEnvelope(Enrollment)},
-			dedupe:         &fakeDedupe{releaseErr: transientErr()},
+			dedupe:         &fakeDedupe{markErr: transientErr()},
 			unassigned:     &fakeUnassigned{},
 			resolver:       &fakeResolver{id: resolvedTenantID, found: true},
-			handler:        &fakeHandler{err: transientErr()},
-			wantAck:        false, // release 失敗は元の handler 失敗の nack 判定を上書きしない
+			handler:        &fakeHandler{},
+			wantAck:        false, // 記録失敗は transient nack（再配信で handler 再実行 → 冪等吸収）
 			wantHandlerHit: 1,
-			wantClaimHit:   1,
-			wantReleaseHit: 1,
+			wantMarkHit:    1, // handler 成功後に記録を試みるが失敗
 			wantEnqueueHit: 0,
 		},
 		{
-			name:           "成功時に claim 後 handler を 1 回呼び release せず ack する（Req 1.1 5.2）",
+			name:           "成功時に handler を 1 回呼び handler 成功後に dedupe 記録して ack する（Req 1.1 5.2）",
 			verifier:       &fakeVerifier{env: validEnvelope(Enrollment)},
 			dedupe:         &fakeDedupe{},
 			unassigned:     &fakeUnassigned{},
@@ -331,8 +281,7 @@ func TestDispatcherHandle(t *testing.T) {
 			handler:        &fakeHandler{},
 			wantAck:        true,
 			wantHandlerHit: 1,
-			wantClaimHit:   1,
-			wantReleaseHit: 0, // 成功時は claim を残す
+			wantMarkHit:    1, // 成功時のみ dedupe 記録（record-after-success）
 			wantEnqueueHit: 0,
 		},
 	}
@@ -356,11 +305,8 @@ func TestDispatcherHandle(t *testing.T) {
 			if tt.handler != nil && tt.handler.hit != tt.wantHandlerHit {
 				t.Errorf("handler 呼び出し回数 mismatch: want %d, got %d", tt.wantHandlerHit, tt.handler.hit)
 			}
-			if tt.dedupe.claimHit != tt.wantClaimHit {
-				t.Errorf("Claim 呼び出し回数 mismatch: want %d, got %d", tt.wantClaimHit, tt.dedupe.claimHit)
-			}
-			if tt.dedupe.releaseHit != tt.wantReleaseHit {
-				t.Errorf("Release 呼び出し回数 mismatch: want %d, got %d", tt.wantReleaseHit, tt.dedupe.releaseHit)
+			if tt.dedupe.markHit != tt.wantMarkHit {
+				t.Errorf("MarkProcessed 呼び出し回数 mismatch: want %d, got %d", tt.wantMarkHit, tt.dedupe.markHit)
 			}
 			if tt.unassigned.enqueueHit != tt.wantEnqueueHit {
 				t.Errorf("Enqueue 呼び出し回数 mismatch: want %d, got %d", tt.wantEnqueueHit, tt.unassigned.enqueueHit)

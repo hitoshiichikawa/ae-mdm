@@ -256,4 +256,87 @@ iteration round 2）」で提起）。
 green。単体 `internal/notification` / `internal/errors`（`-race`）green。結合テストは本環境に
 PostgreSQL が無いため `requireDBURLs` で skip（build / vet は pass）。
 
+## PR Iteration round 3（PR #59 / codex review sha `ff5cdd0` 対応 / #39）
+
+codex の静的レビュー（VERDICT: needs-iteration / 自動裁定: legitimate 5/5）への対応。round 1〜2 で
+「claim-first は既存スキーマでは Req 5.3 を満たせない構造的制約」と deferred していた指摘を、**実装を
+design.md 準拠の record-after-success へ戻す**ことで根治した。`requirements.md` / `design.md` /
+`tasks.md` は impl PR のため書き換えていない（矛盾は PR 返信と本セクション末尾「確認事項」で提起）。
+
+### 方針転換の根拠: design.md は元々 record-after-success を指定していた
+
+round 1 で「Req 1.3 の並行直列化」を満たすために claim-first（handler 実行 **前**に dedupe 記録）へ
+移行したが、これは human レビュー済みの design.md の支配的な指定から逸脱していた。design.md の指定:
+
+- L161 Traceability: `1.1 | 未処理通知は dedupe 記録後に dispatch | ... | Dedup→Resolve→Handler→**Persist**`
+  （フローは Handler の **後** に Persist = 記録）
+- L207-209 / L382: 「**dedupe 記録は handler 成功後に行う**」
+- L288-290 Components: `Dedupe` IF = `IsProcessed` + **`MarkProcessed`**（`Claim`/`Release` ではない）
+- L462-467 Risk（dedupe 記録と handler 副作用の非原子性）: 「**handler 成功後に dedupe 記録**する設計
+  とし、handler 失敗時は dedupe を記録せず nack 保持する（5.1 / 5.3）。成功した処理のみ dedupe される」
+
+claim-first はこの human-approved 設計を impl PR で上書きし、かつ codex 指摘の 2 つの喪失窓
+（[high]）を**作り込んでいた**。impl PR の Developer は design.md を勝手に再解釈せず実装を設計へ
+揃える責務があるため、record-after-success へ revert した。
+
+### 対応内容
+
+- **[high] dispatcher.go handler 経路の claim-first 喪失窓 → record-after-success へ revert**:
+  `Dedupe` IF を `Claim`/`Release` から design.md 準拠の `IsProcessed`/`MarkProcessed` に戻し
+  （`dedupe.go`。`claimSQL`→`markProcessedSQL`、`releaseSQL`/`Release` 廃止）、`dispatchToHandler` を
+  「handler 実行 → **成功後にのみ** `MarkProcessed`」へ変更（`dispatcher.go`）。これで codex の 2 つの
+  [high] 喪失窓が**構造的に消滅**する:
+  - 旧 finding 1（claim 永続化後・handler 成功前の crash → 既処理 ack で喪失）: 記録は handler 成功
+    **後**に書くため、crash 時点で記録は無く、再配信で必ず再処理される（Req 5.3 no-loss）。
+  - 旧 finding 2（transient 失敗時の `Release` 失敗で orphan claim → 喪失）: handler 失敗時は記録を
+    **書かない**ので、取り消すべき記録も `Release` 自体も存在しない。失敗窓が消える。
+- **退避経路は無変更**: `UnassignedQueue.Enqueue` は handler 非関与の終端処理のため、dedupe 記録
+  （`markProcessedSQL`）+ 退避 INSERT を**同一 tx** で原子的に行える（record-after-success の理想形）。
+  round 1 の原子化は維持し、SQL 名のみ `claimSQL`→`markProcessedSQL` に追従させた。
+- **テスト整合**:
+  - `dedupe_test.go`: `TestClaimSQL_*`→`TestMarkProcessedSQL_*`、`TestReleaseSQL_*` は削除（Release 廃止）。
+  - `dispatcher_test.go`: fake を `MarkProcessed` ベースへ。表駆動ケースを record-after-success に更新
+    （成功時のみ `markHit=1` / handler 失敗時 `markHit=0` で再処理保持 / handler 成功後の記録失敗 →
+    transient nack を新規追加）。
+  - 結合 `notification_dispatch_test.go`: 並行テストを `ConcurrentDuplicateMessageID_DispatchedOnce` →
+    `ConcurrentDuplicateMessageID_RecordedOnceNoLoss` に**書き換え**。claim-first 由来の「同時到達でも
+    handler ちょうど 1 回」は design.md が保証しない（L462-467 が非原子性を明言）over-specification の
+    ため、design が保証する「喪失なし ack / dedupe 記録が PK+ON CONFLICT で 1 行へ収束 / tenant ctx
+    確立 / 記録確定後の再配信は再 dispatch しない」を assert する形へ正した（assert を弱めて bug を
+    隠す変更ではなく、棄却された設計逸脱が課していた誤った保証を design の実保証へ是正したもの）。
+    `TransientHandlerFailure_Reprocessable` は assert 不変（record-after-success でも「失敗後
+    IsProcessed=false / 再配信で handler 2 回 / 成功後 IsProcessed=true」が成立）でコメントのみ更新。
+
+### 確認事項（PR iteration round 3）
+
+- **[要設計判断] design.md の内部不整合（L163 vs L207/L462）**: Traceability L163 は
+  「`1.3 | 並行同一 MessageID は 1 件のみ dispatch（直列化） | Dedupe | PK + ON CONFLICT DO NOTHING`」と
+  記すが、record-after-success（L207/L462）では PK + ON CONFLICT は **dedupe 記録を 1 行へ収束**させる
+  (= 記録の冪等性)を担保するのみで、**同時到達時の handler 実行を 1 回に直列化はしない**（handler は
+  IF 経由の本 Issue 外依存で記録と同一 tx に閉じられないため）。単一 boolean スキーマ（in-progress /
+  lease 状態列なし。新規 migration は Out of Scope）では Req 1.3（並行同時到達で handler 厳密 1 回）と
+  Req 5.3（crash/transient で喪失なし）は**同時には満たせない**。本実装は安全不変条件である Req 5.3
+  （no-loss）と design.md の支配的指定（record-after-success）を優先し、Req 1.3 は「dedupe 記録の
+  単一性 + 既処理再配信の dedup」として満たす読みを採った（handler は at-least-once 前提で冪等であり、
+  稀な同時到達の二重実行は冪等性が吸収する）。L163 の「1 件のみ dispatch」を「同時到達でも handler
+  厳密 1 回」と読むなら status 列導入の follow-up Issue が必要。**設計 PR で L163 の文言を実保証に
+  合わせて明確化する**ことを推奨する（impl PR では design.md を書き換えない）。
+- **[low] tasks.md L21 の IF 記述（finding 3）は実装側 revert で再整合**: tasks.md L21 は `Dedupe` IF を
+  `IsProcessed`/`MarkProcessed` と記述しており、本 revert で実装が再びこれに一致した（tasks.md は
+  編集せず実装を設計へ揃えることで解消）。
+- **[low] tasks.md L61 / L73（finding 4 / 5）は impl PR のため未編集**:
+  - L61: task 5.1 の `_Requirements:_` に bound テナント解決時の tenant context 確立（Req 3.1）が未記載。
+  - L73: stage-a-verify が `./internal/notification/... ./internal/tenant/...` のみで、Req 6.1〜6.4 を
+    担う `backend/test/integration` を実行対象に含めていない。結合テストは
+    `go test ./test/integration/... -run NotificationDispatch`（要 `INTEGRATION_TEST_DATABASE_URL` /
+    `INTEGRATION_TEST_MIGRATE_URL`。本環境で実 PostgreSQL 16 に対し全 8 ケース green を確認済み）で
+    実行する。いずれも `tasks.md` 編集が必要だが impl PR では spec を書き換えない（CLAUDE.md 規約）。
+    **設計 PR iteration または follow-up での `tasks.md` 更新**を推奨する。
+
+検証（round 3）: `go build ./...` / `go vet ./internal/notification/... ./internal/errors/...
+./test/integration/...` green。単体 `internal/notification` / `internal/errors` および repo 全
+`internal/...`（`-race`）green。結合テストは実 PostgreSQL 16（docker）に対し
+`go test -race ./test/integration/... -run NotificationDispatch` の全 8 ケース green を確認
+（並行テスト・transient 再処理テスト含む）。
+
 STATUS: complete

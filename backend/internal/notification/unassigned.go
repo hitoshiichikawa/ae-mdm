@@ -37,15 +37,17 @@ type UnassignedQueue interface {
 	// Enqueue は env を message_id 単位で冪等に unassigned_notifications へ退避する
 	// （Req 3.2 / 3.3 / 1.3 / 5.1）。
 	//
-	// notification_dedupe の claim（INSERT ... ON CONFLICT (message_id) DO NOTHING）と退避 INSERT を
-	// **同一トランザクション**で原子的に実行する。これにより並行 / 再配信で同一 message_id が複数
-	// 到達しても claim できた 1 件だけが退避し、退避キューに重複行を作らない（Req 1.3 / 3.3）。
-	// claim と退避が原子的なため「dedupe 記録は残ったが退避は失敗」という中間状態が生じず、退避
-	// INSERT 失敗時は claim も同 tx で rollback されるので orphan claim を残さず再配信で再退避できる
-	// （取りこぼし防止 / Req 5.1 / NFR 2.2）。既に claim 済み（重複）の場合は退避せず nil を返す。
+	// notification_dedupe の記録（markProcessedSQL = INSERT ... ON CONFLICT (message_id) DO NOTHING）と
+	// 退避 INSERT を **同一トランザクション**で原子的に実行する。退避は handler を介さない終端処理の
+	// ため、dedupe 記録（= 処理完了の印）と退避 INSERT を同 tx に閉じられる（design.md L207-208 が示す
+	// 「dedupe 記録と副作用を同一 tx に閉じる」ideal を退避経路で実現）。これにより並行 / 再配信で同一
+	// message_id が複数到達しても記録できた 1 件だけが退避し、退避キューに重複行を作らない（Req 1.3 /
+	// 3.3）。記録と退避が原子的なため「dedupe 記録は残ったが退避は失敗」という中間状態が生じず、退避
+	// INSERT 失敗時は dedupe 記録も同 tx で rollback されるので取りこぼさず再配信で再退避できる
+	// （取りこぼし防止 / Req 5.1 / NFR 2.2）。既に記録済み（重複）の場合は退避せず nil を返す。
 	//
 	// id は uuid 採番。tenant scoped テーブルには一切触れず、いずれのテナントリソースも更新しない
-	// （NFR 2.2 / Req 3.5）。永続化失敗（claim / 退避 / 外側 tx いずれも）は *errors.Error
+	// （NFR 2.2 / Req 3.5）。永続化失敗（dedupe / 退避 / 外側 tx いずれも）は *errors.Error
 	// {CodeUnavailable, IsTransient:true} へ正規化して返し、Dispatcher の nack 保持に委ねる（Req 1.4）。
 	Enqueue(ctx context.Context, env Envelope) error
 
@@ -72,29 +74,29 @@ func NewUnassignedQueue(pool *pgxpool.Pool) UnassignedQueue {
 
 // Enqueue は UnassignedQueue.Enqueue の実装（Req 3.2 / 3.3 / 3.5 / 1.3 / 5.1）。
 //
-// dedupe claim（claimSQL = INSERT ... ON CONFLICT (message_id) DO NOTHING）と退避 INSERT を同一
-// tx で原子的に実行し、message_id 単位の冪等性を担保する（design.md L207-208 が示す「dedupe 記録と
-// 副作用を同一 tx に閉じる」ideal を、handler を介さない退避経路で実現）:
+// dedupe 記録（markProcessedSQL = INSERT ... ON CONFLICT (message_id) DO NOTHING）と退避 INSERT を
+// 同一 tx で原子的に実行し、message_id 単位の冪等性を担保する（design.md L207-208 が示す「dedupe
+// 記録と副作用を同一 tx に閉じる」ideal を、handler を介さない退避経路で実現）:
 //
-//   - claim できた（RowsAffected==1）勝者のみ退避 INSERT を行う。退避 INSERT が失敗すると同 tx の
-//     claim も rollback され、orphan claim を残さず再配信時に再退避できる（Req 5.1 / NFR 2.2）。
-//   - 既に claim 済み（RowsAffected==0 = 並行 / 再配信の重複）なら退避せず no-op で抜ける。退避
+//   - 記録できた（RowsAffected==1）1 件のみ退避 INSERT を行う。退避 INSERT が失敗すると同 tx の
+//     dedupe 記録も rollback され、取りこぼさず再配信時に再退避できる（Req 5.1 / NFR 2.2）。
+//   - 既に記録済み（RowsAffected==0 = 並行 / 再配信の重複）なら退避せず no-op で抜ける。退避
 //     キューに重複行を作らない（Req 1.3 / 3.3）。
 func (q *unassignedQueue) Enqueue(ctx context.Context, env Envelope) error {
 	ctx = superAdminContext(ctx)
 	err := db.BeginTxFunc(ctx, q.pool, func(tx pgx.Tx) error {
-		// (1) dedupe claim を同一 tx で取得し、message_id 単位の冪等性を担保する（Req 1.3 / 3.3）。
-		ct, claimErr := tx.Exec(ctx, claimSQL, env.MessageID, string(env.NotificationType))
-		if claimErr != nil {
-			return wrapDedupePersistErr(claimErr)
+		// (1) dedupe 記録を同一 tx で行い、message_id 単位の冪等性を担保する（Req 1.3 / 3.3）。
+		ct, markErr := tx.Exec(ctx, markProcessedSQL, env.MessageID, string(env.NotificationType))
+		if markErr != nil {
+			return wrapDedupePersistErr(markErr)
 		}
 		if ct.RowsAffected() == 0 {
-			// 既に他者が claim 済み（並行 / 再配信の重複）。退避を二重に行わない（Req 1.3 / 3.3）。
+			// 既に記録済み（並行 / 再配信の重複）。退避を二重に行わない（Req 1.3 / 3.3）。
 			return nil
 		}
 
-		// (2) claim できた勝者のみ退避 INSERT を行う。失敗すると同 tx の claim も rollback される
-		//     （orphan claim を残さない / Req 5.1）。
+		// (2) 記録できた 1 件のみ退避 INSERT を行う。失敗すると同 tx の dedupe 記録も rollback される
+		//     （取りこぼさない / Req 5.1）。
 		if _, execErr := tx.Exec(ctx,
 			enqueueUnassignedSQL,
 			uuid.New(),
