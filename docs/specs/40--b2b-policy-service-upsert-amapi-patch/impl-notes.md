@@ -29,6 +29,22 @@
 > Req 4.3（他テナント device の割当先指定拒否）は affected=0 経路（`TestMapAssignError_Nil` が戻り値契約を担保）と
 > 複合 FK 経路（`TestMapAssignError_FKViolation`）の双方で Service が NotFound 写像できる戻り値を保証する。
 
+## AC Traceability（本 task=5 が担保した AC / handler_test.go）
+
+| Requirement | 担保テスト |
+|-------------|-----------|
+| 4.1（RBAC: deny は 403 / 構造化 WARN） | `TestHandler_Create_Viewer_Returns403`（Viewer POST→403 + deny_reason WARN）/ `TestHandler_Create_TenantAdmin_Returns200`（TenantAdmin POST→200） |
+| 4.5（存在差非露出の NotFound / 汎用 message） | `TestHandler_Get_NotFound_Returns404`（不在 GET→404 + body に id 非露出）/ `TestHandler_Assign_NotFound_Returns404` |
+| 2.2（3000 件超→422 + 上限超過提示） | `TestHandler_Create_BusinessRuleViolation_Returns422`（business rule のみ→422 + details 全件） |
+| 2.3（必須項目不正→400 + 不正項目提示） | `TestHandler_Create_InvalidField_Returns400WithAllDetails`（invalid field 混在→400 + 全件 details） |
+| NFR 3.1（拒否操作の原因属性を構造化ログ） | `TestHandler_Create_Viewer_Returns403`（deny_reason=authz denied）/ `TestHandler_List_NoClaims_Returns401`（deny_reason=missing auth claims） |
+
+> 補助カバレッジ（task 5 内の周辺 HTTP 写像保証 / 上記 AC の派生）: malformed JSON→400
+> （`TestHandler_Create_MalformedJSON_Returns400`）/ 不正 path id→400（`TestHandler_Get_InvalidID_Returns400`）/
+> DELETE 204・409（`TestHandler_Delete_*`）/ assign 204（`TestHandler_Assign_TenantAdmin_Returns204`）/
+> 自テナント一覧 200（`TestHandler_List_TenantAdmin_Returns200OwnTenant` / Req 4.4 の HTTP 経路）/
+> AMAPI 上流 502（`TestHandler_Create_UpstreamError_Returns502`）。
+
 ## Implementation Notes
 
 ### Task 1
@@ -84,5 +100,19 @@
   - Handler（task 5）が `ValidationFailedError` の details 展開 / `authz.AuthorizeAndLog`（RBAC）/ `errors.WriteHTTP`（存在差非露出の HTTP 写像）/ JSON decode / path param parse / actor・tenantID の claims 取得を担う（Service は `httpserver` を import しない）。
   - **tasks.md 6.1 の NewService 配線シグネチャ齟齬は task 3 で既出**: tasks.md 6.1 は `NewService(repo, amapiClient, auditSvc, authorizer, tenantSvc, log)` と authorizer を含むが、design.md は authz を Handler に置く（本実装の `NewService(repo, client, recorder, tenants, log)` には authorizer 無し）。task 6.1 実装時に配線シグネチャの齟齬を解消する必要がある（spec は書き換えていない）。
   - **確認事項**: 割当 endpoint の所有を Policy / Device どちらに置くか（design 確認事項 1）は本 task では DB 更新までに限定する暫定実装。Device Service 実装時の移設可否は PR レビューで人間判断を仰ぐ（spec は書き換えていない）。
+
+### Task 5
+
+- 採用方針: `handler.go`（/api/policies 6 endpoint + RBAC + HTTP 写像）+ `handler_test.go` を新規追加。`audit.Handler` を手本に内包 `chi.Router` + `ServeHTTP` を持たせ、`routers.API.Mount("/policies", h)`（tasks.md 6.1 の配線）で chi.Mount 互換に稼働する形にした。actor / tenantID は `httpserver.AuthClaimsFromContext` で取得し Service へ引数で渡す（`httpserver` import は Handler のみ / design Components）。
+- 重要な判断:
+  - **Mount 方式（audit 型を採用）**: tasks.md 5.1 は `Mount(r chi.Router)`（tenant.Handler 型）、6.1 は `routers.API.Mount("/policies", policyHandler)`（chi.Mount = audit.Handler 型）と記述が割れている。両者を同時に満たすため、tasks.md 5.1 が「`audit/handler.go` が手本」と明記している点を優先し audit 型（内包 router + ServeHTTP + root 相対登録）を採った。これにより 6.1 の `Mount("/policies", h)` がそのまま成立する。下記「確認事項」に記録。
+  - **RBAC 軸の対応付け**: GET/List/Get=ActionRead、POST=ActionCreate、PUT=ActionUpdate、DELETE=ActionDelete、`PUT {id}/assign`=ActionUpdate（policy 行ではなく devices.applied_policy_id を更新する変更操作のため policy:update 権限と同一視 / permissionMatrix に assign 専用 Action は無い）。`TargetTenantID` は `claims.TenantID`（own-tenant）を渡し RBAC を自テナント境界に閉じる。
+  - **検証エラー全件提示の HTTP 展開（Req 2.2/2.3/2.4）**: `ValidationFailedError` を `errors.As` で捕捉し、top-level Code（KindInvalidField 混在→400 / 全件 BusinessRule→422）に応じた status を `EffectiveHTTPStatus` で決定。`details[]`（domain/field/kind/message のみ）を JSON body に載せ、raw body 生値は載せない（Req 5.4 / NFR 3.2）。それ以外の `*errors.Error`（NotFound 404 / Conflict 409 / Upstream 502）は `errors.WriteHTTP` 一任。
+  - **拒否経路の二重構造化ログ**: deny は platform 層 `AuthorizeAndLog`（authz_deny_reason）に加え、policy ドメインの `logDeny`（deny_reason / action / path / method）を出す（audit.Handler の failure_kind と同じく識別軸を揃える / NFR 3.1）。claims 不在は 401 + `missing auth claims` の WARN。機密値（raw body）はログに補間しない。
+  - `decodeJSON` / `parseID` / `writeJSON` は tenant.Handler 同方式（単一 JSON document のみ許容 / 後続トークンも 400）を policy package 内に複製（package 間で共有 helper を持たない既存慣習に従う）。
+- 残存課題 / 確認事項（次 task=6 DI 配線に影響 / spec は書き換えていない）:
+  - **Mount 方式の記述揺れ（task 6 配線で要確認）**: 上記のとおり tasks.md 5.1（`Mount(r chi.Router)`）と 6.1（`routers.API.Mount("/policies", policyHandler)`）が割れている。本実装は audit 型（`Mount("/policies", h)`）を採ったため、task 6.1 では `routers.API.Mount("/policies", policyHandler)` で配線でき齟齬は解消する。tenant 型の `h.Mount(routers.API)` を期待していた場合は配線記述が一致しないため、PR レビューで配線方式を確認されたい。
+  - **NewService 配線シグネチャ齟齬は task 3/4 で既出のまま**: tasks.md 6.1 は `NewService(repo, amapiClient, auditSvc, authorizer, tenantSvc, log)` と authorizer を含むが、design.md / 実装は authz を Handler に置く（`NewService(repo, client, recorder, tenants, log)` に authorizer 無し / `NewHandler(svc, authorizer, log)` に authorizer を渡す）。task 6.1 実装時に Service ではなく Handler へ authorizer を渡す配線へ修正する必要がある（spec は書き換えていない）。
+  - `NewHandler(svc Service, authorizer *authz.Authorizer, log logger.Logger)` のシグネチャで構築する。main.go は既存の `authz.New()` 相当の authorizer インスタンス（または audit.Handler に渡している authorizer）を再利用すること。
 
 STATUS: complete
