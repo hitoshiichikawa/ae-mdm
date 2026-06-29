@@ -8,8 +8,11 @@ import (
 	goidc "github.com/coreos/go-oidc/v3/oidc"
 	"golang.org/x/oauth2"
 
+	"github.com/hitoshiichikawa/ae-mdm/internal/audit"
 	"github.com/hitoshiichikawa/ae-mdm/internal/config"
 	"github.com/hitoshiichikawa/ae-mdm/internal/platform/oidc"
+	"github.com/hitoshiichikawa/ae-mdm/internal/tenant"
+	"github.com/hitoshiichikawa/ae-mdm/internal/tenantaudit"
 )
 
 // TestHealthcheckURL_RespectsHTTPListenAddr は HTTP_LISTEN_ADDR env からの port 抽出と
@@ -134,5 +137,34 @@ func TestBuildOAuth2Configs(t *testing.T) {
 	}
 	if admin.Endpoint != adminEndpoint {
 		t.Errorf("admin.Endpoint = %+v; want %+v", admin.Endpoint, adminEndpoint)
+	}
+}
+
+// TestBuildTenantRecorder_WiresAuditServiceAdapterNotInterimLogger は、main の本番 DI が tenant
+// ドメインの監査記録ポートに **監査ログ Service へ委譲する tenantaudit アダプタ**を配線し、interim の
+// 構造化ログ記録器（tenant.LoggerRecorder）へ退行していないことを型レベルに回帰検知する
+// （#54 Req 1.4 / 5.3）。
+//
+// PR #56 round-5 review 指摘（#2）への対応: 既存のアダプタ単体テスト（internal/tenantaudit/*_test.go）は
+// `tenantaudit.NewRecorder` を直接生成して写像・委譲契約を検証するが、main wiring が誤って
+// `tenant.NewLoggerRecorder` へ戻っても失敗しない。main が実際に呼ぶ buildTenantRecorder の戻り値型を
+// assert することで、本番配線の退行（interim logger への巻き戻し）を捕捉する。
+func TestBuildTenantRecorder_WiresAuditServiceAdapterNotInterimLogger(t *testing.T) {
+	// Arrange: 本番 DI（main.go runBootstrap）と同じ引数で構築する。
+	// repo は本 test で Record/List を呼ばないため nil で足り、NewService は依存を保持するだけ。
+	auditSvc := audit.NewService(config.Config{}, nil, audit.SystemClock{}, nil)
+
+	// Act: main が実際に呼ぶ wiring helper を通して recorder を構築する。
+	rec := buildTenantRecorder(auditSvc, nil)
+
+	// Assert: 監査ログ Service へ委譲する tenantaudit アダプタであること（interim logger でないこと）。
+	if _, ok := rec.(*tenantaudit.Recorder); !ok {
+		t.Fatalf("buildTenantRecorder の戻り値型 = %T, want *tenantaudit.Recorder（"+
+			"interim tenant.LoggerRecorder へ退行した疑い / #54 Req 1.4 / 5.3）", rec)
+	}
+	// interim の構造化ログ記録器へ巻き戻っていないことを明示的に否定する。
+	if _, isLogger := rec.(*tenant.LoggerRecorder); isLogger {
+		t.Fatalf("buildTenantRecorder が interim tenant.LoggerRecorder を返した（" +
+			"監査ログ Service への配線が退行 / #54 Req 1.4 / 5.3）")
 	}
 }
