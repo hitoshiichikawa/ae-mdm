@@ -1,7 +1,7 @@
 # Implementation Plan
 
 - [ ] 1. tenant 逆引き（enterprise_name → tenant_id）を tenant パッケージに追加
-- [ ] 1.1 `TenantIDByEnterpriseName` を Repository / Service に追加 (P)
+- [x] 1.1 `TenantIDByEnterpriseName` を Repository / Service に追加 (P)
   - `internal/tenant/repository.go`: `SELECT id FROM tenants WHERE enterprise_name=$1 AND status='bound'` を `superAdminContext` + `BeginTxFunc` で実装。0 件は `found=false`（エラーにしない）、DB 失敗は `*errors.Error{CodeUnavailable, IsTransient:true}` で wrap。部分一意 index `uq_tenants_enterprise_name` により最大 1 件
   - `internal/tenant/service.go`: Service IF に `TenantIDByEnterpriseName(ctx, name) (uuid.UUID, bool, error)` を追加。空 enterprise_name は DB を叩かず `found=false` を即返す（Req 3.4 退避経路）。SuperAdmin context 確立を前提とし、拒否時は構造化ログ（NFR 3.1）
   - 既存 `EnterpriseNameForTenant` / 既存 IF を破壊しない追加メソッドとする
