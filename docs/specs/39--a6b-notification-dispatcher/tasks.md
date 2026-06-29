@@ -41,7 +41,7 @@
   - _Depends: 2.1, 2.2, 3.1, 1.1_
 
 - [ ] 4. 退避キュー閲覧 API と cmd/api 配線
-- [ ] 4.1 NotificationAdminHandler と routers.Admin への Mount
+- [x] 4.1 NotificationAdminHandler と routers.Admin への Mount
   - `internal/notification/admin_handler.go`: chi.Router を内包する `NewAdminHandler(queue UnassignedQueue, log)`。`GET /api/admin/notifications/unassigned` を root 相対 `Get("/", ...)` で登録（`audit/admin_handler.go` と同型）。query parse（from/to は RFC3339、type は ENROLLMENT/STATUS_REPORT/COMMAND 許可値検証）→ 不正は 400 + 不正項目提示（Req 4.5）。SuperAdmin TenantContext を `db.WithTenantContext` で確立 → `UnassignedQueue.List` → JSON 応答（0 件は 200 + `[]`）。401/403 は middleware 責務でハンドラ再実装しない（Req 4.3 / 4.4）。List の DB 失敗は 503。機密値を補間しない（NFR 3.1）
   - `cmd/api/main.go`: `notification.NewAdminHandler(...)` を構築し `routers.Admin.Mount("/notifications/unassigned", h)`（実 path `/api/admin/notifications/unassigned`、`RequireAdminConsoleAndSuperAdmin` ガード継承）。audit/tenant の (7)(8) 配線ブロックと同パターン
   - `internal/notification/admin_handler_test.go`: filter parse 正常 / 不正 from・to・type（400 + 不正項目）/ 200 + 空 `[]`（mock queue）。配線 smoke は task 5 の結合テストでカバー
