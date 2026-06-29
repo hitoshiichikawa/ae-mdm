@@ -34,11 +34,19 @@ const emptyJSONObject = "{}"
 // UnassignedQueue はテナント未割当通知の退避 INSERT と閲覧 List を提供する抽象
 // （design.md「UnassignedQueue」節 / Req 3.2 / 3.3 / 3.5 / 4.1 / 4.2）。
 type UnassignedQueue interface {
-	// Enqueue は env を unassigned_notifications へ 1 行退避する（Req 3.2）。
+	// Enqueue は env を message_id 単位で冪等に unassigned_notifications へ退避する
+	// （Req 3.2 / 3.3 / 1.3 / 5.1）。
 	//
-	// id は uuid 採番。tenant scoped テーブルには一切触れず、いずれのテナントリソースも
-	// 更新しない（NFR 2.2 / Req 3.5）。永続化失敗は *errors.Error{CodeUnavailable,
-	// IsTransient:true} で返し、呼び出し側 Dispatcher の nack 保持（再処理）に委ねる（Req 1.4）。
+	// notification_dedupe の claim（INSERT ... ON CONFLICT (message_id) DO NOTHING）と退避 INSERT を
+	// **同一トランザクション**で原子的に実行する。これにより並行 / 再配信で同一 message_id が複数
+	// 到達しても claim できた 1 件だけが退避し、退避キューに重複行を作らない（Req 1.3 / 3.3）。
+	// claim と退避が原子的なため「dedupe 記録は残ったが退避は失敗」という中間状態が生じず、退避
+	// INSERT 失敗時は claim も同 tx で rollback されるので orphan claim を残さず再配信で再退避できる
+	// （取りこぼし防止 / Req 5.1 / NFR 2.2）。既に claim 済み（重複）の場合は退避せず nil を返す。
+	//
+	// id は uuid 採番。tenant scoped テーブルには一切触れず、いずれのテナントリソースも更新しない
+	// （NFR 2.2 / Req 3.5）。永続化失敗（claim / 退避 / 外側 tx いずれも）は *errors.Error
+	// {CodeUnavailable, IsTransient:true} へ正規化して返し、Dispatcher の nack 保持に委ねる（Req 1.4）。
 	Enqueue(ctx context.Context, env Envelope) error
 
 	// List は Filter（from/to/type）を適用した退避済み通知を received_at 降順で返す（Req 4.1 / 4.2）。
@@ -62,10 +70,31 @@ func NewUnassignedQueue(pool *pgxpool.Pool) UnassignedQueue {
 	return &unassignedQueue{pool: pool}
 }
 
-// Enqueue は UnassignedQueue.Enqueue の実装（Req 3.2 / 3.5）。
+// Enqueue は UnassignedQueue.Enqueue の実装（Req 3.2 / 3.3 / 3.5 / 1.3 / 5.1）。
+//
+// dedupe claim（claimSQL = INSERT ... ON CONFLICT (message_id) DO NOTHING）と退避 INSERT を同一
+// tx で原子的に実行し、message_id 単位の冪等性を担保する（design.md L207-208 が示す「dedupe 記録と
+// 副作用を同一 tx に閉じる」ideal を、handler を介さない退避経路で実現）:
+//
+//   - claim できた（RowsAffected==1）勝者のみ退避 INSERT を行う。退避 INSERT が失敗すると同 tx の
+//     claim も rollback され、orphan claim を残さず再配信時に再退避できる（Req 5.1 / NFR 2.2）。
+//   - 既に claim 済み（RowsAffected==0 = 並行 / 再配信の重複）なら退避せず no-op で抜ける。退避
+//     キューに重複行を作らない（Req 1.3 / 3.3）。
 func (q *unassignedQueue) Enqueue(ctx context.Context, env Envelope) error {
 	ctx = superAdminContext(ctx)
 	err := db.BeginTxFunc(ctx, q.pool, func(tx pgx.Tx) error {
+		// (1) dedupe claim を同一 tx で取得し、message_id 単位の冪等性を担保する（Req 1.3 / 3.3）。
+		ct, claimErr := tx.Exec(ctx, claimSQL, env.MessageID, string(env.NotificationType))
+		if claimErr != nil {
+			return wrapDedupePersistErr(claimErr)
+		}
+		if ct.RowsAffected() == 0 {
+			// 既に他者が claim 済み（並行 / 再配信の重複）。退避を二重に行わない（Req 1.3 / 3.3）。
+			return nil
+		}
+
+		// (2) claim できた勝者のみ退避 INSERT を行う。失敗すると同 tx の claim も rollback される
+		//     （orphan claim を残さない / Req 5.1）。
 		if _, execErr := tx.Exec(ctx,
 			enqueueUnassignedSQL,
 			uuid.New(),
@@ -78,9 +107,9 @@ func (q *unassignedQueue) Enqueue(ctx context.Context, env Envelope) error {
 		}
 		return nil
 	})
-	// fn 内部の INSERT 失敗だけでなく、BeginTx / SetLocalTenant / Commit 由来の失敗（CodeInternal/
+	// fn 内部の失敗だけでなく、BeginTx / SetLocalTenant / Commit 由来の失敗（CodeInternal/
 	// 非 transient）も transient へ正規化する。さもないと退避永続化失敗が ack 判定され通知を
-	// 喪失する（Req 1.4 / NFR 2.2）。wrapUnassignedPersistErr(nil) は nil を返す。
+	// 喪失する（Req 1.4 / NFR 2.2）。wrapUnassignedPersistErr は nil-safe + transient idempotent。
 	return wrapUnassignedPersistErr(err)
 }
 

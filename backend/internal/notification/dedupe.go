@@ -16,8 +16,10 @@ import (
 //
 // PK = message_id + ON CONFLICT (message_id) DO NOTHING により、同一 MessageID の並行 INSERT は
 // DB が一意 index で直列化し、勝者のみ RowsAffected=1、敗者は 0 になる（Req 1.3 = 並行同一
-// MessageID の直列化）。Dispatcher は dispatch / 退避の実行 **前** にこの claim を取り、勝者だけが
-// 後続処理へ進むことで handler の二重実行を防ぐ（Req 1.1 = 記録した上で後続処理を実行）。
+// MessageID の直列化）。dispatch 経路では Dispatcher が handler 実行の **前** に Claim でこの文を
+// 取り、勝者だけが handler を呼ぶことで二重実行を防ぐ（Req 1.1）。退避経路では
+// UnassignedQueue.Enqueue が退避 INSERT と同一 tx でこの文を直接実行し、退避を message_id 単位で
+// 冪等・原子的にする（同パッケージから共用 / unassigned.go 参照 / Req 1.3 / 3.3 / 5.1）。
 const claimSQL = `INSERT INTO notification_dedupe (message_id, notification_type) ` +
 	`VALUES ($1, $2) ON CONFLICT (message_id) DO NOTHING`
 

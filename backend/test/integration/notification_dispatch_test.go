@@ -292,6 +292,87 @@ func TestNotificationDispatch_UnresolvableEnterprise_Quarantined(t *testing.T) {
 	}
 }
 
+// TestNotificationDispatch_UnregisteredType_NotQuarantined は未対応/未登録種別の通知が、
+// enterprise_name 未解決でも unassigned_notifications へ退避されず、handler も呼ばれず ack 完了
+// 扱いになることを実 DB で検証する（Req 2.4 が退避 Req 3.2 に優先）。AMAPI がトピック作成時に
+// 1 度だけ送る notificationType=test 等の未知種別が退避キューを誤って汚さないことを固定する。
+func TestNotificationDispatch_UnregisteredType_NotQuarantined(t *testing.T) {
+	// Arrange: bound テナントを作らず（逆引き不能）、handlers に未登録の種別かつ enterprise_name
+	// 空（name を持たない payload）の通知を作る。旧実装ではこの組合せが退避経路へ流れていた。
+	f := setupDispatch(t)
+	defer f.cleanup()
+	const unregisteredType notification.NotificationType = "USAGE_LOGS_UPLOADED"
+	msg := newMessage("msg-unregistered-001", unregisteredType, "")
+
+	// Act: Handle（未登録種別 → 取りこぼさず ack 完了扱い / Req 2.4）。
+	if err := f.dispatcher.Handle(f.ctx, msg); err != nil {
+		t.Fatalf("Handle(未登録種別): %v（取りこぼさず ack 完了を期待 / Req 2.4）", err)
+	}
+
+	// Assert: いずれの handler も呼ばれない（未登録種別は dispatch しない / Req 2.4）。
+	for ntype, h := range f.handlers {
+		if got := h.count(); got != 0 {
+			t.Errorf("未登録種別で handler が呼ばれた: type=%s hits=%d; want 0（Req 2.4）", ntype, got)
+		}
+	}
+	// 退避されない（退避キューを汚さない / Req 2.4 が退避 Req 3.2 に優先）。
+	got, err := f.unassigned.List(f.saCtx, notification.Filter{})
+	if err != nil {
+		t.Fatalf("UnassignedQueue.List: %v", err)
+	}
+	if len(got) != 0 {
+		t.Fatalf("未登録種別が退避された: 退避件数 = %d; want 0（Req 2.4 が退避 Req 3.2 に優先）", len(got))
+	}
+}
+
+// TestNotificationDispatch_ConcurrentUnresolvable_QuarantinedOnce は同一 MessageID の未割当通知が
+// 複数 goroutine から **同時に** Handle されても、unassigned_notifications への退避がちょうど 1 行に
+// 留まることを実 DB で検証する（Req 1.3 / 3.3）。退避は dedupe claim と退避 INSERT を同一 tx で
+// 原子的に行うため、並行 / 再配信の重複が退避キューに重複行を作らないことを回帰固定する
+// （旧 claim-first 実装では claim と退避が別操作で、claim 後・退避前に停止すると取りこぼし得た）。
+func TestNotificationDispatch_ConcurrentUnresolvable_QuarantinedOnce(t *testing.T) {
+	// Arrange: bound テナントを作らず（逆引き不能）、登録済み種別の未割当通知を 1 件用意する。
+	f := setupDispatch(t)
+	defer f.cleanup()
+	const unknownEnterprise = "enterprises/UNKNOWN-CONCURRENT"
+	msg := newMessage("msg-unassigned-concurrent-001", notification.Command, unknownEnterprise)
+
+	const goroutines = 8
+
+	// Act: 同一 MessageID を goroutines 個から一斉に Handle する（退避経路 / close(start) で同時開始）。
+	var wg sync.WaitGroup
+	errs := make([]error, goroutines)
+	start := make(chan struct{})
+	for i := 0; i < goroutines; i++ {
+		wg.Add(1)
+		go func(idx int) {
+			defer wg.Done()
+			<-start
+			errs[idx] = f.dispatcher.Handle(f.ctx, msg)
+		}(i)
+	}
+	close(start)
+	wg.Wait()
+
+	// Assert: すべて ack 完了（error なし）。
+	for i, err := range errs {
+		if err != nil {
+			t.Errorf("Handle goroutine[%d] が error を返した: %v（並行退避は ack 完了を期待）", i, err)
+		}
+	}
+	// 退避は原子的・冪等なのでちょうど 1 行（重複行を作らない / Req 1.3 / 3.3）。
+	got, err := f.unassigned.List(f.saCtx, notification.Filter{})
+	if err != nil {
+		t.Fatalf("UnassignedQueue.List: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("並行退避の退避件数 = %d; want 1（原子的・冪等退避 / Req 1.3 / 3.3）", len(got))
+	}
+	if got[0].MessageID != msg.ID {
+		t.Errorf("退避レコードの MessageID = %q; want %q", got[0].MessageID, msg.ID)
+	}
+}
+
 // TestNotificationDispatch_TypeRouting_DispatchesToCorrectHandler はシナリオ (c)(e) 対応
 // （Req 6.3 / 2.1-2.3 / 3.1）。bound テナントに解決される ENROLLMENT / STATUS_REPORT / COMMAND の
 // 3 通知を Handle すると、各種別が対応する mock handler へ 1 回ずつ振り分けられ、handler 到達時に

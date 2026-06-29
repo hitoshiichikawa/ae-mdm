@@ -176,7 +176,7 @@ func TestDispatcherHandle(t *testing.T) {
 			wantEnqueueHit: 0,
 		},
 		{
-			name:           "tenant 未解決（found=false）のとき claim 後に退避して ack する（Req 3.2 3.3）",
+			name:           "tenant 未解決（found=false）のとき退避して ack する（Req 3.2 3.3）",
 			verifier:       &fakeVerifier{env: validEnvelope(Enrollment)},
 			dedupe:         &fakeDedupe{},
 			unassigned:     &fakeUnassigned{},
@@ -184,12 +184,12 @@ func TestDispatcherHandle(t *testing.T) {
 			handler:        &fakeHandler{},
 			wantAck:        true,
 			wantHandlerHit: 0,
-			wantClaimHit:   1, // 退避前に claim
+			wantClaimHit:   0, // 退避経路の claim は Enqueue 内部（同一 tx）で取るため dispatcher は Claim を呼ばない
 			wantReleaseHit: 0,
 			wantEnqueueHit: 1,
 		},
 		{
-			name: "enterprise_name 空のとき逆引きせず claim 後に退避して ack する（Req 3.4）",
+			name: "enterprise_name 空のとき逆引きせず退避して ack する（Req 3.4）",
 			verifier: &fakeVerifier{env: Envelope{
 				MessageID:        "msg-1",
 				NotificationType: Enrollment,
@@ -201,35 +201,22 @@ func TestDispatcherHandle(t *testing.T) {
 			handler:        &fakeHandler{},
 			wantAck:        true,
 			wantHandlerHit: 0,
-			wantClaimHit:   1,
+			wantClaimHit:   0,
 			wantReleaseHit: 0,
 			wantEnqueueHit: 1,
 		},
 		{
-			name:           "並行重複で claim 敗北（退避経路）のとき退避せず ack する（Req 1.3 / 3.3）",
+			name:           "未登録種別かつ tenant 未解決のとき退避せず ack 完了扱いにする（Req 2.4 が退避 Req 3.2 に優先）",
 			verifier:       &fakeVerifier{env: validEnvelope(Enrollment)},
-			dedupe:         &fakeDedupe{claimConflict: true},
+			dedupe:         &fakeDedupe{},
 			unassigned:     &fakeUnassigned{},
 			resolver:       &fakeResolver{found: false},
-			handler:        &fakeHandler{},
+			handler:        nil, // handlers map に Enrollment を登録しない（未登録種別 = 例: AMAPI test 通知）
 			wantAck:        true,
 			wantHandlerHit: 0,
-			wantClaimHit:   1, // claim は試みるが敗北
-			wantReleaseHit: 0, // 敗者は release しない（INSERT していない）
-			wantEnqueueHit: 0, // 二重退避を防ぐため退避しない
-		},
-		{
-			name:           "claim の DB 失敗（退避経路）のとき退避せず nack 保持する（Req 1.4）",
-			verifier:       &fakeVerifier{env: validEnvelope(Enrollment)},
-			dedupe:         &fakeDedupe{claimErr: transientErr()},
-			unassigned:     &fakeUnassigned{},
-			resolver:       &fakeResolver{found: false},
-			handler:        &fakeHandler{},
-			wantAck:        false,
-			wantHandlerHit: 0,
-			wantClaimHit:   1,
+			wantClaimHit:   0,
 			wantReleaseHit: 0,
-			wantEnqueueHit: 0,
+			wantEnqueueHit: 0, // 未登録種別は退避せず ack（退避キューを汚さない / Req 2.4 が Req 3.2 に優先）
 		},
 		{
 			name:           "tenant 逆引きの DB 失敗（transient）のとき claim せず nack 保持する（Req 1.4）",
@@ -245,7 +232,7 @@ func TestDispatcherHandle(t *testing.T) {
 			wantEnqueueHit: 0,
 		},
 		{
-			name:           "退避 INSERT 失敗（transient）のとき claim を release して nack 保持する（Req 5.1 / NFR 2.2）",
+			name:           "退避（Enqueue）失敗（transient）のとき nack 保持する（Req 1.4 / 5.1 / NFR 2.2）",
 			verifier:       &fakeVerifier{env: validEnvelope(Enrollment)},
 			dedupe:         &fakeDedupe{},
 			unassigned:     &fakeUnassigned{enqueueErr: transientErr()},
@@ -253,8 +240,8 @@ func TestDispatcherHandle(t *testing.T) {
 			handler:        &fakeHandler{},
 			wantAck:        false,
 			wantHandlerHit: 0,
-			wantClaimHit:   1,
-			wantReleaseHit: 1, // 退避失敗 → claim 取り消し
+			wantClaimHit:   0, // claim は Enqueue 内部（同一 tx）。失敗時も同 tx で rollback され dispatcher は release しない
+			wantReleaseHit: 0,
 			wantEnqueueHit: 1,
 		},
 		{

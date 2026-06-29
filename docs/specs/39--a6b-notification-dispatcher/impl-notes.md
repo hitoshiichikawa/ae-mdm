@@ -143,6 +143,51 @@
 - **stray tool 残骸（非ブロッキング）**: 本ファイル末尾に task 1 の write 由来とみられる
   `</content>` / `</invoke>` 行が `## 確認事項` セクション外に残っているが、本 task では
   触らず放置した（malformed tool 残骸であり確認事項本文ではない）。
-</invoke>
+
+## PR Iteration round 1（PR #59 / round-2 review 対応 / #39）
+
+round-2 review（sha `2e321e5`）の 3 指摘への対応。`requirements.md` / `design.md` /
+`tasks.md` は impl PR のため書き換えていない（矛盾は本セクション末尾「確認事項（PR iteration）」と
+PR 返信で提起）。
+
+- **[high] dispatcher.go 退避経路の取りこぼし窓 → 退避を原子化**:
+  未割当退避を `dedupe.Claim`（別 tx）→ `Enqueue`（別 tx）→ 失敗時 `Release` の 3 操作から、
+  `UnassignedQueue.Enqueue` 内で **claim（`claimSQL`）+ 退避 INSERT を同一 tx** で実行する原子操作に
+  変更（`unassigned.go`）。claim 後・退避前の停止や退避失敗時の orphan claim が構造的に発生しなくなり、
+  退避 INSERT 失敗時は claim も同 tx で rollback されて再配信で再退避できる（Req 5.1 / NFR 2.2）。
+  並行 / 再配信の同一 MessageID は退避キューに重複行を作らない（Req 1.3 / 3.3）。`Dispatcher` 側は
+  `enqueueUnassigned` が `Enqueue` の ack/nack 写像のみを担う形に簡素化した（`Release` 呼び出しを廃止）。
+- **[high] dispatch（handler）経路の残存リスクは構造的制約として明示**:
+  handler 経路は claim を handler 実行の前に取り、handler 失敗時に `Release` する claim-first を維持
+  （Req 1.3 の並行直列化と結合テスト `ConcurrentDuplicateMessageID_DispatchedOnce` を満たすため。
+  record-after-success へ戻すと並行同一 MessageID の二重実行を許し Req 1.3 / 6.1 を破る）。
+  claim 永続化後・handler 成功記録前の worker 停止、または `Release` 自体の DB 失敗で orphan claim が
+  残り喪失しうる窓は **既存スキーマ（`notification_dedupe` は processed 状態のみで in-progress / lease を
+  持てない）では原理的に塞げない**。`status` 列追加による reclaim-after-timeout は本 Issue Out of Scope
+  （新規マイグレーション禁止）であり、退避経路（handler 非関与で単一 tx 化可能）とは異なり handler が
+  IF 経由の外部依存（design.md L462-468 の非原子性 Risk）のため同 tx に閉じられない。**`status` 列導入の
+  follow-up Issue を起票して根治する**ことを推奨（当該経路は `releaseClaim` が ERROR ログで事後追跡可能）。
+- **[medium] 未対応/未登録種別が退避キューを汚す → 種別判定を退避より前へ**:
+  `Handle` の handler 登録確認（Req 2.4）を tenant 解決（Req 3.2 退避判定）の **前** に移動
+  （`dispatcher.go`）。未登録種別（例: AMAPI がトピック作成時に送る `notificationType=test`）は
+  enterprise_name 未解決でも退避されず取りこぼさず ack 完了扱いになる（types.go「未知種別は破棄 ack」
+  設計意図と整合）。回帰テスト: 単体 `dispatcher_test.go`（未登録種別 × tenant 未解決で enqueue=0）/
+  結合 `TestNotificationDispatch_UnregisteredType_NotQuarantined`。
+- **[low] tasks.md verify が `./test/integration` を含まない**:
+  impl PR のため `tasks.md` は書き換えない。結合テストは
+  `go test ./test/integration/... -run NotificationDispatch`（要 `INTEGRATION_TEST_DATABASE_URL` /
+  `INTEGRATION_TEST_MIGRATE_URL`）で実行する。verify コマンドへの結合テスト追記は設計 PR iteration
+  または follow-up での `tasks.md` 更新を推奨（PR 返信で提起）。
+
+検証: 実 PostgreSQL（16）で `internal/notification` 単体（`-race`）+ `test/integration` 全件
+（`-race`）green。`go build ./...` / `go vet ./...` / 単体全件 green。
+
+### 確認事項（PR iteration）
+
+- **design.md フロー図との順序差異（registration 判定の前出し）**: design.md L77-89 のフロー図は
+  未登録種別判定（`未登録種別 --> DropAck`）を Handler ノードの下流（Resolve → SetCtx の後）に置くが、
+  本修正は Req 2.4（未対応/未登録は取りこぼさずログ + 完了扱い）を退避 Req 3.2 より優先する読みと
+  types.go の設計意図に合わせ、判定を Resolve の前へ移した。両 Req が同時成立（未登録 × tenant 未解決）
+  する場合の優先順位がフロー図で未確定のため、設計 PR で図の更新を推奨する（impl PR では図を書き換えない）。
 
 STATUS: complete
