@@ -115,4 +115,16 @@
   - **NewService 配線シグネチャ齟齬は task 3/4 で既出のまま**: tasks.md 6.1 は `NewService(repo, amapiClient, auditSvc, authorizer, tenantSvc, log)` と authorizer を含むが、design.md / 実装は authz を Handler に置く（`NewService(repo, client, recorder, tenants, log)` に authorizer 無し / `NewHandler(svc, authorizer, log)` に authorizer を渡す）。task 6.1 実装時に Service ではなく Handler へ authorizer を渡す配線へ修正する必要がある（spec は書き換えていない）。
   - `NewHandler(svc Service, authorizer *authz.Authorizer, log logger.Logger)` のシグネチャで構築する。main.go は既存の `authz.New()` 相当の authorizer インスタンス（または audit.Handler に渡している authorizer）を再利用すること。
 
+### Task 6
+
+- 採用方針: `cmd/api/main.go` の runBootstrap (9) ブロックに Policy domain（Repository → Service → Handler）の DI 配線を追加し `routers.API.Mount("/policies", policyHandler)` で `/api/policies` を稼働させた。本番配線を `buildPolicyHandler` helper に切り出し、`main_test.go` に Policy domain が stub/interim へ退行していないことの型レベル回帰テストを追加（`buildTenantRecorder` testability 方針に倣う）。`doc.go` に application 層の構成・依存方向ルールを追記（Validator 純粋性契約は不変）。
+- 重要な判断:
+  - **NewService に authorizer を渡さず NewHandler に渡す配線**: 実装の実シグネチャ `policy.NewService(repo, client, recorder, tenants, log)`（authorizer 無し）/ `policy.NewHandler(svc, authorizer, log)` に厳密に従い、共有 `authorizer`（(7) の `authz.New()`）を Handler の第 2 引数へ渡した。これにより task 3〜5 で記録された tasks.md 6.1 散文の NewService シグネチャ齟齬は **design 準拠の実装に従う形で解消**した（spec は書き換えていない）。
+  - **共有ラッパの再利用（新規構築しない）**: `amapiClient`（(8)）/ `auditSvc`・`authorizer`（(7)）/ `tenantSvc`（(8)）/ `pool`・`routers`・`log` を再利用し Policy 用に新規構築しない。AMAPI 反映が共有ラッパ経由（NFR 2.2）/ 作成イベント監査が共有 audit Service 経由（Req 5.1）であることを配線レベルで固定する。
+  - **wiring helper 切り出し方針**: `buildPolicyHandler(pool, amapiClient, auditSvc, authorizer, tenantSvc, log) *policy.Handler` を独立関数とし、`main_test.go` の `TestBuildPolicyHandler_WiresPolicyDomainNotStub` が本番 DI と同じ実型（`amapi.Client` / `audit.Service` / `*authz.Authorizer` / `tenant.Service`）で呼び戻り値が非 nil の `*policy.Handler` であることを assert する。pool は `policy.NewRepository(nil)` が接続せず保持するだけのため nil で足り、live DB 非依存（buildTenantRecorder テストと同方針）。Red→Green: helper 未定義時に compile fail（undefined: buildPolicyHandler）を観測 → 配線後 pass を確認。
+- 残存課題 / 確認事項（PR レビューで人間判断を仰ぐ / spec は書き換えていない）:
+  - **tasks.md 6.1 の NewService シグネチャ齟齬（解消済み）**: tasks.md 6.1 散文は `NewService(repo, amapiClient, auditSvc, authorizer, tenantSvc, log)` と authorizer を含むが、design.md / 実装は authz を Handler に置く（Service は authorizer を持たない）。本 task は実装の実シグネチャに従い authorizer を `NewHandler` へ配線したことでこの齟齬を実害なく解消した（tasks.md / design.md は書き換えていない）。
+  - **本ブランチが dec415a 起点で develop と乖離（PR 時 rebase 必要 / 既知事項）**: 本実装ブランチは `dec415a`（spec #40）起点で、develop は後から #39（Notification Dispatcher）をマージしているため develop と乖離している。これは PR 時の rebase（別 stage の責務）で解消される **既知の乖離**であり、本 task では修正しない。
+  - **doc.go の application 層追記**: Validator 純粋層と application 層が同一 package 内で別レイヤとして共存する旨を別見出しで追記した。既存の Validator 純粋性契約節（NFR 1）・Validator の依存方向ルール（amapi/上位/cmd を import しない契約）・「# 構成（task 8.1 時点）」の Validator 限定記述は変更していない。
+
 STATUS: complete
