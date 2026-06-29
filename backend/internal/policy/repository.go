@@ -24,16 +24,23 @@ import (
 // SuperAdmin context へ昇格するのとは対照的に、Policy 操作は **昇格しない**（他テナント行は
 // SELECT で 0 行、UPDATE/INSERT は複合 FK で物理拒否される / design「テナント分離」節）。
 type Repository interface {
-	// Insert は AMAPI 反映後の policy snapshot を 1 行 INSERT する（Req 1.3）。
+	// Insert は AMAPI 反映後の policy snapshot を 1 行 INSERT し、DB 採番の timestamps を
+	// 充填した PolicyRow を返す（Req 1.3）。
 	//
-	// 永続化失敗（接続不通等）は `*errors.Error{Code: CodeUnavailable}` で wrap する。
-	Insert(ctx context.Context, row PolicyRow) error
+	// `RETURNING created_at, updated_at` で DB DEFAULT now() の値を読み戻し、呼び出し側
+	// （Service）が API レスポンス（PolicyView.CreatedAt / UpdatedAt）を zero time にせず
+	// 充填できるようにする。永続化失敗（接続不通等）は `*errors.Error{Code: CodeUnavailable}`
+	// で wrap する。
+	Insert(ctx context.Context, row PolicyRow) (PolicyRow, error)
 
-	// Update は既存 policy の snapshot を更新し影響行数を返す（Req 1.5）。
+	// Update は既存 policy の snapshot を更新し、更新後の timestamps を充填した PolicyRow と
+	// 影響行数を返す（Req 1.5）。
 	//
-	// `WHERE id=$ AND tenant_id=$` の条件付き UPDATE で、affected=0 は呼び出し側（Service）が
-	// 「不在 / 他テナント＝NotFound」と判定する材料（Req 4.4 / 4.5）。error には倒さない。
-	Update(ctx context.Context, row PolicyRow) (int64, error)
+	// `WHERE id=$ AND tenant_id=$ ... RETURNING created_at, updated_at` の条件付き UPDATE で、
+	// affected=0（RETURNING 0 行）は呼び出し側（Service）が「不在 / 他テナント＝NotFound」と
+	// 判定する材料（Req 4.4 / 4.5）。error には倒さない。affected=1 のとき返り値の PolicyRow に
+	// 更新後 timestamps を充填し、Service が PolicyView を zero time にせず返せるようにする。
+	Update(ctx context.Context, row PolicyRow) (PolicyRow, int64, error)
 
 	// Get は id で自テナントの policy 1 行を取得する（Req 4.4）。
 	//
@@ -171,44 +178,63 @@ func isForeignKeyViolation(err error) bool {
 }
 
 // Insert は Repository.Insert の実装。
-func (r *repository) Insert(ctx context.Context, row PolicyRow) error {
-	return db.BeginTxFunc(ctx, r.pool, func(tx pgx.Tx) error {
-		if _, err := tx.Exec(ctx,
+//
+// `RETURNING created_at, updated_at` で DB DEFAULT now() の採番値を読み戻し、引数 row へ
+// 充填した PolicyRow を返す（Service が PolicyView.CreatedAt / UpdatedAt を zero time に
+// しないため / Req 1.3）。
+func (r *repository) Insert(ctx context.Context, row PolicyRow) (PolicyRow, error) {
+	err := db.BeginTxFunc(ctx, r.pool, func(tx pgx.Tx) error {
+		if err := tx.QueryRow(ctx,
 			`INSERT INTO policies (id, tenant_id, name, amapi_policy_name, body, version, updated_by)
-			 VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+			 VALUES ($1, $2, $3, $4, $5, $6, $7)
+			 RETURNING created_at, updated_at`,
 			row.ID, row.TenantID, row.Name, row.AMAPIPolicyName, row.Body, row.Version,
 			nullableUpdatedBy(row.UpdatedBy),
-		); err != nil {
+		).Scan(&row.CreatedAt, &row.UpdatedAt); err != nil {
 			return pkgerrors.Wrap(pkgerrors.CodeUnavailable, "policy insert failed", err)
 		}
 		return nil
 	})
+	if err != nil {
+		return PolicyRow{}, err
+	}
+	return row, nil
 }
 
 // Update は Repository.Update の実装。
-func (r *repository) Update(ctx context.Context, row PolicyRow) (int64, error) {
+//
+// `WHERE id=$ AND tenant_id=$ ... RETURNING created_at, updated_at` で自テナント行のみ
+// UPDATE する。RETURNING が 0 行（pgx.ErrNoRows）のとき affected=0 を返し、Service が
+// 不在 / 他テナント（NotFound）として写像する材料にする（Req 4.4 / 4.5）。affected=1 のとき
+// 更新後 timestamps を充填した PolicyRow を返す（Service が PolicyView を zero time にしない
+// ため / Req 1.5）。
+func (r *repository) Update(ctx context.Context, row PolicyRow) (PolicyRow, int64, error) {
 	var affected int64
 	err := db.BeginTxFunc(ctx, r.pool, func(tx pgx.Tx) error {
-		// WHERE id=$ AND tenant_id=$ で自テナント行のみ UPDATE する。affected=0 は Service が
-		// 不在 / 他テナント（NotFound）として写像する材料（Req 4.4 / 4.5）。
-		ct, err := tx.Exec(ctx,
+		err := tx.QueryRow(ctx,
 			`UPDATE policies
 			 SET name = $1, amapi_policy_name = $2, body = $3, version = $4,
 			     updated_by = $5, updated_at = now()
-			 WHERE id = $6 AND tenant_id = $7`,
+			 WHERE id = $6 AND tenant_id = $7
+			 RETURNING created_at, updated_at`,
 			row.Name, row.AMAPIPolicyName, row.Body, row.Version,
 			nullableUpdatedBy(row.UpdatedBy), row.ID, row.TenantID,
-		)
+		).Scan(&row.CreatedAt, &row.UpdatedAt)
 		if err != nil {
+			if stderrors.Is(err, pgx.ErrNoRows) {
+				// 0 行 = 不在 / 他テナント越境。Service が affected=0 を NotFound 判定（Req 4.4 / 4.5）。
+				affected = 0
+				return nil
+			}
 			return pkgerrors.Wrap(pkgerrors.CodeUnavailable, "policy update failed", err)
 		}
-		affected = ct.RowsAffected()
+		affected = 1
 		return nil
 	})
 	if err != nil {
-		return 0, err
+		return PolicyRow{}, 0, err
 	}
-	return affected, nil
+	return row, affected, nil
 }
 
 // Get は Repository.Get の実装。

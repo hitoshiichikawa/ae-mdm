@@ -103,21 +103,29 @@ type assignCall struct {
 	PolicyID uuid.UUID
 }
 
-func (r *fakeRepository) Insert(_ context.Context, row PolicyRow) error {
+func (r *fakeRepository) Insert(_ context.Context, row PolicyRow) (PolicyRow, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.inserted = append(r.inserted, row)
-	return r.insertErr
+	if r.insertErr != nil {
+		return PolicyRow{}, r.insertErr
+	}
+	// 実 Repository は RETURNING で timestamps を充填した行を返す。fake は渡された行を
+	// そのまま返し、Service が persisted から PolicyView を組み立てる経路を検証する。
+	return row, nil
 }
 
-func (r *fakeRepository) Update(_ context.Context, row PolicyRow) (int64, error) {
+func (r *fakeRepository) Update(_ context.Context, row PolicyRow) (PolicyRow, int64, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.updated = append(r.updated, row)
 	if r.updateErr != nil {
-		return 0, r.updateErr
+		return PolicyRow{}, 0, r.updateErr
 	}
-	return r.updateAff, nil
+	if r.updateAff == 0 {
+		return PolicyRow{}, 0, nil
+	}
+	return row, r.updateAff, nil
 }
 
 func (r *fakeRepository) Get(_ context.Context, _ uuid.UUID, _ uuid.UUID) (PolicyRow, error) {
@@ -286,6 +294,24 @@ func (l *fakeLogger) snapshot() []fakeLogEntry {
 	out := make([]fakeLogEntry, len(l.entries))
 	copy(out, l.entries)
 	return out
+}
+
+// hasInconsistencyLog は AMAPI↔DB 乖離の ERROR ログ（requires_reconciliation=true 付き）が
+// 1 件以上記録されているかを返す（logInconsistency の検証用 / NFR 3.1）。
+func (l *fakeLogger) hasInconsistencyLog() bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	for _, e := range l.entries {
+		if e.Level != "error" || e.Msg != "policy amapi/db inconsistency" {
+			continue
+		}
+		if v, ok := e.Fields["requires_reconciliation"]; ok {
+			if b, ok := v.(bool); ok && b {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // ---- Test harness ----
@@ -560,6 +586,156 @@ func TestService_Create_Validation(t *testing.T) {
 		}
 		if !hasBusinessRule || !hasInvalidField {
 			t.Errorf("expected both BusinessRule and InvalidField errors (all-errors presentation), got %+v", vferr.Errors)
+		}
+	})
+}
+
+// ===== Create / Update: name 必須（空は invalid field で拒否 / Req 2.3） =====
+
+func TestService_Create_EmptyName(t *testing.T) {
+	t.Run("name が空白のみのとき 400(invalid field) を返し AMAPI も Repository も呼ばない", func(t *testing.T) {
+		// Arrange: body は正常だが name が空白のみ。
+		h := newServiceHarness()
+		actor, tenantID := uuid.New(), uuid.New()
+
+		// Act
+		_, err := h.svc.Create(context.Background(), actor, tenantID, PolicyRequest{Name: "  ", Body: validBody()})
+
+		// Assert: 空 name は invalid field（400）。検証ゲートで早期 return（Req 2.3 / 2.5）。
+		if got := codeOf(t, err); got != pkgerrors.CodeInvalidRequest {
+			t.Fatalf("expected CodeInvalidRequest (400) for empty name, got %s", got)
+		}
+		var vferr *ValidationFailedError
+		if !stderrors.As(err, &vferr) {
+			t.Fatalf("expected *ValidationFailedError, got %T", err)
+		}
+		foundName := false
+		for _, e := range vferr.Errors {
+			if e.Field == "name" && e.Kind == KindInvalidField {
+				foundName = true
+			}
+		}
+		if !foundName {
+			t.Errorf("expected a name invalid_field error, got %+v", vferr.Errors)
+		}
+		if h.amapi.callCount() != 0 || h.repo.insertCount() != 0 {
+			t.Errorf("expected no AMAPI / Repository calls, got amapi=%d insert=%d", h.amapi.callCount(), h.repo.insertCount())
+		}
+	})
+
+	t.Run("name 空 + body 不正のとき全件提示する（name と body 双方の不正を載せる / Req 2.4）", func(t *testing.T) {
+		// Arrange: name 空 + encryptionPolicy enum 外。
+		h := newServiceHarness()
+		actor, tenantID := uuid.New(), uuid.New()
+		body := map[string]any{keyEncryptionPolicy: "INVALID_ENUM_VALUE"}
+
+		// Act
+		_, err := h.svc.Create(context.Background(), actor, tenantID, PolicyRequest{Name: "", Body: body})
+
+		// Assert: name と body の不正が双方 details に載る（全件提示）。
+		var vferr *ValidationFailedError
+		if !stderrors.As(err, &vferr) {
+			t.Fatalf("expected *ValidationFailedError, got %T", err)
+		}
+		var hasName, hasBody bool
+		for _, e := range vferr.Errors {
+			if e.Field == "name" {
+				hasName = true
+			}
+			if e.Domain == DomainSecurity {
+				hasBody = true
+			}
+		}
+		if !hasName || !hasBody {
+			t.Errorf("expected both name and body errors (all-errors presentation), got %+v", vferr.Errors)
+		}
+	})
+}
+
+func TestService_Update_EmptyName(t *testing.T) {
+	t.Run("name が空のとき 400 を返し既存行確認も AMAPI も Repository も呼ばない", func(t *testing.T) {
+		// Arrange
+		h := newServiceHarness()
+		actor, tenantID, policyID := uuid.New(), uuid.New(), uuid.New()
+
+		// Act
+		_, err := h.svc.Update(context.Background(), actor, tenantID, policyID, PolicyRequest{Name: "", Body: validBody()})
+
+		// Assert: 検証ゲートが最初。空 name は 400 で早期 return（Req 2.3 / 2.5）。
+		if got := codeOf(t, err); got != pkgerrors.CodeInvalidRequest {
+			t.Fatalf("expected CodeInvalidRequest (400) for empty name, got %s", got)
+		}
+		if h.amapi.callCount() != 0 || h.repo.updateCount() != 0 {
+			t.Errorf("expected no AMAPI / Update calls, got amapi=%d update=%d", h.amapi.callCount(), h.repo.updateCount())
+		}
+	})
+}
+
+// ===== Create / Update: AMAPI 反映成功後の DB 永続化失敗を乖離として ERROR ログに記録（NFR 3.1） =====
+
+func TestService_Upsert_PersistFailureLogsInconsistency(t *testing.T) {
+	t.Run("Create で AMAPI 成功後に Insert が失敗するとき乖離を ERROR ログに記録しエラーを伝達する", func(t *testing.T) {
+		// Arrange: AMAPI は成功、Insert が DB 不通で失敗。
+		h := newServiceHarness()
+		actor, tenantID := uuid.New(), uuid.New()
+		insertErr := pkgerrors.New(pkgerrors.CodeUnavailable, "db unavailable")
+		h.repo.insertErr = insertErr
+
+		// Act
+		_, err := h.svc.Create(context.Background(), actor, tenantID, PolicyRequest{Name: testPolicyName, Body: validBody()})
+
+		// Assert: AMAPI は呼ばれ（反映済み）、Insert 失敗エラーが伝達される。
+		if h.amapi.callCount() != 1 {
+			t.Fatalf("expected AMAPI called once, got %d", h.amapi.callCount())
+		}
+		if !stderrors.Is(err, insertErr) {
+			t.Errorf("expected insert error propagated, got %v", err)
+		}
+		// AMAPI↔DB 乖離が requires_reconciliation 付きの ERROR ログとして記録される（NFR 3.1）。
+		if !h.log.hasInconsistencyLog() {
+			t.Errorf("expected an amapi/db inconsistency ERROR log, got %+v", h.log.snapshot())
+		}
+		// 乖離ログにも機密値を載せない（Req 5.4 / NFR 3.2）。
+		for _, e := range h.log.snapshot() {
+			for k, v := range e.Fields {
+				if s, ok := v.(string); ok && strings.Contains(s, testSecretValue) {
+					t.Errorf("secret value leaked into log field %q: %q", k, s)
+				}
+			}
+		}
+		// 失敗監査も記録される（Req 5.1）。
+		evs := h.recorder.recorded()
+		if len(evs) != 1 || evs[0].Result != audit.ResultFailure {
+			t.Fatalf("expected 1 failure audit event, got %+v", evs)
+		}
+	})
+
+	t.Run("Update で AMAPI 成功後に対象行が消失（affected=0）のとき乖離を ERROR ログに記録し NotFound を返す", func(t *testing.T) {
+		// Arrange: Get は成功、AMAPI も成功、だが Update が 0 行（並行削除等）。
+		h := newServiceHarness()
+		actor, tenantID, policyID := uuid.New(), uuid.New(), uuid.New()
+		h.repo.getRow = PolicyRow{
+			ID:              policyID,
+			TenantID:        tenantID,
+			Name:            "old name",
+			AMAPIPolicyName: testEnterpriseName + "/policies/" + policyID.String(),
+			Body:            map[string]any{"old": true},
+			Version:         3,
+		}
+		h.repo.updateAff = 0
+
+		// Act
+		_, err := h.svc.Update(context.Background(), actor, tenantID, policyID, PolicyRequest{Name: testPolicyName, Body: validBody()})
+
+		// Assert: 存在差非露出の NotFound を返しつつ、AMAPI だけ更新済みの乖離を ERROR ログに残す。
+		if got := codeOf(t, err); got != pkgerrors.CodeNotFound {
+			t.Fatalf("expected CodeNotFound on affected=0, got %s", got)
+		}
+		if h.amapi.callCount() != 1 {
+			t.Fatalf("expected AMAPI called once before affected=0, got %d", h.amapi.callCount())
+		}
+		if !h.log.hasInconsistencyLog() {
+			t.Errorf("expected an amapi/db inconsistency ERROR log on affected=0, got %+v", h.log.snapshot())
 		}
 	})
 }

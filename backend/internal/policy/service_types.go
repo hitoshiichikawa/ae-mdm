@@ -96,6 +96,15 @@ type AssignInput struct {
 	DeviceID uuid.UUID `json:"device_id"`
 }
 
+// domainPolicyMetadata は Validator が占有する 5 領域（types.go の Domain enum: app /
+// password / security / system_update / kiosk）に属さない top-level メタデータ（`name` 等）の
+// 検証エラーに用いる Domain ラベル（Req 2.3 / 2.4）。
+//
+// Validator の types.go（5 領域 enum）は本 Issue では変更しない契約のため、application 層が
+// トップレベル項目の不正を `ValidationError` として全件提示経路（ValidationFailedError）へ
+// 合流させるための専用ラベルとして定義する。
+const domainPolicyMetadata Domain = "policy"
+
 // Operation は監査対象のポリシー操作種別（Req 5.x / NFR 3.1）。
 type Operation string
 

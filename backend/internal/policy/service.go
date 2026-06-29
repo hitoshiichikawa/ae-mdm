@@ -231,9 +231,9 @@ func NewService(
 
 // Create は Service.Create の実装。
 func (s *service) Create(ctx context.Context, actor, tenantID uuid.UUID, in PolicyRequest) (PolicyView, error) {
-	// 1. 検証ゲート（mapper 変換 + Validate 結合 / 全件提示 / 早期 return）。
+	// 1. 検証ゲート（name 必須 + mapper 変換 + Validate 結合 / 全件提示 / 早期 return）。
 	//    検証失敗時は AMAPI / Repository を一切呼ばない（Req 2.5）。
-	if verr := s.validate(in.Body); verr != nil {
+	if verr := s.validate(in); verr != nil {
 		s.logDeny(actor, tenantID, uuid.Nil, "policy validation failed")
 		s.record(ctx, actor, tenantID, uuid.Nil, eventTypePolicyCreate, audit.ResultFailure, in.Name)
 		return PolicyView{}, verr
@@ -272,7 +272,12 @@ func (s *service) Create(ctx context.Context, actor, tenantID uuid.UUID, in Poli
 		Version:         0,
 		UpdatedBy:       &actor,
 	}
-	if err := s.repo.Insert(ctx, row); err != nil {
+	persisted, err := s.repo.Insert(ctx, row)
+	if err != nil {
+		// AMAPI には反映済みだが DB snapshot 永続化に失敗 = AMAPI と DB の乖離（orphan AMAPI
+		// policy）。運用者が reconcile できるよう構造化 ERROR ログを出す（NFR 3.1 / design 確認事項:
+		// MVP は AMAPI-first 順序で補償トランザクションを持たない / Req 1.3）。
+		s.logInconsistency(actor, tenantID, id, amapiPolicyName, "amapi upsert succeeded but snapshot insert failed")
 		s.record(ctx, actor, tenantID, id, eventTypePolicyCreate, audit.ResultFailure, in.Name)
 		return PolicyView{}, err
 	}
@@ -280,18 +285,15 @@ func (s *service) Create(ctx context.Context, actor, tenantID uuid.UUID, in Poli
 	// 6. 作成成功を監査記録する（Req 5.1）。Detail は安全 field のみ（raw body を載せない）。
 	s.record(ctx, actor, tenantID, id, eventTypePolicyCreate, audit.ResultSuccess, in.Name)
 
-	return PolicyView{
-		ID:      id,
-		Name:    in.Name,
-		Body:    in.Body,
-		Version: row.Version,
-	}, nil
+	// DB 採番の timestamps を充填した persisted から PolicyView を組み立てる（CreatedAt /
+	// UpdatedAt を zero time にしない / API 契約と整合）。
+	return rowToView(persisted), nil
 }
 
 // Update は Service.Update の実装。
 func (s *service) Update(ctx context.Context, actor, tenantID, policyID uuid.UUID, in PolicyRequest) (PolicyView, error) {
 	// 1. 検証ゲート（Create と同一 / 早期 return / Req 2.5）。
-	if verr := s.validate(in.Body); verr != nil {
+	if verr := s.validate(in); verr != nil {
 		s.logDeny(actor, tenantID, policyID, "policy validation failed")
 		s.record(ctx, actor, tenantID, policyID, eventTypePolicyUpdate, audit.ResultFailure, in.Name)
 		return PolicyView{}, verr
@@ -334,13 +336,18 @@ func (s *service) Update(ctx context.Context, actor, tenantID, policyID uuid.UUI
 		Version:         existing.Version,
 		UpdatedBy:       &actor,
 	}
-	affected, err := s.repo.Update(ctx, row)
+	persisted, affected, err := s.repo.Update(ctx, row)
 	if err != nil {
+		// AMAPI には反映済みだが DB snapshot 更新に失敗 = AMAPI と DB の乖離。運用者が reconcile
+		// できるよう構造化 ERROR ログを出す（NFR 3.1 / design 確認事項: MVP は補償なし / Req 1.5）。
+		s.logInconsistency(actor, tenantID, policyID, existing.AMAPIPolicyName, "amapi upsert succeeded but snapshot update failed")
 		s.record(ctx, actor, tenantID, policyID, eventTypePolicyUpdate, audit.ResultFailure, in.Name)
 		return PolicyView{}, err
 	}
 	if affected == 0 {
-		// 反映後に他要求が先に削除した競合等。存在差を露出しない NotFound を返す（Req 4.4 / 4.5）。
+		// 反映後に他要求が先に削除した競合等で対象行が消失。AMAPI だけ更新済みになるため、存在差を
+		// 露出しない NotFound を返しつつ乖離を構造化 ERROR ログに残す（Req 4.4 / 4.5 / NFR 3.1）。
+		s.logInconsistency(actor, tenantID, policyID, existing.AMAPIPolicyName, "amapi upsert succeeded but target row missing on update")
 		s.logDeny(actor, tenantID, policyID, "policy update affected no rows")
 		s.record(ctx, actor, tenantID, policyID, eventTypePolicyUpdate, audit.ResultFailure, in.Name)
 		return PolicyView{}, ErrPolicyNotFound
@@ -349,12 +356,9 @@ func (s *service) Update(ctx context.Context, actor, tenantID, policyID uuid.UUI
 	// 6. 更新成功を監査記録する（Req 5.2）。
 	s.record(ctx, actor, tenantID, policyID, eventTypePolicyUpdate, audit.ResultSuccess, in.Name)
 
-	return PolicyView{
-		ID:      policyID,
-		Name:    in.Name,
-		Body:    in.Body,
-		Version: row.Version,
-	}, nil
+	// DB 更新後の timestamps を充填した persisted から PolicyView を組み立てる（UpdatedAt を
+	// zero time にしない / API 契約と整合）。
+	return rowToView(persisted), nil
 }
 
 // List は Service.List の実装。
@@ -452,17 +456,30 @@ func rowToSummary(row PolicyRow) PolicySummary {
 	}
 }
 
-// validate は raw body を mapper で PolicyInput へ変換し、変換不能（型不整合）と Validator の
-// 検証不正を結合して全件提示する（Req 2.1 / 2.2 / 2.3 / 2.4 / 2.5）。
+// validate は入力 DTO（name 必須 + raw body）を検証する（Req 2.1 / 2.2 / 2.3 / 2.4 / 2.5）。
+//
+// 検証は (1) top-level `name` の空文字拒否（service_types.go の入力契約「空は Service / Handler が
+// 弾く」を満たす / Req 2.3）、(2) mapper による raw body → PolicyInput 変換不能（型不整合）、
+// (3) Validator の検証不正、の 3 種を結合して全件提示する（Req 2.4）。
 //
 // 検証エラーが 0 件のときは nil を返す（AMAPI / Repository へ進んでよい）。1 件以上のときは
 // 全件を保持した *ValidationFailedError を返す。raw body の生値はエラーへ載せない（Req 5.4）。
-func (s *service) validate(rawBody map[string]any) *ValidationFailedError {
-	in, convErrs := RawToPolicyInput(rawBody)
-	result := Validate(in)
+func (s *service) validate(in PolicyRequest) *ValidationFailedError {
+	var combined []ValidationError
 
-	// mapper 変換不能（KindInvalidField）と Validator 検証不正を結合して全件提示する（Req 2.4）。
-	combined := make([]ValidationError, 0, len(convErrs)+len(result.Errors))
+	// (1) name 必須（空 / 空白のみは invalid field として拒否する / Req 2.3）。
+	if strings.TrimSpace(in.Name) == "" {
+		combined = append(combined, ValidationError{
+			Domain:  domainPolicyMetadata,
+			Field:   "name",
+			Kind:    KindInvalidField,
+			Message: "ポリシー名は必須です",
+		})
+	}
+
+	// (2)+(3) mapper 変換不能（KindInvalidField）と Validator 検証不正を結合して全件提示する（Req 2.4）。
+	pin, convErrs := RawToPolicyInput(in.Body)
+	result := Validate(pin)
 	combined = append(combined, convErrs...)
 	combined = append(combined, result.Errors...)
 
@@ -547,6 +564,25 @@ func (s *service) logDeny(actor, tenantID, policyID uuid.UUID, reason string) {
 		fields = append(fields, "policy_id", policyID.String())
 	}
 	s.log.Warn("policy operation denied", fields...)
+}
+
+// logInconsistency は AMAPI 反映成功後に DB snapshot 永続化が失敗した（AMAPI と DB snapshot が
+// 乖離した）ことを構造化 ERROR ログに出す（NFR 3.1）。
+//
+// MVP の upsert は design 確認事項どおり AMAPI-first 順序で補償トランザクションを持たないため、
+// この乖離は運用者が手動で reconcile（orphan AMAPI policy の削除 / 再同期）する必要がある。
+// reconcile に必要な属性（実行者・テナント・policy_id・amapi_policy_name）と
+// `requires_reconciliation=true` を載せる。amapi_policy_name は resource path であり機密値では
+// ないため reconcile 用に載せる（raw body / 資格情報 / トークン生値は載せない / Req 5.4 / NFR 3.2）。
+func (s *service) logInconsistency(actor, tenantID, policyID uuid.UUID, amapiPolicyName, reason string) {
+	s.log.Error("policy amapi/db inconsistency",
+		logger.ActorID(actor),
+		logger.TenantID(tenantID),
+		"policy_id", policyID.String(),
+		"amapi_policy_name", amapiPolicyName,
+		"inconsistency_reason", reason,
+		"requires_reconciliation", true,
+	)
 }
 
 // buildAMAPIPolicyName は enterpriseName と policyId から AMAPI policyName

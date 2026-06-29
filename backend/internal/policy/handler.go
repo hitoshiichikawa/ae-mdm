@@ -204,6 +204,17 @@ func (h *Handler) assign(w http.ResponseWriter, r *http.Request) {
 		pkgerrors.WriteHTTP(w, r, err, h.log)
 		return
 	}
+	// device_id は必須入力（AssignInput 契約）。欠落 / null は uuid.Nil となり、Service の
+	// repository lookup へ流すと存在差非露出の 404 になってしまうため、ここで invalid request
+	// （400）として拒否し、必須項目欠落と未検出を取り違えないようにする（Req 3.x 入力契約）。
+	if in.DeviceID == uuid.Nil {
+		h.logDeny(r, claims.TenantID, authz.ActionUpdate, "missing device_id")
+		pkgerrors.WriteHTTP(w, r, pkgerrors.New(
+			pkgerrors.CodeInvalidRequest,
+			"device_id is required",
+		), h.log)
+		return
+	}
 	if err := h.svc.Assign(r.Context(), claims.AdminUserID, claims.TenantID, in.DeviceID, id); err != nil {
 		pkgerrors.WriteHTTP(w, r, err, h.log)
 		return

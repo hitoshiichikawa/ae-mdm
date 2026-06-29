@@ -515,6 +515,30 @@ func TestHandler_Assign_TenantAdmin_Returns204(t *testing.T) {
 	}
 }
 
+// ---- (l-2) PUT assign で device_id 欠落 → 400（必須項目欠落を未検出と取り違えない / Req 3.x） ----
+
+func TestHandler_Assign_MissingDeviceID_Returns400(t *testing.T) {
+	// Arrange: body に device_id が無い（uuid.Nil 相当）。
+	tenantID := uuid.New()
+	svc := &fakeHandlerService{}
+	h := NewHandler(svc, authz.New(), &hFakeLogger{})
+	claims := newTenantClaims(tenantID, "TenantAdmin")
+
+	// Act
+	rec := doRequest(t, h, http.MethodPut, "/policies/"+uuid.New().String()+"/assign", `{}`, &claims)
+
+	// Assert: 必須項目欠落は repository lookup へ流さず 400 で拒否（404 NotFound にしない）。
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d; want 400 body=%q", rec.Code, rec.Body.String())
+	}
+	if svc.assignCalls != 0 {
+		t.Errorf("device_id 欠落で svc.Assign が呼ばれてはならない（呼び出し回数=%d）", svc.assignCalls)
+	}
+	if code := decodeErrCode(t, rec); code != string(pkgerrors.CodeInvalidRequest) {
+		t.Errorf("body.Code = %q; want %q", code, pkgerrors.CodeInvalidRequest)
+	}
+}
+
 // ---- (m) PUT assign で自テナント不在 device → 404（Req 3.3 / 存在差非露出） ----
 
 func TestHandler_Assign_NotFound_Returns404(t *testing.T) {
