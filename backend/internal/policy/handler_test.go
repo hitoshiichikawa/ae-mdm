@@ -29,7 +29,10 @@ type fakeHandlerService struct {
 	createView   PolicyView
 	createErr    error
 	updateCalls  int
+	updateActor  uuid.UUID
+	updateTenant uuid.UUID
 	updateID     uuid.UUID
+	updateIn     PolicyRequest
 	updateView   PolicyView
 	updateErr    error
 	listCalls    int
@@ -58,10 +61,12 @@ func (s *fakeHandlerService) Create(_ context.Context, actor, tenantID uuid.UUID
 	return s.createView, s.createErr
 }
 
-func (s *fakeHandlerService) Update(_ context.Context, _, tenantID, policyID uuid.UUID, _ PolicyRequest) (PolicyView, error) {
+func (s *fakeHandlerService) Update(_ context.Context, actor, tenantID, policyID uuid.UUID, in PolicyRequest) (PolicyView, error) {
 	s.updateCalls++
-	s.createTenant = tenantID
+	s.updateActor = actor
+	s.updateTenant = tenantID
 	s.updateID = policyID
+	s.updateIn = in
 	return s.updateView, s.updateErr
 }
 
@@ -237,6 +242,163 @@ func TestHandler_Create_TenantAdmin_Returns200(t *testing.T) {
 	}
 	if view.ID != policyID {
 		t.Errorf("response PolicyView.ID = %v; want %v", view.ID, policyID)
+	}
+}
+
+// ---- (b-2) TenantAdmin の PUT 更新 → 200 + actor/tenant/id/body 写像（Req 1.2 / 4.1 / 正常系） ----
+
+func TestHandler_Update_TenantAdmin_Returns200(t *testing.T) {
+	// Arrange
+	tenantID := uuid.New()
+	policyID := uuid.New()
+	svc := &fakeHandlerService{updateView: PolicyView{ID: policyID, Name: "renamed", Version: 7}}
+	h := NewHandler(svc, authz.New(), &hFakeLogger{})
+	claims := newTenantClaims(tenantID, "TenantAdmin")
+
+	// Act
+	rec := doRequest(t, h, http.MethodPut, "/policies/"+policyID.String(),
+		`{"name":"renamed","body":{"k":"v"}}`, &claims)
+
+	// Assert
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d; want 200 body=%q", rec.Code, rec.Body.String())
+	}
+	if svc.updateCalls != 1 {
+		t.Fatalf("svc.Update 呼び出し回数 = %d; want 1", svc.updateCalls)
+	}
+	// actor / tenantID / policyID は claims・path から取得して Service へ引数で渡される（design Components）。
+	if svc.updateTenant != tenantID {
+		t.Errorf("svc.Update tenantID = %v; want %v", svc.updateTenant, tenantID)
+	}
+	if svc.updateActor != claims.AdminUserID {
+		t.Errorf("svc.Update actor = %v; want %v", svc.updateActor, claims.AdminUserID)
+	}
+	if svc.updateID != policyID {
+		t.Errorf("svc.Update policyID = %v; want %v", svc.updateID, policyID)
+	}
+	if svc.updateIn.Name != "renamed" {
+		t.Errorf("svc.Update in.Name = %q; want renamed", svc.updateIn.Name)
+	}
+	var view PolicyView
+	if err := json.Unmarshal(rec.Body.Bytes(), &view); err != nil {
+		t.Fatalf("decode PolicyView: %v body=%q", err, rec.Body.String())
+	}
+	if view.ID != policyID || view.Version != 7 {
+		t.Errorf("response PolicyView = %+v; want ID=%v Version=7", view, policyID)
+	}
+}
+
+// ---- (b-3) Viewer の PUT 更新 → 403（authz failure path / Req 4.1 / NFR 3.1） ----
+
+func TestHandler_Update_Viewer_Returns403(t *testing.T) {
+	// Arrange
+	tenantID := uuid.New()
+	svc := &fakeHandlerService{}
+	log := &hFakeLogger{}
+	h := NewHandler(svc, authz.New(), log)
+	claims := newTenantClaims(tenantID, "Viewer")
+
+	// Act
+	rec := doRequest(t, h, http.MethodPut, "/policies/"+uuid.New().String(),
+		`{"name":"p","body":{}}`, &claims)
+
+	// Assert
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("status = %d; want 403 body=%q", rec.Code, rec.Body.String())
+	}
+	if svc.updateCalls != 0 {
+		t.Errorf("403 で svc.Update が呼ばれてはならない（呼び出し回数=%d）", svc.updateCalls)
+	}
+	if code := decodeErrCode(t, rec); code != string(pkgerrors.CodeForbidden) {
+		t.Errorf("body.Code = %q; want %q", code, pkgerrors.CodeForbidden)
+	}
+	if !log.hasWarnReason("authz denied") {
+		t.Errorf("deny 経路で deny_reason=authz denied の WARN ログが無い; warnCalls=%+v", log.warnCalls)
+	}
+}
+
+// ---- (b-4) malformed JSON body の PUT 更新 → 400（入力検証契約 / svc.Update 未呼出） ----
+
+func TestHandler_Update_MalformedJSON_Returns400(t *testing.T) {
+	// Arrange
+	tenantID := uuid.New()
+	svc := &fakeHandlerService{}
+	h := NewHandler(svc, authz.New(), &hFakeLogger{})
+	claims := newTenantClaims(tenantID, "TenantAdmin")
+
+	// Act: 壊れた JSON。
+	rec := doRequest(t, h, http.MethodPut, "/policies/"+uuid.New().String(), `{"name":`, &claims)
+
+	// Assert
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d; want 400 body=%q", rec.Code, rec.Body.String())
+	}
+	if svc.updateCalls != 0 {
+		t.Errorf("malformed body で svc.Update が呼ばれてはならない（呼び出し回数=%d）", svc.updateCalls)
+	}
+	if code := decodeErrCode(t, rec); code != string(pkgerrors.CodeInvalidRequest) {
+		t.Errorf("body.Code = %q; want %q", code, pkgerrors.CodeInvalidRequest)
+	}
+}
+
+// ---- (b-5) 不在 policy の PUT 更新 → 404 + 存在差非露出（service error mapping / Req 4.5） ----
+
+func TestHandler_Update_NotFound_Returns404(t *testing.T) {
+	// Arrange: Service が ErrPolicyNotFound（404 / 固定 message）を返す。
+	tenantID := uuid.New()
+	svc := &fakeHandlerService{updateErr: ErrPolicyNotFound}
+	h := NewHandler(svc, authz.New(), &hFakeLogger{})
+	claims := newTenantClaims(tenantID, "TenantAdmin")
+	target := "/policies/" + uuid.New().String()
+
+	// Act
+	rec := doRequest(t, h, http.MethodPut, target, `{"name":"p","body":{}}`, &claims)
+
+	// Assert
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("status = %d; want 404 body=%q", rec.Code, rec.Body.String())
+	}
+	if svc.updateCalls != 1 {
+		t.Errorf("svc.Update 呼び出し回数 = %d; want 1", svc.updateCalls)
+	}
+	if code := decodeErrCode(t, rec); code != string(pkgerrors.CodeNotFound) {
+		t.Errorf("body.Code = %q; want %q", code, pkgerrors.CodeNotFound)
+	}
+	// 存在差非露出（Req 4.5）: body に対象 policy id を露出しない。
+	if got := rec.Body.String(); strings.Contains(got, target) {
+		t.Errorf("404 body に対象 policy id が露出している: %q", got)
+	}
+}
+
+// ---- (b-6) 検証エラーの PUT 更新 → 422 + 全件 details（service error mapping / Req 2.2 / 2.4） ----
+
+func TestHandler_Update_BusinessRuleViolation_Returns422(t *testing.T) {
+	// Arrange: Service が business rule 違反の ValidationFailedError（422）を返す。
+	// update 経路も writeServiceError 経由で details を展開することを検証する。
+	tenantID := uuid.New()
+	verr := newValidationFailedError([]ValidationError{
+		{Domain: DomainApp, Field: "AppCount", Kind: KindBusinessRule, Message: "アプリ件数が上限(3000)を超えています"},
+	})
+	svc := &fakeHandlerService{updateErr: verr}
+	h := NewHandler(svc, authz.New(), &hFakeLogger{})
+	claims := newTenantClaims(tenantID, "TenantAdmin")
+
+	// Act
+	rec := doRequest(t, h, http.MethodPut, "/policies/"+uuid.New().String(), `{"name":"p","body":{}}`, &claims)
+
+	// Assert
+	if rec.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("status = %d; want 422 body=%q", rec.Code, rec.Body.String())
+	}
+	var body validationErrorBody
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode validationErrorBody: %v body=%q", err, rec.Body.String())
+	}
+	if body.Code != string(pkgerrors.CodeBusinessRule) {
+		t.Errorf("body.Code = %q; want %q", body.Code, pkgerrors.CodeBusinessRule)
+	}
+	if len(body.Details) != 1 {
+		t.Fatalf("details 件数 = %d; want 1（全件提示 / Req 2.4）", len(body.Details))
 	}
 }
 

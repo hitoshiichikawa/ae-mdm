@@ -365,9 +365,15 @@ func (s *service) Update(ctx context.Context, actor, tenantID, policyID uuid.UUI
 		return PolicyView{}, err
 	}
 	if affected == 0 {
-		// 反映後に他要求が先に削除した競合等で対象行が消失。AMAPI だけ更新済みになるため、存在差を
-		// 露出しない NotFound を返しつつ乖離を構造化 ERROR ログに残す（Req 4.4 / 4.5 / NFR 3.1）。
-		s.logInconsistency(actor, tenantID, policyID, existing.AMAPIPolicyName, "amapi upsert succeeded but target row missing on update")
+		// 対象行が不在（事前 Get 後の削除競合 / 他テナント越境）。Repository は reflect の前に
+		// FOR UPDATE で存在を再確認し、不在なら AMAPI を呼ばずに affected=0 を返すため、通常この
+		// 経路では AMAPI と DB の乖離は生じない（amapiReflected=false）。存在差を露出しない NotFound を
+		// 返す（Req 4.4 / 4.5）。
+		if amapiReflected {
+			// 想定外（FOR UPDATE の行ロックを越えて反映後に行が消失）の防御。AMAPI だけ更新済みの
+			// 乖離を構造化 ERROR ログに残し運用者が reconcile できるようにする（NFR 3.1）。
+			s.logInconsistency(actor, tenantID, policyID, existing.AMAPIPolicyName, "amapi upsert succeeded but target row missing on update")
+		}
 		s.logDeny(actor, tenantID, policyID, "policy update affected no rows")
 		s.record(ctx, actor, tenantID, policyID, eventTypePolicyUpdate, audit.ResultFailure, in.Name)
 		return PolicyView{}, ErrPolicyNotFound

@@ -26,6 +26,11 @@ import (
 //   (g) Delete 不在 → affected=0（Req 5.3）
 //   (h) AssignPolicyToDevice 他テナント policy → 複合 FK 違反 → ErrPolicyNotFound（Req 3.2 / 4.2）
 //   (i) AssignPolicyToDevice 他テナント device → affected=0（Req 3.3 / 4.3）
+//   (j) List 自テナント scoped（自テナント行のみ created_at ASC / 他テナント行不可視 / Req 4.4）
+//   (k) Get 他テナント越境 → ErrPolicyNotFound（RLS / 存在差非露出 / Req 4.4 / 4.5）
+//   (l) UpdateSnapshotSerialized 不在行は reflect を呼ばない（AMAPI 未反映 = 乖離防止 / Req 1.5）
+//   (m) golden path lifecycle: Insert→Get→Update→Get→Delete→Get(NotFound)（Req 1.x / 4.4 / 5.3）
+//   (n) 連続更新で snapshot が最新反映済みと一致（中間状態を残さない / Req 1.5）
 
 // setupPolicyRepo は migrate-up → truncate → seedDummyData → app pool 構築までを担う共通 setup。
 // 返す ctx は tenant A の TenantContext（非 SuperAdmin）を確立済みで、RLS が tenant A に閉じる。
@@ -307,5 +312,231 @@ func TestPolicyRepository_Assign_CrossTenant(t *testing.T) {
 	}
 	if affected != 0 {
 		t.Errorf("他テナント device 割当の affected = %d; want 0", affected)
+	}
+}
+
+// TestPolicyRepository_List_TenantScoped はシナリオ (j) 対応。
+// tenant A ctx の List が自テナント行のみを created_at ASC で返し、他テナント（B）の policy を
+// 一切露出しないこと（RLS / Req 4.4）。seed の policy A に加えて policy A2 を投入し、複数行の
+// 並び順と他テナント不可視を同時に検証する。
+func TestPolicyRepository_List_TenantScoped(t *testing.T) {
+	// Arrange: tenant A に 2 件目の policy を追加（seed の policy A と合わせて 2 件）。
+	repo, ids, ctx, cleanup := setupPolicyRepo(t)
+	defer cleanup()
+
+	policyA2 := uuid.New()
+	if _, err := repo.Insert(ctx, policy.PolicyRow{
+		ID:              policyA2,
+		TenantID:        ids.tenantAID,
+		Name:            "policy-A2",
+		AMAPIPolicyName: "enterprises/X/policies/" + policyA2.String(),
+		Body:            map[string]any{"order": 2},
+		Version:         1,
+	}); err != nil {
+		t.Fatalf("Insert policy-A2: %v", err)
+	}
+
+	// Act
+	rows, err := repo.List(ctx, ids.tenantAID)
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+
+	// Assert: 自テナント行のみ（policy A / A2 の 2 件）。他テナント policy B は不可視（Req 4.4）。
+	if len(rows) != 2 {
+		t.Fatalf("List 件数 = %d; want 2（自テナント行のみ）: %+v", len(rows), rows)
+	}
+	for _, r := range rows {
+		if r.TenantID != ids.tenantAID {
+			t.Errorf("List が他テナント行を返した: tenant_id=%v", r.TenantID)
+		}
+		if r.ID == ids.policyBID {
+			t.Errorf("List に他テナント policy B が露出している: %v", r.ID)
+		}
+	}
+	// created_at ASC: seed の policy A（先に挿入）→ policy A2（後に挿入）の順。
+	if rows[0].ID != ids.policyAID || rows[1].ID != policyA2 {
+		t.Errorf("List は created_at ASC で返すべき: got [%v, %v]", rows[0].ID, rows[1].ID)
+	}
+}
+
+// TestPolicyRepository_Get_CrossTenant はシナリオ (k) 対応。
+// tenant A ctx で他テナント（B）の policy を Get すると、RLS で 0 行 → 存在差を露出しない
+// ErrPolicyNotFound（CodeNotFound）に写像されること（Req 4.4 / 4.5）。実在する policy B id を
+// 指定しても「未検出」と区別不能な応答になることを実 DB / RLS で確認する。
+func TestPolicyRepository_Get_CrossTenant(t *testing.T) {
+	// Arrange
+	repo, ids, ctx, cleanup := setupPolicyRepo(t)
+	defer cleanup()
+
+	// Act: tenant A ctx で実在する他テナント policy B を Get。
+	_, err := repo.Get(ctx, ids.tenantAID, ids.policyBID)
+
+	// Assert: 実在しても RLS で 0 行 → 存在差非露出の ErrPolicyNotFound（Req 4.5）。
+	if !stdErrors.Is(err, policy.ErrPolicyNotFound) {
+		t.Fatalf("他テナント policy の Get は ErrPolicyNotFound を期待; got %v", err)
+	}
+	var domainErr *internalerrors.Error
+	if !stdErrors.As(err, &domainErr) || domainErr.Code != internalerrors.CodeNotFound {
+		t.Errorf("Code = NotFound を期待; got %v", err)
+	}
+}
+
+// TestPolicyRepository_UpdateSnapshotSerialized_RowMissing_SkipsReflect はシナリオ (l) 対応。
+// 不在行への UpdateSnapshotSerialized は reflect の前に FOR UPDATE 存在再確認で 0 行を検出し、
+// reflect（AMAPI 反映）を一切呼ばずに affected=0 を返すこと（「DB に行が無いのに AMAPI だけ更新
+// される」乖離を未然に防ぐ / Req 1.5 / 4.4 / 4.5）。
+func TestPolicyRepository_UpdateSnapshotSerialized_RowMissing_SkipsReflect(t *testing.T) {
+	// Arrange
+	repo, ids, ctx, cleanup := setupPolicyRepo(t)
+	defer cleanup()
+
+	reflectCalled := false
+	reflect := func(_ context.Context) (int64, error) {
+		reflectCalled = true
+		return 1, nil
+	}
+	updRow := policy.PolicyRow{
+		ID:              uuid.New(), // 不在 id。
+		TenantID:        ids.tenantAID,
+		Name:            "ghost",
+		AMAPIPolicyName: "enterprises/X/policies/ghost",
+		Body:            map[string]any{},
+	}
+
+	// Act
+	_, affected, err := repo.UpdateSnapshotSerialized(ctx, updRow, reflect)
+
+	// Assert: reflect 未実行（AMAPI 未反映）+ affected=0（Req 1.5 / 4.4）。
+	if err != nil {
+		t.Fatalf("不在行の Update は error に倒さない: got %v", err)
+	}
+	if reflectCalled {
+		t.Error("不在行では reflect（AMAPI 反映）を呼んではならない（乖離防止 / Req 1.5）")
+	}
+	if affected != 0 {
+		t.Errorf("affected = %d; want 0", affected)
+	}
+}
+
+// TestPolicyRepository_Lifecycle_GoldenPath はシナリオ (m) 対応。
+// Insert→Get→UpdateSnapshotSerialized→Get→Delete→Get(NotFound) の repository-level golden path を
+// 実 DB に対して通し、各段の永続化が後続段に反映されること（Req 1.x / 4.4 / 5.3）を検証する。
+// HTTP routing 経由の E2E は deferrable task 7 のスコープだが、本テストで AC 1.5 の統合挙動（実
+// repository + reflect fake）を確認する。
+func TestPolicyRepository_Lifecycle_GoldenPath(t *testing.T) {
+	// Arrange
+	repo, ids, ctx, cleanup := setupPolicyRepo(t)
+	defer cleanup()
+
+	newID := uuid.New()
+
+	// (1) Insert
+	if _, err := repo.Insert(ctx, policy.PolicyRow{
+		ID:              newID,
+		TenantID:        ids.tenantAID,
+		Name:            "lifecycle",
+		AMAPIPolicyName: "enterprises/X/policies/" + newID.String(),
+		Body:            map[string]any{"stage": "created"},
+		Version:         1,
+	}); err != nil {
+		t.Fatalf("Insert: %v", err)
+	}
+
+	// (2) Get → 作成内容が読み戻せる。
+	got, err := repo.Get(ctx, ids.tenantAID, newID)
+	if err != nil {
+		t.Fatalf("Get after insert: %v", err)
+	}
+	if got.Name != "lifecycle" {
+		t.Errorf("Get after insert name = %q; want lifecycle", got.Name)
+	}
+
+	// (3) Update（reflect が反映済み version 12 を返す）。
+	_, affected, err := repo.UpdateSnapshotSerialized(ctx, policy.PolicyRow{
+		ID:              newID,
+		TenantID:        ids.tenantAID,
+		Name:            "lifecycle-updated",
+		AMAPIPolicyName: "enterprises/X/policies/" + newID.String(),
+		Body:            map[string]any{"stage": "updated"},
+	}, noopReflect(12))
+	if err != nil {
+		t.Fatalf("Update: %v", err)
+	}
+	if affected != 1 {
+		t.Fatalf("Update affected = %d; want 1", affected)
+	}
+
+	// (4) Get → 更新内容が永続化されている。
+	got, err = repo.Get(ctx, ids.tenantAID, newID)
+	if err != nil {
+		t.Fatalf("Get after update: %v", err)
+	}
+	if got.Name != "lifecycle-updated" || got.Version != 12 {
+		t.Errorf("更新が永続化されていない: name=%q version=%d", got.Name, got.Version)
+	}
+	if s, _ := got.Body["stage"].(string); s != "updated" {
+		t.Errorf("Body が更新されていない: stage=%v", got.Body["stage"])
+	}
+
+	// (5) Delete → affected=1（割当端末なしのため FK 違反にならない）。
+	delAff, err := repo.Delete(ctx, ids.tenantAID, newID)
+	if err != nil {
+		t.Fatalf("Delete: %v", err)
+	}
+	if delAff != 1 {
+		t.Fatalf("Delete affected = %d; want 1", delAff)
+	}
+
+	// (6) Get → 削除後は ErrPolicyNotFound（Req 4.4 / 5.3）。
+	if _, err := repo.Get(ctx, ids.tenantAID, newID); !stdErrors.Is(err, policy.ErrPolicyNotFound) {
+		t.Fatalf("削除後の Get は ErrPolicyNotFound を期待; got %v", err)
+	}
+}
+
+// TestPolicyRepository_ConsecutiveUpdates_SnapshotMatchesLatest はシナリオ (n) 対応。
+// 同一 policy への連続更新で、永続化された snapshot が「最新の反映済み内容」と一致し、AMAPI 反映前の
+// 中間状態を確定 snapshot として残さないこと（Req 1.5）。advisory lock 直列化下で 2 回連続更新し、
+// 最終 Get が 2 回目の version / body と一致することを確認する。
+func TestPolicyRepository_ConsecutiveUpdates_SnapshotMatchesLatest(t *testing.T) {
+	// Arrange: seed 済み policy A を起点に連続更新する。
+	repo, ids, ctx, cleanup := setupPolicyRepo(t)
+	defer cleanup()
+
+	// Update 1: reflect version 10 / body step=1。
+	if _, affected, err := repo.UpdateSnapshotSerialized(ctx, policy.PolicyRow{
+		ID:              ids.policyAID,
+		TenantID:        ids.tenantAID,
+		Name:            "update-1",
+		AMAPIPolicyName: "enterprises/X/policies/A",
+		Body:            map[string]any{"step": float64(1)},
+	}, noopReflect(10)); err != nil || affected != 1 {
+		t.Fatalf("Update 1: affected=%d err=%v", affected, err)
+	}
+
+	// Update 2: reflect version 20 / body step=2。
+	if _, affected, err := repo.UpdateSnapshotSerialized(ctx, policy.PolicyRow{
+		ID:              ids.policyAID,
+		TenantID:        ids.tenantAID,
+		Name:            "update-2",
+		AMAPIPolicyName: "enterprises/X/policies/A",
+		Body:            map[string]any{"step": float64(2)},
+	}, noopReflect(20)); err != nil || affected != 1 {
+		t.Fatalf("Update 2: affected=%d err=%v", affected, err)
+	}
+
+	// Act: 最終 snapshot を読み戻す。
+	got, err := repo.Get(ctx, ids.tenantAID, ids.policyAID)
+	if err != nil {
+		t.Fatalf("Get after consecutive updates: %v", err)
+	}
+
+	// Assert: snapshot は最新（2 回目）の反映済み内容と一致し、中間状態（step=1 / version 10）を
+	// 残さない（Req 1.5）。
+	if got.Name != "update-2" || got.Version != 20 {
+		t.Errorf("最新反映済みと不一致: name=%q version=%d; want update-2 / 20", got.Name, got.Version)
+	}
+	if s, _ := got.Body["step"].(float64); s != 2 {
+		t.Errorf("snapshot body が最新と不一致: step=%v; want 2", got.Body["step"])
 	}
 }

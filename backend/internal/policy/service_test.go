@@ -92,6 +92,10 @@ type fakeRepository struct {
 	insertErr error
 	updateErr error
 	updateAff int64
+	// updateRowMissing は実 Repository の手順 (2)（reflect 前の FOR UPDATE 存在再確認）で対象行が
+	// 不在だったケースを模す。true のとき reflect を呼ばずに affected=0 を返す（AMAPI 未反映 =
+	// 乖離なしの NotFound 経路 / Req 1.5 / 4.4 / 4.5）。
+	updateRowMissing bool
 
 	getRow PolicyRow
 	getErr error
@@ -135,8 +139,13 @@ func (r *fakeRepository) Insert(_ context.Context, row PolicyRow) (PolicyRow, er
 }
 
 func (r *fakeRepository) UpdateSnapshotSerialized(ctx context.Context, row PolicyRow, reflect ReflectFunc) (PolicyRow, int64, error) {
-	// 実 Repository は advisory lock 取得 → reflect（AMAPI 反映 + version 取得）→ snapshot UPDATE の
-	// 順で動く。fake も reflect を先に実行し、AMAPI 反映失敗時は snapshot を書かない（Req 1.4）。
+	// 実 Repository は advisory lock 取得 → FOR UPDATE 存在再確認 → reflect（AMAPI 反映 + version
+	// 取得）→ snapshot UPDATE の順で動く。手順 (2) で対象行が不在なら reflect を呼ばずに affected=0 を
+	// 返す（AMAPI 未反映 = 乖離なしの NotFound 経路 / Req 1.5 / 4.4 / 4.5）。
+	if r.updateRowMissing {
+		return PolicyRow{}, 0, nil
+	}
+	// reflect を先に実行し、AMAPI 反映失敗時は snapshot を書かない（Req 1.4）。
 	version, rerr := reflect(ctx)
 	if rerr != nil {
 		return PolicyRow{}, 0, rerr
@@ -818,6 +827,44 @@ func TestService_Upsert_PersistFailureLogsInconsistency(t *testing.T) {
 		}
 		if !h.log.hasInconsistencyLog() {
 			t.Errorf("expected an amapi/db inconsistency ERROR log on affected=0, got %+v", h.log.snapshot())
+		}
+	})
+
+	t.Run("Update で reflect 前に対象行が消失（affected=0 / AMAPI 未反映）のとき乖離ログを出さず NotFound を返す", func(t *testing.T) {
+		// Arrange: Get は成功（事前確認は通る）だが、Repository が reflect 前の FOR UPDATE 存在
+		// 再確認で対象行 0 行を検出し、AMAPI を呼ばずに affected=0 を返す（並行 DELETE 競合 / Req 1.5）。
+		h := newServiceHarness()
+		actor, tenantID, policyID := uuid.New(), uuid.New(), uuid.New()
+		h.repo.getRow = PolicyRow{
+			ID:              policyID,
+			TenantID:        tenantID,
+			Name:            "old name",
+			AMAPIPolicyName: testEnterpriseName + "/policies/" + policyID.String(),
+			Body:            map[string]any{"old": true},
+			Version:         3,
+		}
+		h.repo.updateRowMissing = true // reflect を呼ばずに affected=0（AMAPI 未反映）。
+
+		// Act
+		_, err := h.svc.Update(context.Background(), actor, tenantID, policyID, PolicyRequest{Name: testPolicyName, Body: validBody()})
+
+		// Assert: 存在差非露出の NotFound を返す（Req 4.4 / 4.5）。
+		if got := codeOf(t, err); got != pkgerrors.CodeNotFound {
+			t.Fatalf("expected CodeNotFound on affected=0, got %s", got)
+		}
+		// AMAPI は一切呼ばれない（reflect 前に不在検出 = 乖離の根本原因を断つ / Req 1.5）。
+		if h.amapi.callCount() != 0 {
+			t.Fatalf("expected AMAPI not called when row missing before reflect, got %d", h.amapi.callCount())
+		}
+		// AMAPI 未反映なので AMAPI↔DB 乖離は生じず、inconsistency ERROR ログを出さない（誤った reconcile
+		// 指示を運用者に出さないため / NFR 3.1）。
+		if h.log.hasInconsistencyLog() {
+			t.Errorf("expected NO inconsistency log when AMAPI was not reflected, got %+v", h.log.snapshot())
+		}
+		// 失敗監査は記録される（Req 5.2）。
+		evs := h.recorder.recorded()
+		if len(evs) != 1 || evs[0].Result != audit.ResultFailure {
+			t.Fatalf("expected 1 failure audit event, got %+v", evs)
 		}
 	})
 }
