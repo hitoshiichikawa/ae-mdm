@@ -29,7 +29,7 @@
   - _Requirements_partial: 1.1, 1.4, 1.5_
   - _Boundary: repository.go_
   - _Depends: 2.1_
-- [ ] 3.2 RecoverStaleBindings sweep クエリ (P)
+- [x] 3.2 RecoverStaleBindings sweep クエリ (P)
   - `RecoverStaleBindings(ctx, olderThan)`（`UPDATE ... status='pending_bind' WHERE status='binding' AND updated_at < now()-$olderThan RETURNING id`、回収 id 群返却 / Req 2.1）を追加
   - sweep の RLS 下挙動・しきい値境界の検証は task 7.1 の integration test へ deferred する（partial 明示）
   - _Requirements: 2.1_
