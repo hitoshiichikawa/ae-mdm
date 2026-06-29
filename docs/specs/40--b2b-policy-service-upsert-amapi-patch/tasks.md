@@ -44,7 +44,7 @@
   - _Boundary: policy.Service_
   - _Depends: 1.2, 2.1_
 
-- [ ] 4. ポリシー参照・削除・端末割当ユースケースを Service に実装
+- [x] 4. ポリシー参照・削除・端末割当ユースケースを Service に実装
 - [x] 4.1 `service.go` の `Get` / `List` / `Delete` / `Assign` を実装 + `service_test.go` 追記
   - `Get` / `List` は tenant-scoped Repository へ委譲し自テナント行のみ返す。不在は NotFound（Req 4.4 / 4.5）
   - `Delete` は Repository.Delete 委譲。割当済み端末ありの Conflict（409）を伝達し、削除イベントを監査（Req 5.3）。確認事項 3 の推奨案（409 拒否）に従う
