@@ -299,9 +299,35 @@ func (r *repository) TenantIDByEnterpriseName(ctx context.Context, enterpriseNam
 		return nil
 	})
 	if err != nil {
-		return uuid.Nil, false, err
+		// fn 内部の scan 失敗（既に transient 写像済み）だけでなく、BeginTx / SetLocalTenant /
+		// Commit 由来の失敗（CodeInternal/非 transient）も transient へ正規化する。本逆引きは
+		// Notification Dispatcher の dispatch 経路で worker の ack/nack 判定に直結するため、外側
+		// tx 失敗が非 transient のまま素通りすると ShouldAck が ack 判定し通知を喪失する（Req 1.4）。
+		return uuid.Nil, false, asTransientReverseLookupErr(err)
 	}
 	return id, found, nil
+}
+
+// asTransientReverseLookupErr は TenantIDByEnterpriseName が BeginTxFunc から受けた err を
+// transient な *errors.Error へ正規化する（Req 1.4 = DB 参照失敗は再処理保持）。
+//
+// fn 内部で既に transient *Error に写像済みなら二重 wrap せずそのまま返し、BeginTx /
+// SetLocalTenant / Commit 由来の非 transient error のみ transient に包む。message には機密値を
+// 補間しない固定文言を用いる（NFR 3.1）。
+func asTransientReverseLookupErr(cause error) error {
+	if cause == nil {
+		return nil
+	}
+	var de *pkgerrors.Error
+	if stderrors.As(cause, &de) && de.IsTransient {
+		return cause
+	}
+	return &pkgerrors.Error{
+		Code:        pkgerrors.CodeUnavailable,
+		Message:     "tenant reverse lookup failed",
+		IsTransient: true,
+		Cause:       cause,
+	}
 }
 
 // UpdateDisabled は Repository.UpdateDisabled の実装。

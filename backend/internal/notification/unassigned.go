@@ -2,6 +2,7 @@ package notification
 
 import (
 	"context"
+	stderrors "errors"
 	"fmt"
 	"strings"
 
@@ -64,19 +65,23 @@ func NewUnassignedQueue(pool *pgxpool.Pool) UnassignedQueue {
 // Enqueue は UnassignedQueue.Enqueue の実装（Req 3.2 / 3.5）。
 func (q *unassignedQueue) Enqueue(ctx context.Context, env Envelope) error {
 	ctx = superAdminContext(ctx)
-	return db.BeginTxFunc(ctx, q.pool, func(tx pgx.Tx) error {
-		if _, err := tx.Exec(ctx,
+	err := db.BeginTxFunc(ctx, q.pool, func(tx pgx.Tx) error {
+		if _, execErr := tx.Exec(ctx,
 			enqueueUnassignedSQL,
 			uuid.New(),
 			env.MessageID,
 			string(env.NotificationType),
 			env.EnterpriseName,
 			payloadOrEmptyJSON(env.Payload),
-		); err != nil {
-			return wrapUnassignedPersistErr(err)
+		); execErr != nil {
+			return wrapUnassignedPersistErr(execErr)
 		}
 		return nil
 	})
+	// fn 内部の INSERT 失敗だけでなく、BeginTx / SetLocalTenant / Commit 由来の失敗（CodeInternal/
+	// 非 transient）も transient へ正規化する。さもないと退避永続化失敗が ack 判定され通知を
+	// 喪失する（Req 1.4 / NFR 2.2）。wrapUnassignedPersistErr(nil) は nil を返す。
+	return wrapUnassignedPersistErr(err)
 }
 
 // List は UnassignedQueue.List の実装（Req 4.1 / 4.2）。
@@ -110,7 +115,9 @@ func (q *unassignedQueue) List(ctx context.Context, f Filter) ([]UnassignedNotif
 		return nil
 	})
 	if err != nil {
-		return nil, err
+		// fn 内部の query/scan 失敗だけでなく、BeginTx / SetLocalTenant / Commit 由来の失敗も
+		// transient へ正規化する（admin_handler が 503 に写像 / CodeInternal の素通しを防ぐ）。
+		return nil, wrapUnassignedPersistErr(err)
 	}
 	return out, nil
 }
@@ -198,7 +205,21 @@ func payloadOrEmptyJSON(payload []byte) []byte {
 // 防ぐ（NFR 2.2 と整合）。IsTransient=true は errors.Wrap が設定しないため
 // &errors.Error{...} をリテラル構築する（dedupe.wrapDedupePersistErr と同型）。message には
 // 機密値（query 生値等）を補間しない固定文言を用いる（NFR 3.1）。
+//
+// BeginTxFunc の fn 内部（exec / query / scan 失敗）と外部（BeginTx / SetLocalTenant / Commit
+// 失敗）の両方の wrap 点で共用するため、dedupe.wrapDedupePersistErr と同じく nil-safe かつ
+// transient 既写像に対して idempotent にする:
+//   - cause == nil               → nil
+//   - cause が既に transient *Error → そのまま返す（二重 wrap 回避）
+//   - それ以外（非 transient error） → transient *Error に包む（Req 1.4）
 func wrapUnassignedPersistErr(cause error) error {
+	if cause == nil {
+		return nil
+	}
+	var de *pkgerrors.Error
+	if stderrors.As(cause, &de) && de.IsTransient {
+		return cause
+	}
 	return &pkgerrors.Error{
 		Code:        pkgerrors.CodeUnavailable,
 		Message:     "unassigned notification persistence failed",

@@ -10,26 +10,83 @@ import (
 	pkgerrors "github.com/hitoshiichikawa/ae-mdm/internal/errors"
 )
 
-// TestMarkProcessedSQL_ContainsOnConflictDoNothing は冪等記録 INSERT 文が
+// TestClaimSQL_ContainsOnConflictDoNothing は claim INSERT 文が
 // ON CONFLICT (message_id) DO NOTHING を含むことを検証する（Req 1.3 = 並行同一 MessageID の
 // 直列化を PK + ON CONFLICT で担保。audit の SQL 文字列 assert と同型の documenting テスト）。
-func TestMarkProcessedSQL_ContainsOnConflictDoNothing(t *testing.T) {
-	// Arrange / Act: markProcessedSQL は const のため直接検証する。
+func TestClaimSQL_ContainsOnConflictDoNothing(t *testing.T) {
+	// Arrange / Act: claimSQL は const のため直接検証する。
 
 	// Assert
-	if !strings.Contains(markProcessedSQL, "INSERT INTO notification_dedupe") {
-		t.Errorf("notification_dedupe への INSERT であるべき: got %q", markProcessedSQL)
+	if !strings.Contains(claimSQL, "INSERT INTO notification_dedupe") {
+		t.Errorf("notification_dedupe への INSERT であるべき: got %q", claimSQL)
 	}
-	if !strings.Contains(markProcessedSQL, "ON CONFLICT (message_id) DO NOTHING") {
-		t.Errorf("ON CONFLICT (message_id) DO NOTHING を含むべき（冪等機構 / Req 1.3）: got %q", markProcessedSQL)
+	if !strings.Contains(claimSQL, "ON CONFLICT (message_id) DO NOTHING") {
+		t.Errorf("ON CONFLICT (message_id) DO NOTHING を含むべき（冪等機構 / Req 1.3）: got %q", claimSQL)
 	}
 	// $1 = message_id / $2 = notification_type の 2 引数を bind する。
-	if !strings.Contains(markProcessedSQL, "(message_id, notification_type)") {
-		t.Errorf("message_id / notification_type の 2 列を INSERT すべき: got %q", markProcessedSQL)
+	if !strings.Contains(claimSQL, "(message_id, notification_type)") {
+		t.Errorf("message_id / notification_type の 2 列を INSERT すべき: got %q", claimSQL)
 	}
-	if !strings.Contains(markProcessedSQL, "VALUES ($1, $2)") {
-		t.Errorf("$1 / $2 のプレースホルダで bind すべき: got %q", markProcessedSQL)
+	if !strings.Contains(claimSQL, "VALUES ($1, $2)") {
+		t.Errorf("$1 / $2 のプレースホルダで bind すべき: got %q", claimSQL)
 	}
+}
+
+// TestReleaseSQL_DeletesByMessageID は claim 取り消し DELETE 文が message_id を条件に
+// notification_dedupe から削除することを検証する（Req 5.1 / 5.3 = 後続処理失敗時の claim 取り消し）。
+func TestReleaseSQL_DeletesByMessageID(t *testing.T) {
+	// Arrange / Act / Assert
+	if !strings.Contains(releaseSQL, "DELETE FROM notification_dedupe") {
+		t.Errorf("notification_dedupe からの DELETE であるべき: got %q", releaseSQL)
+	}
+	if !strings.Contains(releaseSQL, "WHERE message_id = $1") {
+		t.Errorf("message_id を条件にすべき: got %q", releaseSQL)
+	}
+}
+
+// TestWrapDedupePersistErr_IsNilSafeAndIdempotent は wrapDedupePersistErr が
+// BeginTxFunc の fn 内部 / 外部の両 wrap 点で共用できるよう、nil を素通しし、既に transient な
+// *errors.Error を二重 wrap しない一方、非 transient error（外側 tx 失敗の CodeInternal 等）は
+// transient に正規化することを検証する（Req 1.4 = 外側 tx 失敗も再処理保持へ倒す）。
+func TestWrapDedupePersistErr_IsNilSafeAndIdempotent(t *testing.T) {
+	t.Run("nil のとき nil を返す（成功経路をエラー化しない）", func(t *testing.T) {
+		if got := wrapDedupePersistErr(nil); got != nil {
+			t.Errorf("nil を返すべき: got %v", got)
+		}
+	})
+
+	t.Run("既に transient *Error なら同一 error をそのまま返す（二重 wrap しない）", func(t *testing.T) {
+		// Arrange
+		already := &pkgerrors.Error{Code: pkgerrors.CodeUnavailable, Message: "x", IsTransient: true}
+		// Act
+		got := wrapDedupePersistErr(already)
+		// Assert
+		var de *pkgerrors.Error
+		if !stderrors.As(got, &de) || de != already {
+			t.Errorf("transient *Error は二重 wrap せずそのまま返すべき: got %#v", got)
+		}
+	})
+
+	t.Run("非 transient error（外側 tx 失敗）を transient に正規化する", func(t *testing.T) {
+		// Arrange: BeginTx / Commit 失敗を模した CodeInternal / 非 transient な *Error。
+		txFail := &pkgerrors.Error{Code: pkgerrors.CodeInternal, Message: "tx begin failed", IsTransient: false}
+		// Act
+		got := wrapDedupePersistErr(txFail)
+		// Assert
+		var de *pkgerrors.Error
+		if !stderrors.As(got, &de) {
+			t.Fatalf("*errors.Error で写像されるべき: got %T", got)
+		}
+		if !de.IsTransient {
+			t.Errorf("外側 tx 失敗は IsTransient=true へ正規化されるべき（nack 保持 / Req 1.4）: got false")
+		}
+		if de.Code != pkgerrors.CodeUnavailable {
+			t.Errorf("Code は CodeUnavailable であるべき: got %q", de.Code)
+		}
+		if !stderrors.Is(got, txFail) {
+			t.Errorf("cause が errors.Is で辿れるべき: got %v", got)
+		}
+	})
 }
 
 // TestWrapDedupePersistErr_MapsToTransientUnavailable は永続化失敗が

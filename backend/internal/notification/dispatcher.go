@@ -13,15 +13,19 @@ import (
 // Dispatcher は pubsub.MessageHandler を実装し、1 メッセージを段階処理で orchestrate する
 // （design.md「Dispatcher」節 / Req 1.1〜1.4 / 2.1〜2.6 / 3.1〜3.5 / 5.1〜5.3）。
 //
-// 段階: Verify → Dedup → Resolve → (未割当なら Unassigned 退避) → tenant context 確立 →
-// 種別 handler 振り分け → 成功時 dedupe 記録。各段の失敗は errors.ShouldAck が解釈する
-// error 種別（IsTransient）へ写像する（worker 最外層 subscriber が ack/nack を決定）。
+// 段階: Verify → Dedup(fast-path) → Resolve → claim → (未割当なら Unassigned 退避 / それ以外は
+// tenant context 確立 + 種別 handler 振り分け)。dedupe の記録は **dispatch / 退避を実行する前**に
+// 原子的 claim（INSERT ON CONFLICT DO NOTHING + RowsAffected）で行い、勝者だけが後続処理へ進む。
+// これにより同一 MessageID が並行到達しても handler / 退避は 1 件のみが実行される（Req 1.1 = 記録
+// した上で後続処理を実行 / Req 1.3 = 直列化）。claim 後の後続処理が失敗した場合は claim を release
+// して再処理を許す（Req 5.1 / 5.3）。各段の失敗は errors.ShouldAck が解釈する error 種別
+// （IsTransient）へ写像する（worker 最外層 subscriber が ack/nack を決定）。
 //
 //   - 完了扱い（ack） = IsTransient=false の error または nil:
-//     既処理（Req 1.2）/ 未割当退避成功（Req 3.3）/ 未登録種別（Req 2.4）/
-//     検証失敗・空 payload（Req 2.5 / 2.6）
+//     既処理（Req 1.2）/ 並行重複で claim 敗北（Req 1.3）/ 未割当退避成功（Req 3.3）/
+//     未登録種別（Req 2.4）/ 検証失敗・空 payload（Req 2.5 / 2.6）
 //   - 再処理保持（nack） = IsTransient=true の error:
-//     dedupe / 退避の永続化失敗（Req 1.4）/ tenant 逆引きの DB 失敗 / transient な
+//     dedupe claim / 退避の永続化失敗（Req 1.4）/ tenant 逆引きの DB 失敗 / transient な
 //     handler 失敗（Req 5.1 / 5.3）
 type Dispatcher struct {
 	verifier       Verifier
@@ -71,8 +75,10 @@ func (d *Dispatcher) Handle(ctx context.Context, msg *pubsub.Message) error {
 		return err
 	}
 
-	// 2. Dedup: 既処理 MessageID は種別別 dispatch を実行せず即 ack（Req 1.2）。判定の DB 失敗は
-	//    transient のため nack 保持（Req 1.4）。
+	// 2. Dedup fast-path: 既処理 MessageID は種別別 dispatch を実行せず即 ack（Req 1.2）。判定の
+	//    DB 失敗は transient のため nack 保持（Req 1.4）。並行重複の最終的な直列化は後段の claim
+	//    （dedupe.Claim）が DB の一意制約で担保するため、本 SELECT は確定済み重複を安価に弾く
+	//    最適化であり、ここを通過した並行重複は claim で 1 件に絞られる。
 	processed, err := d.dedupe.IsProcessed(ctx, env.MessageID)
 	if err != nil {
 		d.log.Warn("notification: dedupe lookup failed; will retry",
@@ -86,7 +92,8 @@ func (d *Dispatcher) Handle(ctx context.Context, msg *pubsub.Message) error {
 	}
 
 	// 3. Resolve: enterprise_name → tenant_id を解決する。空 enterprise_name は DB を叩かず
-	//    未割当（退避経路）へ倒す（Req 3.4）。
+	//    未割当（退避経路）へ倒す（Req 3.4）。解決は冪等のため claim より前に行い、claim 失敗時の
+	//    無駄な取り消しを避ける。
 	tenantID, found, err := d.resolveTenant(ctx, env)
 	if err != nil {
 		// tenant 逆引きの DB 失敗は transient（再処理保持 / Req 1.4 経路）。
@@ -95,12 +102,12 @@ func (d *Dispatcher) Handle(ctx context.Context, msg *pubsub.Message) error {
 		return err
 	}
 	if !found {
-		// 4. 未割当退避: unassigned へ INSERT し dedupe 記録した上で ack 完了扱い（Req 3.2 / 3.3）。
+		// 4. 未割当退避: claim を先取りしてから unassigned へ INSERT し ack 完了扱い（Req 3.2 / 3.3）。
 		//    いずれのテナントリソースも更新しない（NFR 2.1 / 2.2 / Req 3.5）。
 		return d.enqueueUnassigned(ctx, env)
 	}
 
-	// 5. tenant context を確立してから種別 handler を呼ぶ（Req 3.1 / NFR 2.1）。
+	// 5. claim を先取りしてから tenant context を確立し種別 handler を呼ぶ（Req 1.1 / 3.1 / NFR 2.1）。
 	return d.dispatchToHandler(ctx, env, tenantID)
 }
 
@@ -117,15 +124,34 @@ func (d *Dispatcher) resolveTenant(ctx context.Context, env Envelope) (uuid.UUID
 	return d.tenantResolver.TenantIDByEnterpriseName(ctx, env.EnterpriseName)
 }
 
-// enqueueUnassigned は未割当通知を退避し dedupe 記録した上で ack 完了扱い（nil）を返す
-// （Req 3.2 / 3.3）。
+// enqueueUnassigned は未割当通知を claim-first で退避し ack 完了扱い（nil）を返す（Req 3.2 / 3.3）。
 //
-// 退避 INSERT 失敗は transient のため nack 保持（取りこぼし防止 / Req 1.4 経路 / NFR 2.2）。
-// 退避成功後の dedupe 記録失敗も transient のため nack（再配信時に既処理判定で退避は
-// ON CONFLICT 等で多重化しないが、本 Issue では退避 INSERT に冪等制約を置かないため dedupe を
-// handler 成功後と同様「退避成功後」に記録して二重退避を防ぐ）。
+// 退避 INSERT の前に dedupe.Claim を取り、claim できた（claimed=true）場合のみ退避する。これにより
+// 並行する同一 MessageID は 1 件だけが退避し、残りは退避せず ack される（Req 1.3）。
+// unassigned_notifications は message_id に一意制約を持たない（既存スキーマ 0010 を消費 / 新規
+// マイグレーションは scope 外）ため、退避の冪等性は dedupe claim を gate にして担保する。
+//
+//   - claim の DB 失敗 → transient nack（Req 1.4）
+//   - claimed=false（並行重複 / 既 claim）→ 二重退避を防ぐため退避せず ack（Req 1.3 / 3.3）
+//   - 退避 INSERT 失敗 → claim を release してから transient nack（取りこぼし防止 / 重複行防止 /
+//     Req 5.1 / NFR 2.2）。release により再配信時に再度 claim + 退避できる
 func (d *Dispatcher) enqueueUnassigned(ctx context.Context, env Envelope) error {
+	claimed, err := d.dedupe.Claim(ctx, env.MessageID, env.NotificationType)
+	if err != nil {
+		d.log.Warn("notification: dedupe claim failed before quarantine; will retry",
+			logger.MessageID(env.MessageID))
+		return err
+	}
+	if !claimed {
+		// 既に他者が claim 済み（並行重複 / 既処理）。二重退避を防ぐため退避せず ack（Req 1.3 / 3.3）。
+		d.log.Info("notification: message already claimed; skipping quarantine (duplicate)",
+			logger.MessageID(env.MessageID))
+		return nil
+	}
+
 	if err := d.unassigned.Enqueue(ctx, env); err != nil {
+		// 退避失敗は claim を取り消して再配信時の再退避を可能にする（重複行を防ぐ / Req 5.1 / NFR 2.2）。
+		d.releaseClaim(ctx, env.MessageID)
 		d.log.Warn("notification: unassigned enqueue failed; will retry",
 			logger.MessageID(env.MessageID))
 		return err
@@ -133,28 +159,42 @@ func (d *Dispatcher) enqueueUnassigned(ctx context.Context, env Envelope) error 
 	d.log.Info("notification: message has no resolvable tenant; quarantined to unassigned queue",
 		logger.MessageID(env.MessageID),
 		"notification_type", string(env.NotificationType))
-
-	if err := d.dedupe.MarkProcessed(ctx, env.MessageID, env.NotificationType); err != nil {
-		d.log.Warn("notification: dedupe mark failed after unassigned enqueue; will retry",
-			logger.MessageID(env.MessageID))
-		return err
-	}
 	return nil
 }
 
-// dispatchToHandler は tenant context を確立してから種別別 handler を呼び、成功時に dedupe を
-// 記録する（Req 2.1〜2.4 / 3.1 / 5.1〜5.3 / NFR 2.1）。
+// dispatchToHandler は claim-first で tenant context を確立してから種別別 handler を呼ぶ
+// （Req 1.1 / 1.3 / 2.1〜2.4 / 3.1 / 5.1〜5.3 / NFR 2.1）。
 //
-//   - 未登録種別: 取りこぼさずログを残した上で完了扱い（nil → ack / Req 2.4）。dedupe は記録
-//     しない（処理していないため）。
-//   - handler 失敗: error をそのまま返し ShouldAck に ack/nack を委ねる（transient → nack / Req 5.1）。
-//     失敗時は dedupe を記録せず再処理を許す（Risk: dedupe 記録は handler 成功後）。
-//   - 成功: dedupe を記録した上で ack（Req 1.1 / 5.2）。記録失敗は transient → nack（Req 1.4）。
+//   - 未登録種別: 取りこぼさずログを残した上で完了扱い（nil → ack / Req 2.4）。claim は取らない
+//     （処理しないため dedupe 記録を残さない）。
+//   - claim を handler 実行の **前** に取る: INSERT ON CONFLICT で並行する同一 MessageID を直列化し、
+//     勝者（claimed=true）のみ handler を呼ぶ（Req 1.1 / 1.3 = 二重実行を防ぐ）。
+//   - claim の DB 失敗 → transient nack（Req 1.4）。claimed=false（並行重複）→ handler を呼ばず ack。
+//   - handler 失敗: claim を release してから error をそのまま返し ShouldAck に ack/nack を委ねる
+//     （transient → nack で再配信時に再処理 / Req 5.1 / 5.3）。release により「成功した処理のみ
+//     dedupe 記録を残す」invariant を維持する。
+//   - 成功: claim をそのまま残して ack（Req 1.1 / 5.2）。
 func (d *Dispatcher) dispatchToHandler(ctx context.Context, env Envelope, tenantID uuid.UUID) error {
 	handler, ok := d.handlers[env.NotificationType]
 	if !ok {
-		// 未対応/未登録種別は取りこぼさずログ + 完了扱い（Req 2.4）。
+		// 未対応/未登録種別は取りこぼさずログ + 完了扱い（Req 2.4）。claim を取らないため dedupe
+		// 記録は残らず、将来 handler が登録された後の再配信で再処理しうる。
 		d.log.Warn("notification: no handler registered for notification type; acking without dispatch",
+			logger.MessageID(env.MessageID),
+			"notification_type", string(env.NotificationType))
+		return nil
+	}
+
+	// handler を呼ぶ前に claim を取る（Req 1.1 / 1.3）。並行する同一 MessageID は 1 件だけが
+	// claimed=true となり、残りは claimed=false で handler を呼ばず ack する。
+	claimed, err := d.dedupe.Claim(ctx, env.MessageID, env.NotificationType)
+	if err != nil {
+		d.log.Warn("notification: dedupe claim failed before dispatch; will retry",
+			logger.MessageID(env.MessageID))
+		return err
+	}
+	if !claimed {
+		d.log.Info("notification: message already claimed; skipping dispatch (duplicate)",
 			logger.MessageID(env.MessageID),
 			"notification_type", string(env.NotificationType))
 		return nil
@@ -164,21 +204,31 @@ func (d *Dispatcher) dispatchToHandler(ctx context.Context, env Envelope, tenant
 	// アクセスは本 context の tenant_id に閉じる。
 	handlerCtx := db.WithTenantContext(ctx, db.TenantContext{TenantID: tenantID})
 	if err := handler.Handle(handlerCtx, env); err != nil {
-		// transient な失敗は nack 保持（Req 5.1 / 5.3）、恒常的失敗は ack。dedupe は記録しない。
+		// handler 失敗は claim を取り消す（transient は再配信で再処理 / Req 5.1 / 5.3）。
+		// これにより dedupe には「成功した処理」だけが残る。
+		d.releaseClaim(ctx, env.MessageID)
 		d.log.Warn("notification: handler failed",
 			logger.MessageID(env.MessageID),
 			"notification_type", string(env.NotificationType))
 		return err
 	}
 
-	// handler 成功後に dedupe を記録する（Risk: 成功した処理のみ dedupe / Req 1.1 / 5.2）。
-	if err := d.dedupe.MarkProcessed(ctx, env.MessageID, env.NotificationType); err != nil {
-		d.log.Warn("notification: dedupe mark failed after successful dispatch; will retry",
-			logger.MessageID(env.MessageID))
-		return err
-	}
 	d.log.Info("notification: dispatched and recorded",
 		logger.MessageID(env.MessageID),
 		"notification_type", string(env.NotificationType))
 	return nil
+}
+
+// releaseClaim は claim 後の後続処理（dispatch / 退避）が失敗したときに自身の dedupe claim を
+// 取り消す best-effort helper（Req 5.1 / 5.3）。
+//
+// Release 自体の失敗は呼び出し元が返す元の失敗 error を上書きせず、構造化 ERROR ログで観測
+// 可能にする（NFR 3.1）。Release が失敗すると claim が orphan として残り、後続再配信が既処理
+// 判定（IsProcessed）で ack され通知を喪失しうる稀なケースがあるため、運用者が事後追跡できる
+// よう WARN ではなく ERROR レベルで残す。
+func (d *Dispatcher) releaseClaim(ctx context.Context, messageID string) {
+	if err := d.dedupe.Release(ctx, messageID); err != nil {
+		d.log.Error("notification: dedupe claim release failed; claim may be orphaned",
+			logger.MessageID(messageID))
+	}
 }

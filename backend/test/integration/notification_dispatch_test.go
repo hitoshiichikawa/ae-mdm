@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"testing"
 	"time"
 
@@ -43,7 +44,11 @@ const boundEnterpriseName = "enterprises/LC9001"
 
 // countingHandler は NotificationHandler の mock。種別ごとの呼び出し回数と、handler 到達時に
 // 確立されていた tenant context（TenantID）を記録する（実ドメインハンドラは本 Issue scope 外）。
+//
+// 並行 Handle テスト（ConcurrentDuplicateMessageID）から複数 goroutine 経由で呼ばれうるため、
+// 内部状態は mutex でガードし `go test -race` でデータ競合を起こさないようにする。
 type countingHandler struct {
+	mu            sync.Mutex
 	hits          int
 	tenantCtxSeen bool
 	gotTenantID   uuid.UUID
@@ -51,12 +56,29 @@ type countingHandler struct {
 
 // Handle は NotificationHandler を満たす。呼び出し回数を数え、tenant context を観測する。
 func (h *countingHandler) Handle(ctx context.Context, _ notification.Envelope) error {
+	h.mu.Lock()
+	defer h.mu.Unlock()
 	h.hits++
 	if tc, err := platformdb.FromContext(ctx); err == nil {
 		h.tenantCtxSeen = true
 		h.gotTenantID = tc.TenantID
 	}
 	return nil
+}
+
+// count は呼び出し回数をスレッドセーフに返す。
+func (h *countingHandler) count() int {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.hits
+}
+
+// tenantContext は handler 到達時に観測した tenant context（確立有無 / TenantID）を
+// スレッドセーフに返す。
+func (h *countingHandler) tenantContext() (bool, uuid.UUID) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.tenantCtxSeen, h.gotTenantID
 }
 
 // dispatchFixture は結合テストで使う実依存（dedupe / unassigned / tenant Service）と mock handler を
@@ -177,12 +199,56 @@ func TestNotificationDispatch_DuplicateMessageID_DispatchedOnce(t *testing.T) {
 	}
 
 	// Assert: ENROLLMENT handler 呼び出しは 1 回のみ（重複排除 / Req 6.1）。
-	if got := f.handlers[notification.Enrollment].hits; got != 1 {
+	if got := f.handlers[notification.Enrollment].count(); got != 1 {
 		t.Errorf("ENROLLMENT handler 呼び出し回数 = %d; want 1（同一 MessageID は 1 回のみ dispatch / Req 6.1）", got)
 	}
 	// 1 回目で確立された tenant context が bound テナントであること（Req 3.1 経路の補完）。
-	if id := f.handlers[notification.Enrollment].gotTenantID; id != tenantID {
+	if _, id := f.handlers[notification.Enrollment].tenantContext(); id != tenantID {
 		t.Errorf("handler 到達時の TenantID = %v; want %v（bound テナント解決 / Req 3.1）", id, tenantID)
+	}
+}
+
+// TestNotificationDispatch_ConcurrentDuplicateMessageID_DispatchedOnce はシナリオ (a) の並行版
+// （Req 1.3 / 6.1）。同一 MessageID の通知を複数 goroutine から **同時に** Handle しても、claim の
+// 直列化（INSERT ON CONFLICT (message_id) DO NOTHING + RowsAffected 判定）により handler 呼び出しが
+// ちょうど 1 回に留まることを実 DB で検証する。逐次 2 回ではなく真の並行到達を再現することで、
+// claim-first の直列化（dispatch 前に claim を取る設計）を回帰固定する。
+func TestNotificationDispatch_ConcurrentDuplicateMessageID_DispatchedOnce(t *testing.T) {
+	// Arrange: bound テナントと、その enterprise_name に解決される ENROLLMENT 通知を 1 件用意する。
+	f := setupDispatch(t)
+	defer f.cleanup()
+	tenantID := f.seedBoundTenant(t, boundEnterpriseName)
+	msg := newMessage("msg-concurrent-001", notification.Enrollment, boundEnterpriseName)
+
+	const goroutines = 8
+
+	// Act: 同一 MessageID を goroutines 個の goroutine から一斉に Handle する（close(start) で同時開始）。
+	var wg sync.WaitGroup
+	errs := make([]error, goroutines)
+	start := make(chan struct{})
+	for i := 0; i < goroutines; i++ {
+		wg.Add(1)
+		go func(idx int) {
+			defer wg.Done()
+			<-start
+			errs[idx] = f.dispatcher.Handle(f.ctx, msg)
+		}(i)
+	}
+	close(start)
+	wg.Wait()
+
+	// Assert: すべての呼び出しが ack 完了（error なし）で、handler 呼び出しは 1 回のみ（Req 1.3 / 6.1）。
+	for i, err := range errs {
+		if err != nil {
+			t.Errorf("Handle goroutine[%d] が error を返した: %v（並行重複は ack 完了を期待）", i, err)
+		}
+	}
+	if got := f.handlers[notification.Enrollment].count(); got != 1 {
+		t.Errorf("ENROLLMENT handler 呼び出し回数 = %d; want 1（並行同一 MessageID の直列化 / Req 1.3 / 6.1）", got)
+	}
+	// 唯一 dispatch された経路で bound テナントの tenant context が確立されていること（Req 3.1）。
+	if seen, id := f.handlers[notification.Enrollment].tenantContext(); !seen || id != tenantID {
+		t.Errorf("handler 到達時の tenant context = (seen=%v, id=%v); want (true, %v)（Req 3.1）", seen, id, tenantID)
 	}
 }
 
@@ -203,8 +269,8 @@ func TestNotificationDispatch_UnresolvableEnterprise_Quarantined(t *testing.T) {
 
 	// Assert: いずれの handler も呼ばれない（dispatch せず退避 / Req 3.2）。
 	for ntype, h := range f.handlers {
-		if h.hits != 0 {
-			t.Errorf("退避経路で handler が呼ばれた: type=%s hits=%d; want 0（dispatch しない / Req 3.2）", ntype, h.hits)
+		if got := h.count(); got != 0 {
+			t.Errorf("退避経路で handler が呼ばれた: type=%s hits=%d; want 0（dispatch しない / Req 3.2）", ntype, got)
 		}
 	}
 	// 退避レコードが unassigned_notifications に 1 件 INSERT され、List から取得できる（Req 6.2）。
@@ -257,14 +323,15 @@ func TestNotificationDispatch_TypeRouting_DispatchesToCorrectHandler(t *testing.
 	// Assert: 各種別 handler がちょうど 1 回ずつ呼ばれ、tenant context が確立されている。
 	for _, c := range cases {
 		h := f.handlers[c.ntype]
-		if h.hits != 1 {
-			t.Errorf("%s handler 呼び出し回数 = %d; want 1（種別振り分け / Req 6.3）", c.name, h.hits)
+		if got := h.count(); got != 1 {
+			t.Errorf("%s handler 呼び出し回数 = %d; want 1（種別振り分け / Req 6.3）", c.name, got)
 		}
-		if !h.tenantCtxSeen {
+		seen, id := h.tenantContext()
+		if !seen {
 			t.Errorf("%s handler 到達時に tenant context が未確立; want 確立済み（Req 3.1）", c.name)
 		}
-		if h.gotTenantID != tenantID {
-			t.Errorf("%s handler 到達時の TenantID = %v; want %v（bound テナント / Req 3.1）", c.name, h.gotTenantID, tenantID)
+		if id != tenantID {
+			t.Errorf("%s handler 到達時の TenantID = %v; want %v（bound テナント / Req 3.1）", c.name, id, tenantID)
 		}
 	}
 }
