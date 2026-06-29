@@ -3,6 +3,7 @@ package tenant
 import (
 	"context"
 	stderrors "errors"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgerrcode"
@@ -337,6 +338,63 @@ func (r *repository) ReleaseBinding(ctx context.Context, id uuid.UUID) (int64, e
 		return 0, err
 	}
 	return affected, nil
+}
+
+// RecoverStaleBindings は updated_at が閾値より古い binding 行を pending_bind へ一括回収する（Req 2.1）。
+//
+// `WHERE status='binding' AND updated_at < now() - make_interval(secs => $1) RETURNING id` で
+// 中断した予約（クラッシュ / AMAPI タイムアウトで binding のまま放置された行）を再び bind 可能・
+// 無効化可能な状態へ戻し、回収された tenant id 群を返す。しきい値は DB 側 `now()` 基準で評価する
+// （アプリ / DB のクロック乖離を避ける / design L289-293）。olderThan は秒（float64）として渡す。
+// 回収が 0 件でも非 nil の空 slice を返す（List の慣習踏襲）。RLS 下挙動・しきい値境界の検証は
+// task 7.1 の integration test へ deferred。
+//
+// 本メソッドは `Repository` interface には未宣言（具象 `*repository` メソッドのみ）。interface
+// 宣言と fakeRepository 追従は消費側 task 5.2 / 4.1 へ deferred する（build-safe）。
+func (r *repository) RecoverStaleBindings(ctx context.Context, olderThan time.Duration) ([]uuid.UUID, error) {
+	ctx = superAdminContext(ctx)
+	// 0 件でも非 nil の空 slice を返す（Req 2.1 / List と同型）。
+	recovered := make([]uuid.UUID, 0)
+	err := db.BeginTxFunc(ctx, r.pool, func(tx pgx.Tx) error {
+		rows, err := tx.Query(ctx,
+			`UPDATE tenants
+			 SET status = 'pending_bind', updated_at = now()
+			 WHERE status = 'binding' AND updated_at < now() - make_interval(secs => $1)
+			 RETURNING id`,
+			olderThan.Seconds(),
+		)
+		if err != nil {
+			return pkgerrors.Wrap(
+				pkgerrors.CodeUnavailable,
+				"tenant stale binding recover failed",
+				err,
+			)
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var id uuid.UUID
+			if scanErr := rows.Scan(&id); scanErr != nil {
+				return pkgerrors.Wrap(
+					pkgerrors.CodeUnavailable,
+					"tenant recovered id scan failed",
+					scanErr,
+				)
+			}
+			recovered = append(recovered, id)
+		}
+		if err := rows.Err(); err != nil {
+			return pkgerrors.Wrap(
+				pkgerrors.CodeUnavailable,
+				"tenant stale binding recover iteration failed",
+				err,
+			)
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return recovered, nil
 }
 
 // UpdateDisabled は Repository.UpdateDisabled の実装。
