@@ -56,7 +56,7 @@
   - _Depends: 2.1, 3.1_
 
 - [ ] 5. `/api/policies` Handler（RBAC + HTTP I/O）を実装
-- [ ] 5.1 `handler.go` + `handler_test.go` を実装
+- [x] 5.1 `handler.go` + `handler_test.go` を実装
   - `Mount(r chi.Router)` で `GET/POST /policies`・`GET/PUT/DELETE /policies/{id}`・`PUT /policies/{id}/assign` を sub-route 登録（`audit/handler.go` が手本）
   - 各 endpoint で `authz.Authorizer.AuthorizeAndLog`（`ResourcePolicy` × `ActionCreate/Update/Delete/Read`）を呼び deny は 403/401 + 構造化 WARN（Req 4.1 / NFR 3.1）
   - JSON decode / path param parse は `tenant/handler.go` の `decodeJSON` / `parseID` 同方式。`*errors.Error` は `errors.WriteHTTP` で写像し存在差を露出しない（Req 4.5）。検証エラー 400（invalid field）/ 422（business rule）を分けて返す
