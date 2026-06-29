@@ -23,6 +23,13 @@ import (
 // migration 0011）による自テナント限定に分離を委ねる。tenant.Repository / auth.Repository が
 // SuperAdmin context へ昇格するのとは対照的に、Policy 操作は **昇格しない**（他テナント行は
 // SELECT で 0 行、UPDATE/INSERT は複合 FK で物理拒否される / design「テナント分離」節）。
+
+// ReflectFunc は UpdateSnapshotSerialized が直列化された critical section（per-policy advisory
+// lock 保持中）で実行する AMAPI 反映副作用。AMAPI への upsert を行い、反映済み snapshot version を
+// 返す。AMAPI 反映が失敗した場合は error を返し、Repository は snapshot を書かずに rollback する
+// （Req 1.4 / 1.5）。version の解決（GetPolicy 等）も本関数内で完結させる。
+type ReflectFunc func(ctx context.Context) (version int64, err error)
+
 type Repository interface {
 	// Insert は AMAPI 反映後の policy snapshot を 1 行 INSERT し、DB 採番の timestamps を
 	// 充填した PolicyRow を返す（Req 1.3）。
@@ -33,14 +40,25 @@ type Repository interface {
 	// で wrap する。
 	Insert(ctx context.Context, row PolicyRow) (PolicyRow, error)
 
-	// Update は既存 policy の snapshot を更新し、更新後の timestamps を充填した PolicyRow と
-	// 影響行数を返す（Req 1.5）。
+	// UpdateSnapshotSerialized は既存 policy の snapshot を更新する。AMAPI 反映（reflect）と
+	// DB 書込を **per-policy advisory lock を保持した単一 tx 内で直列化**し、同一 policy への並行
+	// 更新で「AMAPI 反映順」と「DB 書込順」が逆転しないことを保証する（Req 1.5）。
 	//
-	// `WHERE id=$ AND tenant_id=$ ... RETURNING created_at, updated_at` の条件付き UPDATE で、
-	// affected=0（RETURNING 0 行）は呼び出し側（Service）が「不在 / 他テナント＝NotFound」と
-	// 判定する材料（Req 4.4 / 4.5）。error には倒さない。affected=1 のとき返り値の PolicyRow に
-	// 更新後 timestamps を充填し、Service が PolicyView を zero time にせず返せるようにする。
-	Update(ctx context.Context, row PolicyRow) (PolicyRow, int64, error)
+	// 手順:
+	//   1. policy id を鍵とする per-policy advisory lock を取得する（同一 policy の upsert を直列化）。
+	//   2. lock 保持中に reflect（呼び出し側が注入する AMAPI upsert + 反映済み version 取得）を実行する。
+	//      AMAPI 反映と直後の snapshot 書込が同一 critical section に閉じるため、反映順と書込順が一致する。
+	//   3. reflect が返した version で `WHERE id=$ AND tenant_id=$ ... RETURNING created_at, updated_at`
+	//      の条件付き UPDATE を行う。
+	//
+	// reflect が error を返した場合は snapshot を書かずに rollback し、その error を伝達する
+	// （AMAPI 反映失敗時に中間状態を確定 snapshot として残さない / Req 1.4 / 1.5）。
+	//
+	// affected=0（RETURNING 0 行）は対象行が不在 / 他テナント越境であることを示し、呼び出し側
+	// （Service）が NotFound と写像する材料にする（Req 4.4 / 4.5）。error には倒さない。affected=1
+	// のとき返り値の PolicyRow に更新後 timestamps と反映済み version を充填し、Service が PolicyView を
+	// zero time / 古い version にせず返せるようにする。
+	UpdateSnapshotSerialized(ctx context.Context, row PolicyRow, reflect ReflectFunc) (PolicyRow, int64, error)
 
 	// Get は id で自テナントの policy 1 行を取得する（Req 4.4）。
 	//
@@ -201,16 +219,40 @@ func (r *repository) Insert(ctx context.Context, row PolicyRow) (PolicyRow, erro
 	return row, nil
 }
 
-// Update は Repository.Update の実装。
+// UpdateSnapshotSerialized は Repository.UpdateSnapshotSerialized の実装。
 //
-// `WHERE id=$ AND tenant_id=$ ... RETURNING created_at, updated_at` で自テナント行のみ
-// UPDATE する。RETURNING が 0 行（pgx.ErrNoRows）のとき affected=0 を返し、Service が
-// 不在 / 他テナント（NotFound）として写像する材料にする（Req 4.4 / 4.5）。affected=1 のとき
-// 更新後 timestamps を充填した PolicyRow を返す（Service が PolicyView を zero time にしない
-// ため / Req 1.5）。
-func (r *repository) Update(ctx context.Context, row PolicyRow) (PolicyRow, int64, error) {
+// 単一 tx 内で (1) per-policy advisory lock 取得 → (2) reflect（AMAPI 反映 + version 取得）→
+// (3) 反映済み version で条件付き UPDATE、を順に実行する。advisory lock は同一 policy への並行
+// upsert を直列化し、AMAPI 反映順と DB 書込順の逆転を防ぐ（Req 1.5）。lock は tx 終端で自動解放
+// される。policy id は UUID で大域一意のため、id のみを lock 鍵にする（テナント越境の鍵衝突なし）。
+//
+// reflect が error を返した場合は UPDATE を行わずに rollback し、その error を伝達する
+// （AMAPI 反映失敗時に snapshot を確定保存しない / Req 1.4 / 1.5）。RETURNING が 0 行
+// （pgx.ErrNoRows）のとき affected=0 を返し、Service が不在 / 他テナント（NotFound）として写像する
+// 材料にする（Req 4.4 / 4.5）。affected=1 のとき更新後 timestamps と反映済み version を充填した
+// PolicyRow を返す（Service が PolicyView を zero time / 古い version にしないため / Req 1.5）。
+func (r *repository) UpdateSnapshotSerialized(ctx context.Context, row PolicyRow, reflect ReflectFunc) (PolicyRow, int64, error) {
 	var affected int64
 	err := db.BeginTxFunc(ctx, r.pool, func(tx pgx.Tx) error {
+		// (1) per-policy advisory lock（tx スコープ）。hashtextextended で policy id を int8 へ
+		//     写像し pg_advisory_xact_lock の鍵にする。同一 policy の並行 upsert のみ直列化し、
+		//     別 policy 間の throughput には影響しない。
+		if _, err := tx.Exec(ctx,
+			`SELECT pg_advisory_xact_lock(hashtextextended($1, 0))`, row.ID.String(),
+		); err != nil {
+			return pkgerrors.Wrap(pkgerrors.CodeUnavailable, "policy advisory lock failed", err)
+		}
+
+		// (2) lock 保持中に AMAPI 反映を実行し、反映済み version を得る。AMAPI 反映と直後の
+		//     snapshot 書込が同一 critical section に閉じるため逆転しない（Req 1.5）。
+		version, rerr := reflect(ctx)
+		if rerr != nil {
+			// AMAPI 反映失敗 → snapshot を書かずに rollback し error を伝達（Req 1.4 / 1.5）。
+			return rerr
+		}
+		row.Version = version
+
+		// (3) 反映済み version で自テナント行のみ条件付き UPDATE する。
 		err := tx.QueryRow(ctx,
 			`UPDATE policies
 			 SET name = $1, amapi_policy_name = $2, body = $3, version = $4,

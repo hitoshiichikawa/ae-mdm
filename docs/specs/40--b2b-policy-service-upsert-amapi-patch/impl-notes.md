@@ -127,4 +127,39 @@
   - **本ブランチが dec415a 起点で develop と乖離（PR 時 rebase 必要 / 既知事項）**: 本実装ブランチは `dec415a`（spec #40）起点で、develop は後から #39（Notification Dispatcher）をマージしているため develop と乖離している。これは PR 時の rebase（別 stage の責務）で解消される **既知の乖離**であり、本 task では修正しない。
   - **doc.go の application 層追記**: Validator 純粋層と application 層が同一 package 内で別レイヤとして共存する旨を別見出しで追記した。既存の Validator 純粋性契約節（NFR 1）・Validator の依存方向ルール（amapi/上位/cmd を import しない契約）・「# 構成（task 8.1 時点）」の Validator 限定記述は変更していない。
 
+### PR #60 iteration round 2（reviewer 指摘対応 / spec は書き換えていない）
+
+- **Req 1.5 並行更新の逆転防止（high）**: `Repository.Update`（id/tenant_id だけの無条件 UPDATE）を
+  `UpdateSnapshotSerialized(ctx, row, reflect ReflectFunc)` へ置換した。単一 tx 内で
+  (1) `pg_advisory_xact_lock(hashtextextended(policyID, 0))` で **per-policy advisory lock** を取得 →
+  (2) lock 保持中に `reflect`（AMAPI upsert + 反映済み version 取得）を実行 → (3) その version で snapshot を
+  UPDATE、の順で動く。AMAPI 反映と DB 書込が同一 critical section に閉じるため、同一 policy への
+  並行更新で「AMAPI 反映順」と「DB 書込順」が逆転しない（Req 1.5 invariant の実装）。lock 鍵は policy id
+  のみ（UUID は大域一意 / 別 policy 間の throughput には影響しない）。
+  - **採否の根拠**: GetPolicy で読んだ version を guard 条件にする案は、GetPolicy が AMAPI の
+    **現在状態**（並行 writer の version を含み得る）を読むため per-write の version を保証できず逆転を
+    防げない。authoritative な per-write version は patch 応答に含まれるが、それを返すには #34
+    `amapi.UpsertPolicy` のシグネチャ変更（cross-Issue scope）が要る。policy package 内で完結し
+    かつ正しい唯一の手段が advisory lock 直列化のため、これを採った。
+  - **MVP トレードオフ**: lock 保持中に AMAPI HTTP 呼び出しを跨ぐため、同一 policy の並行更新時のみ
+    connection を AMAPI 往復の間保持する（per-policy 競合限定で別 policy には非影響）。MVP 規模では
+    許容。厳密化（patch 応答 version で lock 不要化）は #34 改修を要するため PR で別 Issue 提案に留める。
+- **AMAPI 反映済み version の永続化（medium ×2）**: `Create` が固定 0、`Update` が `existing.Version`
+  据え置きだった点を、upsert 直後に `GetPolicy` で反映済み version を読み戻して充填するよう修正
+  （`reflectedVersion` helper）。`PolicyRow.Version` の契約「AMAPI 反映後 snapshot version」に整合。
+  read-back 失敗時は AMAPI 反映自体は成功しているため処理を中断せず fallback version（Create=0 /
+  Update=existing）で永続化し、WARN ログで version metadata の劣化を可視化（body 一致を優先 / Req 1.5）。
+- **Assign 拒否ログの target resource 補完（low / NFR 3.1）**: 割当拒否ログが policy_id のみだった点を、
+  `logDenyAssign` で device_id も載せるよう修正（denied operation の target resource = policy/device 双方）。
+- **Repository SQL 分岐の integration test 追加（medium / task 2.1 完了条件）**: 既存 unit test は
+  helper（scan / error mapping）中心で SQL 分岐を直接検証していなかったため、本リポジトリの慣習
+  （`tenant_repository_test.go` 方式の実 DB integration test）に倣い `test/integration/policy_repository_test.go`
+  を追加。Insert→Get round-trip / UpdateSnapshotSerialized affected=1・0・reflect error / Get NotFound /
+  Delete FK conflict・不在 / Assign 他テナント policy(FK)・device(0 行) を実 PostgreSQL で検証
+  （DATABASE_URL 未設定時は skip）。throwaway Postgres で全 7 ケース pass を確認済み。
+- **tasks.md 記述齟齬（low ×2 / Mount・DI 配線）**: reviewer 指摘の tasks.md 5.1（`Mount(r chi.Router)`）/
+  6.1（`NewService` 引数に authorizer）と実装の差異は、実装が design.md（authz=Handler 責務）と
+  `audit.Handler` 手本（ServeHTTP + chi.Mount）に整合した結果であり、上記 Task 5/6 節で既出。impl PR では
+  spec を書き換えないため、PR 返信で「実装は design 準拠 / tasks.md 散文の reconcile は spec 側で」と回答する。
+
 STATUS: complete

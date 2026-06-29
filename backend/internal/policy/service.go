@@ -84,15 +84,20 @@ type Service interface {
 	Assign(ctx context.Context, actor, tenantID, deviceID, policyID uuid.UUID) error
 }
 
-// upsertClient は Service が AMAPI 反映に用いる最小ポート（consumer-defines-interface）。
+// upsertClient は Service が AMAPI 反映と反映済み version 取得に用いる最小ポート
+// （consumer-defines-interface）。
 //
-// amapi.Client の全 IF ではなく本 task が使う UpsertPolicy のみに限定し、テストで fake を
-// 差し込みやすくする（tenant が amapi.Client 全体を持つのとは対照的に、Policy upsert は
-// UpsertPolicy のみで完結するため最小ポートにする / design「Service deps」節）。
+// amapi.Client の全 IF ではなく本 task が使う UpsertPolicy / GetPolicy のみに限定し、テストで
+// fake を差し込みやすくする（design「Service deps」節）。GetPolicy は upsert 後に AMAPI 反映済み
+// snapshot version を読み戻すために用いる（PolicyRow.Version の契約 = AMAPI 反映済み version /
+// Req 1.3 / 1.5）。
 type upsertClient interface {
 	// UpsertPolicy は Policy を AMAPI へ upsert する。policyName には短い policyId を渡す
 	// （AMAPI Client が enterpriseName + "/policies/" + policyName で resourceName を組み立てる）。
 	UpsertPolicy(ctx context.Context, enterpriseName, policyName string, body amapi.PolicyBody) error
+
+	// GetPolicy は AMAPI 反映済み Policy を取得する。upsert 直後の反映済み version 読み戻しに用いる。
+	GetPolicy(ctx context.Context, enterpriseName, policyName string) (amapi.PolicyBody, error)
 }
 
 // eventRecorder はポリシー操作の監査イベントを Audit Service へ渡す最小ポート（Req 5.x）。
@@ -261,15 +266,20 @@ func (s *service) Create(ctx context.Context, actor, tenantID uuid.UUID, in Poli
 		return PolicyView{}, err
 	}
 
+	// 4b. AMAPI 反映済み snapshot version を読み戻す（PolicyRow.Version の契約 = AMAPI 反映済み
+	//     version / Req 1.3 / 1.5）。新規 policyId のため並行 writer は存在せず、自身の upsert の
+	//     version が確実に読める。read-back 失敗時は AMAPI 反映自体は成功しているため処理を継続し、
+	//     fallback version 0 で永続化する（reflectedVersion 内で WARN ログ）。
+	version := s.reflectedVersion(ctx, enterpriseName, policyID, 0)
+
 	// 5. AMAPI 反映成功後に snapshot を永続化する（Req 1.3 / 1.5）。送信した raw body を pass-through。
-	//    Create の version は初期値 0（AMAPI が version を返さない MVP 制約 / impl-notes 確認事項参照）。
 	row := PolicyRow{
 		ID:              id,
 		TenantID:        tenantID,
 		Name:            in.Name,
 		AMAPIPolicyName: amapiPolicyName,
 		Body:            in.Body,
-		Version:         0,
+		Version:         version,
 		UpdatedBy:       &actor,
 	}
 	persisted, err := s.repo.Insert(ctx, row)
@@ -315,32 +325,42 @@ func (s *service) Update(ctx context.Context, actor, tenantID, policyID uuid.UUI
 		return PolicyView{}, err
 	}
 
-	// 4. AMAPI 反映（既存 amapi_policy_name の末尾 policyId を再利用 / Req 1.2）。
-	//    再試行不可エラーは snapshot を確定保存せずそのまま伝達（Req 1.4 / 1.5）。
+	// 4+5. AMAPI 反映と snapshot 更新を per-policy advisory lock 保持下の単一 critical section で
+	//      直列化する（同一 policy への並行更新で AMAPI 反映順と DB 書込順が逆転しない / Req 1.5）。
+	//      reflect は lock 保持中に AMAPI へ upsert し、反映済み version を解決して返す。
+	//      version は AMAPI 反映済み snapshot version を読み戻して充填する（既存 version を据え置か
+	//      ない / Req 1.2 / 1.5 / 出力契約）。read-back 失敗時は AMAPI 反映自体は成功しているため
+	//      既存 version を fallback にして処理を継続する（reflectedVersion 内で WARN ログ）。
 	amapiPolicyID := policyIDFromAMAPIName(existing.AMAPIPolicyName, policyID)
 	body := BuildPolicyBody(existing.AMAPIPolicyName, in.Body)
-	if err := s.amapi.UpsertPolicy(ctx, enterpriseName, amapiPolicyID, body); err != nil {
-		s.logDeny(actor, tenantID, policyID, "amapi upsert failed")
-		s.record(ctx, actor, tenantID, policyID, eventTypePolicyUpdate, audit.ResultFailure, in.Name)
-		return PolicyView{}, err
-	}
-
-	// 5. AMAPI 反映成功後に snapshot を更新する（Req 1.2 / 1.5）。
-	//    version は既存行の version を据え置く（AMAPI が version を返さない MVP 制約 / 確認事項参照）。
 	row := PolicyRow{
 		ID:              policyID,
 		TenantID:        tenantID,
 		Name:            in.Name,
 		AMAPIPolicyName: existing.AMAPIPolicyName,
 		Body:            in.Body,
-		Version:         existing.Version,
 		UpdatedBy:       &actor,
+		// Version は reflect が反映済み version を解決して充填する。
 	}
-	persisted, affected, err := s.repo.Update(ctx, row)
+	amapiReflected := false
+	reflect := func(rctx context.Context) (int64, error) {
+		if uerr := s.amapi.UpsertPolicy(rctx, enterpriseName, amapiPolicyID, body); uerr != nil {
+			// 再試行不可エラーは snapshot を確定保存せずそのまま伝達する（Req 1.4 / 1.5）。
+			return 0, uerr
+		}
+		amapiReflected = true
+		return s.reflectedVersion(rctx, enterpriseName, amapiPolicyID, existing.Version), nil
+	}
+	persisted, affected, err := s.repo.UpdateSnapshotSerialized(ctx, row, reflect)
 	if err != nil {
-		// AMAPI には反映済みだが DB snapshot 更新に失敗 = AMAPI と DB の乖離。運用者が reconcile
-		// できるよう構造化 ERROR ログを出す（NFR 3.1 / design 確認事項: MVP は補償なし / Req 1.5）。
-		s.logInconsistency(actor, tenantID, policyID, existing.AMAPIPolicyName, "amapi upsert succeeded but snapshot update failed")
+		if amapiReflected {
+			// AMAPI には反映済みだが DB snapshot 更新に失敗 = AMAPI と DB の乖離。運用者が reconcile
+			// できるよう構造化 ERROR ログを出す（NFR 3.1 / design 確認事項: MVP は補償なし / Req 1.5）。
+			s.logInconsistency(actor, tenantID, policyID, existing.AMAPIPolicyName, "amapi upsert succeeded but snapshot update failed")
+		} else {
+			// AMAPI 反映自体が失敗（snapshot 未確定 / Req 1.4）。拒否理由を構造化ログに残す（NFR 3.1）。
+			s.logDeny(actor, tenantID, policyID, "amapi upsert failed")
+		}
 		s.record(ctx, actor, tenantID, policyID, eventTypePolicyUpdate, audit.ResultFailure, in.Name)
 		return PolicyView{}, err
 	}
@@ -415,14 +435,15 @@ func (s *service) Assign(ctx context.Context, actor, tenantID, deviceID, policyI
 	affected, err := s.repo.AssignPolicyToDevice(ctx, tenantID, deviceID, policyID)
 	if err != nil {
 		// 他テナント policy 指定（複合 FK 違反）は Repository が ErrPolicyNotFound（404）へ写像済み
-		// のため、そのまま伝達する（Req 3.2 / 4.2 / 4.5）。
-		s.logDeny(actor, tenantID, policyID, "policy assign failed")
+		// のため、そのまま伝達する（Req 3.2 / 4.2 / 4.5）。拒否対象 device_id も構造化ログに残す（NFR 3.1）。
+		s.logDenyAssign(actor, tenantID, deviceID, policyID, "policy assign failed")
 		s.recordAssign(ctx, actor, tenantID, deviceID, policyID, audit.ResultFailure)
 		return err
 	}
 	if affected == 0 {
 		// 他テナント device 指定（affected=0 / err==nil）→ 存在差非露出の NotFound（Req 3.3 / 4.3）。
-		s.logDeny(actor, tenantID, policyID, "policy assign affected no rows")
+		// 拒否対象 device_id も構造化ログに残す（NFR 3.1）。
+		s.logDenyAssign(actor, tenantID, deviceID, policyID, "policy assign affected no rows")
 		s.recordAssign(ctx, actor, tenantID, deviceID, policyID, audit.ResultFailure)
 		return ErrPolicyNotFound
 	}
@@ -566,6 +587,24 @@ func (s *service) logDeny(actor, tenantID, policyID uuid.UUID, reason string) {
 	s.log.Warn("policy operation denied", fields...)
 }
 
+// logDenyAssign は割当拒否の構造化ログを出力する（NFR 3.1）。割当操作の target resource は policy と
+// device の双方であるため、logDeny の属性に加えて device_id も載せ、拒否対象（他テナント device /
+// 他テナント policy）を事後追跡できるようにする。機密値は含めない（Req 5.4 / NFR 3.2）。
+func (s *service) logDenyAssign(actor, tenantID, deviceID, policyID uuid.UUID, reason string) {
+	fields := []any{
+		logger.ActorID(actor),
+		logger.TenantID(tenantID),
+		"deny_reason", reason,
+	}
+	if policyID != uuid.Nil {
+		fields = append(fields, "policy_id", policyID.String())
+	}
+	if deviceID != uuid.Nil {
+		fields = append(fields, "device_id", deviceID.String())
+	}
+	s.log.Warn("policy operation denied", fields...)
+}
+
 // logInconsistency は AMAPI 反映成功後に DB snapshot 永続化が失敗した（AMAPI と DB snapshot が
 // 乖離した）ことを構造化 ERROR ログに出す（NFR 3.1）。
 //
@@ -583,6 +622,25 @@ func (s *service) logInconsistency(actor, tenantID, policyID uuid.UUID, amapiPol
 		"inconsistency_reason", reason,
 		"requires_reconciliation", true,
 	)
+}
+
+// reflectedVersion は AMAPI 反映済み policy の version を GetPolicy で読み戻す（Req 1.3 / 1.5）。
+//
+// PolicyRow.Version の契約は「AMAPI 反映済み snapshot version」であり、upsert 直後に GetPolicy で
+// 反映済み version を取得して充填する。GetPolicy が失敗した場合は **AMAPI 反映自体は成功している**
+// ため処理を中断せず、fallback version を用いて snapshot 本体（body）の一致を優先する（Req 1.5 の
+// body 一致を version metadata の正確性より優先 / 構造化 WARN ログで version 劣化を可視化する）。
+// 機密値（資格情報・トークン生値）はログに含めない（Req 5.4 / NFR 3.2）。
+func (s *service) reflectedVersion(ctx context.Context, enterpriseName, amapiPolicyID string, fallback int64) int64 {
+	reflected, err := s.amapi.GetPolicy(ctx, enterpriseName, amapiPolicyID)
+	if err != nil {
+		s.log.Warn("policy reflected version read-back failed; using fallback version",
+			"amapi_policy_name", buildAMAPIPolicyName(enterpriseName, amapiPolicyID),
+			"fallback_version", fallback,
+		)
+		return fallback
+	}
+	return reflected.Version
 }
 
 // buildAMAPIPolicyName は enterpriseName と policyId から AMAPI policyName

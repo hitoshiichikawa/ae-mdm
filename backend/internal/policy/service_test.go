@@ -31,7 +31,14 @@ const (
 type fakeUpsertClient struct {
 	mu    sync.Mutex
 	calls []upsertCall
-	err   error
+
+	err error
+
+	// GetPolicy（反映済み version 読み戻し）の制御。getVersion は反映済み version、getErr は
+	// read-back 失敗を模す。getCalls は GetPolicy 呼び出し回数（UpsertPolicy とは別カウント）。
+	getVersion int64
+	getErr     error
+	getCalls   int
 }
 
 type upsertCall struct {
@@ -45,6 +52,18 @@ func (c *fakeUpsertClient) UpsertPolicy(_ context.Context, enterpriseName, polic
 	defer c.mu.Unlock()
 	c.calls = append(c.calls, upsertCall{EnterpriseName: enterpriseName, PolicyName: policyName, Body: body})
 	return c.err
+}
+
+// GetPolicy は反映済み version の読み戻しを模す。getErr が設定されていれば error を返し、
+// Service が fallback version を用いる経路を検証できる。
+func (c *fakeUpsertClient) GetPolicy(_ context.Context, _, _ string) (amapi.PolicyBody, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.getCalls++
+	if c.getErr != nil {
+		return amapi.PolicyBody{}, c.getErr
+	}
+	return amapi.PolicyBody{Version: c.getVersion}, nil
 }
 
 func (c *fakeUpsertClient) callCount() int {
@@ -115,7 +134,14 @@ func (r *fakeRepository) Insert(_ context.Context, row PolicyRow) (PolicyRow, er
 	return row, nil
 }
 
-func (r *fakeRepository) Update(_ context.Context, row PolicyRow) (PolicyRow, int64, error) {
+func (r *fakeRepository) UpdateSnapshotSerialized(ctx context.Context, row PolicyRow, reflect ReflectFunc) (PolicyRow, int64, error) {
+	// 実 Repository は advisory lock 取得 → reflect（AMAPI 反映 + version 取得）→ snapshot UPDATE の
+	// 順で動く。fake も reflect を先に実行し、AMAPI 反映失敗時は snapshot を書かない（Req 1.4）。
+	version, rerr := reflect(ctx)
+	if rerr != nil {
+		return PolicyRow{}, 0, rerr
+	}
+	row.Version = version
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.updated = append(r.updated, row)
@@ -455,6 +481,62 @@ func TestService_Create(t *testing.T) {
 		}
 		if view.Name != testPolicyName {
 			t.Errorf("expected view name %q, got %q", testPolicyName, view.Name)
+		}
+	})
+
+	t.Run("成功時に AMAPI 反映済み version を読み戻して snapshot に永続化する", func(t *testing.T) {
+		// Arrange: AMAPI 反映後の version は 5（GetPolicy 読み戻し値）。固定値 0 を保存しない。
+		h := newServiceHarness()
+		actor, tenantID := uuid.New(), uuid.New()
+		const reflectedVersion = int64(5)
+		h.amapi.getVersion = reflectedVersion
+
+		// Act
+		view, err := h.svc.Create(context.Background(), actor, tenantID, PolicyRequest{Name: testPolicyName, Body: validBody()})
+
+		// Assert（Req 1.3 / 1.5 / 出力契約）。
+		if err != nil {
+			t.Fatalf("expected success, got %v", err)
+		}
+		if view.Version != reflectedVersion {
+			t.Errorf("expected AMAPI-reflected version %d in view, got %d", reflectedVersion, view.Version)
+		}
+		if h.repo.insertCount() != 1 || h.repo.inserted[0].Version != reflectedVersion {
+			t.Errorf("expected persisted snapshot version %d, got %+v", reflectedVersion, h.repo.inserted)
+		}
+		if h.amapi.getCalls != 1 {
+			t.Errorf("expected GetPolicy called once for version read-back, got %d", h.amapi.getCalls)
+		}
+	})
+
+	t.Run("version 読み戻しが失敗しても AMAPI 反映済みの snapshot を fallback version で永続化する", func(t *testing.T) {
+		// Arrange: GetPolicy が失敗（read-back 失敗）。UpsertPolicy は成功している。
+		h := newServiceHarness()
+		actor, tenantID := uuid.New(), uuid.New()
+		h.amapi.getErr = pkgerrors.New(pkgerrors.CodeUnavailable, "amapi get failed")
+
+		// Act
+		view, err := h.svc.Create(context.Background(), actor, tenantID, PolicyRequest{Name: testPolicyName, Body: validBody()})
+
+		// Assert: AMAPI 反映成功済みのため処理は継続し、fallback version 0 で snapshot を永続化する。
+		if err != nil {
+			t.Fatalf("expected success despite version read-back failure, got %v", err)
+		}
+		if h.repo.insertCount() != 1 {
+			t.Fatalf("expected snapshot persisted with fallback version, got %d inserts", h.repo.insertCount())
+		}
+		if view.Version != 0 {
+			t.Errorf("expected fallback version 0, got %d", view.Version)
+		}
+		// version 読み戻し失敗は WARN ログとして可視化される（処理は止めない）。
+		gotWarn := false
+		for _, e := range h.log.snapshot() {
+			if e.Level == "warn" && strings.Contains(e.Msg, "version read-back failed") {
+				gotWarn = true
+			}
+		}
+		if !gotWarn {
+			t.Errorf("expected a WARN log for version read-back failure, got %+v", h.log.snapshot())
 		}
 	})
 
@@ -880,13 +962,15 @@ func TestService_Update(t *testing.T) {
 		}
 	})
 
-	t.Run("成功時に AMAPI 反映後 snapshot 更新 + 成功監査を記録し既存 version を据え置く", func(t *testing.T) {
-		// Arrange
+	t.Run("成功時に AMAPI 反映後 snapshot 更新 + 成功監査を記録し反映済み version を充填する", func(t *testing.T) {
+		// Arrange: 既存 version は 3。AMAPI 反映後の version は 8（GetPolicy 読み戻し値）。
 		h := newServiceHarness()
 		actor, tenantID, policyID := uuid.New(), uuid.New(), uuid.New()
 		existing := existingRow(tenantID, policyID)
 		h.repo.getRow = existing
 		h.repo.updateAff = 1
+		const reflectedVersion = int64(8)
+		h.amapi.getVersion = reflectedVersion
 
 		// Act
 		view, err := h.svc.Update(context.Background(), actor, tenantID, policyID, PolicyRequest{Name: testPolicyName, Body: validBody()})
@@ -898,8 +982,12 @@ func TestService_Update(t *testing.T) {
 		if h.amapi.callCount() != 1 || h.repo.updateCount() != 1 {
 			t.Fatalf("expected 1 AMAPI + 1 Update call, got amapi=%d update=%d", h.amapi.callCount(), h.repo.updateCount())
 		}
-		if view.Version != existing.Version {
-			t.Errorf("expected version preserved as %d, got %d", existing.Version, view.Version)
+		// 据え置きではなく AMAPI 反映済み version（GetPolicy 読み戻し値）を充填する（Req 1.5 / 出力契約）。
+		if view.Version != reflectedVersion {
+			t.Errorf("expected AMAPI-reflected version %d, got %d", reflectedVersion, view.Version)
+		}
+		if h.amapi.getCalls != 1 {
+			t.Errorf("expected GetPolicy called once for version read-back, got %d", h.amapi.getCalls)
 		}
 		evs := h.recorder.recorded()
 		if len(evs) != 1 || evs[0].Result != audit.ResultSuccess || evs[0].EventType != eventTypePolicyUpdate {
@@ -1220,6 +1308,36 @@ func TestService_Assign(t *testing.T) {
 		evs := h.recorder.recorded()
 		if len(evs) != 1 || evs[0].Result != audit.ResultFailure || evs[0].EventType != eventTypePolicyAssign {
 			t.Fatalf("expected 1 failure policy_assign audit event, got %+v", evs)
+		}
+	})
+
+	t.Run("割当拒否の構造化ログに拒否対象 device_id と policy_id を載せる", func(t *testing.T) {
+		// Arrange: 他テナント device 指定で affected=0（拒否）。NFR 3.1 は denied operation の
+		// target resource（policy / device 双方）を要求する。
+		h := newServiceHarness()
+		actor, tenantID, deviceID, policyID := uuid.New(), uuid.New(), uuid.New(), uuid.New()
+		h.repo.assignAff = 0
+
+		// Act
+		_ = h.svc.Assign(context.Background(), actor, tenantID, deviceID, policyID)
+
+		// Assert: deny WARN ログに device_id と policy_id の双方が含まれる（NFR 3.1）。
+		var denyEntry *fakeLogEntry
+		entries := h.log.snapshot()
+		for i := range entries {
+			if entries[i].Level == "warn" && entries[i].Msg == "policy operation denied" {
+				denyEntry = &entries[i]
+				break
+			}
+		}
+		if denyEntry == nil {
+			t.Fatalf("expected a deny WARN log, got %+v", h.log.snapshot())
+		}
+		if got, ok := denyEntry.Fields["device_id"].(string); !ok || got != deviceID.String() {
+			t.Errorf("expected device_id %q in deny log, got %v", deviceID.String(), denyEntry.Fields["device_id"])
+		}
+		if got, ok := denyEntry.Fields["policy_id"].(string); !ok || got != policyID.String() {
+			t.Errorf("expected policy_id %q in deny log, got %v", policyID.String(), denyEntry.Fields["policy_id"])
 		}
 	})
 
