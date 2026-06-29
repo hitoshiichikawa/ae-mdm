@@ -38,6 +38,7 @@ import (
 	"github.com/hitoshiichikawa/ae-mdm/internal/platform/httpserver"
 	"github.com/hitoshiichikawa/ae-mdm/internal/platform/oidc"
 	"github.com/hitoshiichikawa/ae-mdm/internal/tenant"
+	"github.com/hitoshiichikawa/ae-mdm/internal/tenantaudit"
 )
 
 const (
@@ -219,7 +220,9 @@ func runBootstrap(ctx context.Context) int {
 	//
 	// cfg / pool / log は既存 bootstrap で構築済みのものを再利用する。Repository は pgxpool 経由で
 	// SuperAdmin context 下に tenants へアクセスし、Service は AMAPI Client（#34）と監査記録ポート
-	// （Audit Service 未実装のため interim の logger 実装）をオーケストレーションする。Handler を
+	// （(7) で構築済みの audit Service へ tenantaudit アダプタ経由で配線済み / #54）を
+	// オーケストレーションする。これにより tenant の作成 / bind / 無効化イベントが audit_logs へ
+	// 永続化され、`/api/admin/audit-logs` で閲覧可能になる（#54 Req 1 / 5.3）。Handler を
 	// `routers.Admin`（/api/admin chain + RequireAdminConsoleAndSuperAdmin ガード継承）へ Mount し、
 	// `/api/admin/tenants` 配下 5 endpoint を稼働させる（Req 6.1）。
 	//
@@ -233,7 +236,7 @@ func runBootstrap(ctx context.Context) int {
 		return 1
 	}
 	tenantRepo := tenant.NewRepository(pool)
-	tenantRecorder := tenant.NewLoggerRecorder(log)
+	tenantRecorder := buildTenantRecorder(auditSvc, log)
 	tenantSvc := tenant.NewService(tenantRepo, amapiClient, tenantRecorder, cfg, log)
 	tenantHandler := tenant.NewHandler(tenantSvc, log)
 	tenantHandler.Mount(routers.Admin)
@@ -269,6 +272,21 @@ func buildOAuth2Configs(cfg config.Config, verifier oidc.Verifier) map[oidc.Cons
 			Endpoint:     verifier.AdminEndpoint(),
 		},
 	}
+}
+
+// buildTenantRecorder は tenant ドメインの監査記録ポート（tenant.EventRecorder）を本番 DI 用に
+// 構築する（#54 Req 1.4 / 5.3）。
+//
+// interim の構造化ログ記録器（`tenant.NewLoggerRecorder`）ではなく、監査ログ Service へ委譲する
+// `tenantaudit` アダプタを返すことを **単一の真実源**として固定する。これにより tenant の作成 /
+// bind / 無効化イベントが `audit_logs` へ永続化され `/api/admin/audit-logs` で閲覧可能になる。
+//
+// 本 wiring を独立関数として切り出すのは、main の本番配線が誤って interim recorder へ退行して
+// いないことを `cmd/api` の単体テスト（main_test.go）で **型レベルに回帰検知**できるようにするため
+// （`buildOAuth2Configs` と同じ testability 方針。アダプタを直接生成する unit test では main wiring の
+// 退行を捕捉できないという PR #56 round-5 review 指摘への対応）。
+func buildTenantRecorder(auditSvc audit.Service, log logger.Logger) tenant.EventRecorder {
+	return tenantaudit.NewRecorder(auditSvc, log)
 }
 
 // runHTTPServer は srv.ListenAndServe を goroutine で起動し、SIGINT/SIGTERM 受信時に
