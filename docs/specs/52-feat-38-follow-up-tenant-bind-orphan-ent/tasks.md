@@ -47,7 +47,7 @@
   - _Boundary: service.go_
   - _Depends: 3.1_
 
-- [ ] 5. service.go の create 順序変更・回収・状態整合
+- [x] 5. service.go の create 順序変更・回収・状態整合
 - [x] 5.1 Create 順序変更と signup_url_name 永続化
   - `Create` を「CreateSignupURL → Insert(pending_bind, signup_url_name)」順へ変更し signup_url_name を永続化（Req 3.1）。URL 生成失敗時は Insert しない（確認事項 4 の解釈に基づく）
   - 同タスク内に単体テスト追加: 成功時 signup_url_name が Insert 引数に渡る / CreateSignupURL 失敗時に Insert 未呼出（Req 3.1）
