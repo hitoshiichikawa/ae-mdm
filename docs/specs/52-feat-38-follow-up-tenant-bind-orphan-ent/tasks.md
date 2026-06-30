@@ -38,7 +38,7 @@
   - _Depends: 2.1_
 
 - [ ] 4. service.go の Bind 2 段確定フロー（orphan 防止の核）
-- [ ] 4.1 Bind を予約状態経由の 2 段確定へ変更
+- [x] 4.1 Bind を予約状態経由の 2 段確定へ変更
   - `Bind` を新フローへ変更: Get→（signup_url_name 永続値検証、空なら fail-closed 422 / Req 3.4）→`ReserveBinding`（affected=0 は 409 で CreateEnterprise 未呼出 / Req 1.2・1.3）→勝者のみ `CreateEnterprise`（**永続 signup_url_name** を渡す / Req 3.2）→成功 `UpdateBound`（Req 1.4）/ 失敗 `ReleaseBinding`（Req 1.5・4.3）
   - 現状態 binding/bound への新規 bind を 409、disabled を 422 で拒否（Req 1.3 / 4.2）
   - 各経路で `Record`（予約失敗 / 作成失敗 / 確定成功 / Req 1.7）と拒否ログを発火
