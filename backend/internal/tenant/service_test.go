@@ -1719,6 +1719,37 @@ func TestService_Disable(t *testing.T) {
 		}
 	})
 
+	t.Run("binding テナントの確認一致のとき disabled へ遷移できる（Binding→Disabled 遷移 / Req 1.6）", func(t *testing.T) {
+		// Arrange: クラッシュ等で binding（予約中）のまま塩漬けになった行も無効化可能とする
+		// （Req 1.6 / design.md「binding↔disable」）。確認テキスト一致 + UpdateDisabled affected=1。
+		h := newServiceHarness()
+		actor := uuid.New()
+		id := uuid.New()
+		h.repo.getRow = TenantRow{ID: id, Name: testTenantNameValue, Status: StatusBinding}
+		h.repo.updateDisabledAffected = 1
+
+		// Act
+		view, err := h.svc.Disable(context.Background(), actor, id, DisableInput{Confirmation: testTenantNameValue})
+
+		// Assert
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if view.Status != StatusDisabled {
+			t.Errorf("expected status disabled, got %s", view.Status)
+		}
+		if h.repo.calls.updateDisabled != 1 {
+			t.Fatalf("expected UpdateDisabled to be called once on a binding tenant, got %d", h.repo.calls.updateDisabled)
+		}
+		if h.repo.lastDisabledActor != actor {
+			t.Errorf("UpdateDisabled must receive the actor %s, got %s", actor, h.repo.lastDisabledActor)
+		}
+		events := h.recorder.recorded()
+		if len(events) != 1 || events[0].Operation != OperationDisable || events[0].Result != ResultSuccess {
+			t.Errorf("expected a disable/success audit event on a binding tenant, got %+v", events)
+		}
+	})
+
 	t.Run("定義外 status のとき fail-closed で 422 を返し UpdateDisabled 未呼出（NFR 1.2 / #51 round4）", func(t *testing.T) {
 		// Arrange: 確認テキストは一致させ、未定義 status のみが拒否要因であることを切り出す。
 		h := newServiceHarness()

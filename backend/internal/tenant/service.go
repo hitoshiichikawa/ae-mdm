@@ -70,10 +70,11 @@ type Service interface {
 	// actor は監査イベントの実行者識別子（admin_users.id）。
 	Bind(ctx context.Context, actor uuid.UUID, id uuid.UUID, in BindInput) (TenantView, error)
 
-	// Disable はテナントを無効化する（Req 3.x）。disabled は終端状態（再有効化遷移なし）。
+	// Disable はテナントを無効化する（Req 3.x / 1.6）。disabled は終端状態（再有効化遷移なし）。
 	//
 	//   - Repository.Get で対象を取得する。不在は CodeNotFound、既に disabled は二重無効化
-	//     として CodeConflict（Req 3.4）。
+	//     として CodeConflict（Req 3.4）。pending_bind / bound / binding は無効化可能。binding
+	//     （予約中）も無効化可能とし、塩漬けの予約行を運用者が解消できるようにする（Req 1.6）。
 	//   - 二段階確認テキスト方式（design.md API Contract）: in.Confirmation が対象 row.Name と
 	//     完全一致しなければ確認未完了として CodeBusinessRule（Req 3.2）。
 	//   - 確認 OK で Repository.UpdateDisabled する。affected=0 は二重無効化競合として CodeConflict
@@ -392,10 +393,15 @@ func (s *service) Disable(ctx context.Context, actor uuid.UUID, id uuid.UUID, in
 		return TenantView{}, err
 	}
 
-	// 2. 前提状態判定（状態機械）。pending_bind / bound のみ無効化可能。
+	// 2. 前提状態判定（状態機械）。pending_bind / bound / binding が無効化可能（disabled のみ
+	//    二重無効化拒否）。binding（予約中）も無効化可能とすることで、クラッシュ / AMAPI タイムアウトで
+	//    予約中のまま塩漬けになった行を運用者が無効化で解消できる（Req 1.6 / design.md「binding↔disable」）。
 	switch row.Status {
-	case StatusPendingBind, StatusBound:
-		// 無効化可能な状態。以降の確認テキスト検証 → UpdateDisabled へ進む。
+	case StatusPendingBind, StatusBound, StatusBinding:
+		// 無効化可能な状態。以降の確認テキスト検証 → UpdateDisabled へ進む。binding 行は
+		// UpdateDisabled の WHERE status!='disabled' が対象に取るため Repository 変更は不要。
+		// Bind の勝者が CreateEnterprise 待機中に Disable が走った場合でも、UpdateDisabled と
+		// UpdateBound（WHERE status='binding'）のいずれか一方のみが確定する（Req 1.6 / 競合制御）。
 	case StatusDisabled:
 		// 既に disabled なら二重無効化として拒否（Req 3.4）。disabled は終端で再遷移しない。
 		s.logDeny(actor, id, "tenant is already disabled")
