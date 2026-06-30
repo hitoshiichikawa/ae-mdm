@@ -26,13 +26,17 @@ import (
 // （本 package は `httpserver` を import しない依存方向ルール / doc.go のため、ctx 経由ではなく
 // 引数で受け取る）。
 type Service interface {
-	// Create は新規テナントを作成する（Req 1.1〜1.5）。
+	// Create は新規テナントを作成する（Req 1.1〜1.5 / 3.1）。
 	//
 	//   - in.Name を空白 trim 後に空なら CodeInvalidRequest を返し、永続化も AMAPI 呼び出しも
 	//     行わない（Req 1.3）。
-	//   - Repository.Insert で pending_bind 行を先に作成する（Req 1.1）。続いて
-	//     amapi.CreateSignupURL でサインアップ URL を発行する（Req 1.2）。URL 生成が失敗（または
-	//     空応答）してもテナントを pending_bind のまま保持し、当該エラーを伝達する（Req 1.4）。
+	//   - amapi.CreateSignupURL でサインアップ URL を先に発行する（Req 1.2）。続いて
+	//     Repository.Insert で signup_url_name を含めた pending_bind 行を作成する（Req 1.1 / 3.1）。
+	//     signup_url_name は ② の戻り値であり、発行元テナントへ束縛する正本として永続化するため
+	//     URL 発行成功後に Insert する（#52 で create 順序を CreateSignupURL→Insert へ変更 / Req 3.1）。
+	//   - URL 生成が失敗（または空応答）したときは Insert せず pending_bind 行を作らない。当該
+	//     エラーを伝達する（#52 確認事項 4: #38 Req 1.4「URL 生成失敗時 pending_bind 維持」を
+	//     「URL 生成失敗時は pending_bind 行を作らない」へ解釈変更）。
 	//   - 成功時は SignupURL（URL と後続 bind 用の signupURLName）を返す。
 	//   - 成否を EventRecorder.Record に渡す（Req 1.5 / NFR 2.1）。拒否経路は構造化ログを出す
 	//     （NFR 2.2）。
@@ -159,35 +163,40 @@ func (s *service) Create(ctx context.Context, actor uuid.UUID, in CreateInput) (
 		return TenantView{}, SignupURL{}, err
 	}
 
-	// 2. pending_bind 行を先に採番して永続化（Req 1.1 / NFR 1.1 / 3.1）。
-	//    サインアップ URL 生成が失敗してもテナントを pending_bind のまま保持する Req 1.4 を満たすため、
-	//    AMAPI 呼び出しの前に Insert する（永続化済みであれば URL 生成失敗後も pending_bind 行が残る）。
+	// 2. サインアップ URL を先に発行する（Req 1.2）。signup_url_name は ② の戻り値であり、
+	//    発行元テナントへ束縛する正本として Insert で永続化する必要があるため（Req 3.1）、
+	//    Insert より前に呼ぶ（#52 で create 順序を CreateSignupURL→Insert へ変更）。URL 生成が
+	//    失敗したときは Insert せず pending_bind 行を作らず当該エラーを伝達する（#52 確認事項 4）。
+	//    AMAPI 由来 error は #34 が Code 正規化済みのため再分類しない。テナント id は Insert 前
+	//    のため未採番だが、失敗監査の対象テナントは Nil で記録する。
 	id := uuid.New()
+	signupURL, signupURLName, err := s.amapi.CreateSignupURL(ctx)
+	if err != nil {
+		s.record(ctx, actor, uuid.Nil, OperationCreate, ResultFailure, false, "signup url creation failed")
+		return TenantView{}, SignupURL{}, err
+	}
+
+	// 2b. AMAPI が成功扱い（err=nil）で空の URL / signup url name を返した場合は後続 bind の前提
+	//     （Req 3.1 の signup_url_name 永続化・Req 2.1 の bind 入力）が壊れるため、上流の異常応答
+	//     として CodeUpstream（502）を返し Insert しない（bind 側の空 enterprise_name ガードと対称）。
+	if strings.TrimSpace(signupURL) == "" || strings.TrimSpace(signupURLName) == "" {
+		err := pkgerrors.New(pkgerrors.CodeUpstream, "amapi returned an empty signup url")
+		s.logDeny(actor, uuid.Nil, "amapi returned empty signup url")
+		s.record(ctx, actor, uuid.Nil, OperationCreate, ResultFailure, false, "empty signup url from amapi")
+		return TenantView{}, SignupURL{}, err
+	}
+
+	// 3. signup_url_name を含めた pending_bind 行を永続化する（Req 1.1 / NFR 1.1 / 3.1）。
+	//    signup_url_name は発行元テナントへ束縛される正本であり、bind 時の CreateEnterprise 引数
+	//    として永続値を使うため Insert で書き込む（Req 3.1）。
 	row := TenantRow{
-		ID:     id,
-		Name:   name,
-		Status: StatusPendingBind,
+		ID:            id,
+		Name:          name,
+		Status:        StatusPendingBind,
+		SignupURLName: signupURLName,
 	}
 	if err := s.repo.Insert(ctx, row); err != nil {
 		s.record(ctx, actor, id, OperationCreate, ResultFailure, false, "tenant persistence failed")
-		return TenantView{}, SignupURL{}, err
-	}
-
-	// 3. サインアップ URL を発行（Req 1.2）。失敗時はテナントを pending_bind のまま保持し、当該
-	//    エラーを伝達する（Req 1.4）。AMAPI 由来 error は #34 が Code 正規化済みのため再分類しない。
-	signupURL, signupURLName, err := s.amapi.CreateSignupURL(ctx)
-	if err != nil {
-		s.record(ctx, actor, id, OperationCreate, ResultFailure, false, "signup url creation failed")
-		return TenantView{}, SignupURL{}, err
-	}
-
-	// 3b. AMAPI が成功扱い（err=nil）で空の URL / signup url name を返した場合は後続 bind の前提
-	//     （Req 2.1 の signup_url_name 入力）が壊れるため、上流の異常応答として CodeUpstream（502）を
-	//     返しテナントを pending_bind に保つ（Req 1.2 / 1.4。bind 側の空 enterprise_name ガードと対称）。
-	if strings.TrimSpace(signupURL) == "" || strings.TrimSpace(signupURLName) == "" {
-		err := pkgerrors.New(pkgerrors.CodeUpstream, "amapi returned an empty signup url")
-		s.logDeny(actor, id, "amapi returned empty signup url")
-		s.record(ctx, actor, id, OperationCreate, ResultFailure, false, "empty signup url from amapi")
 		return TenantView{}, SignupURL{}, err
 	}
 

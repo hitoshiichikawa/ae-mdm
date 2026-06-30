@@ -423,7 +423,7 @@ func TestService_Create(t *testing.T) {
 		}
 	})
 
-	t.Run("CreateSignupURL が失敗したとき tenant を pending_bind のまま保持しエラーを伝達し Record(create,failure) を行う（Req 1.4）", func(t *testing.T) {
+	t.Run("CreateSignupURL が失敗したとき Insert せずエラーを伝達し Record(create,failure) を行う（Req 3.1 / #52 確認事項 4）", func(t *testing.T) {
 		// Arrange
 		h := newServiceHarness()
 		actor := uuid.New()
@@ -439,12 +439,10 @@ func TestService_Create(t *testing.T) {
 		if !stderrors.Is(err, amapiErr) {
 			t.Fatalf("expected the amapi error to be propagated, got %v", err)
 		}
-		// Req 1.4: URL 生成失敗時もテナントは pending_bind として既に永続化済みであること。
-		if h.repo.calls.insert != 1 {
-			t.Errorf("Insert must be called once so the tenant remains pending_bind on signup url failure (Req 1.4), got %d", h.repo.calls.insert)
-		}
-		if h.repo.lastInsertRow.Status != StatusPendingBind {
-			t.Errorf("inserted row status must be pending_bind, got %s", h.repo.lastInsertRow.Status)
+		// #52 で create 順序を CreateSignupURL→Insert へ変更（signup_url_name 永続化のため）。URL 生成
+		// 失敗時は Insert せず pending_bind 行を作らない（#38 Req 1.4 を design 確定方針へ追従 / Req 3.1）。
+		if h.repo.calls.insert != 0 {
+			t.Errorf("Insert must not be called when CreateSignupURL fails (signup_url_name unavailable / Req 3.1), got %d", h.repo.calls.insert)
 		}
 		events := h.recorder.recorded()
 		if len(events) != 1 {
@@ -455,7 +453,7 @@ func TestService_Create(t *testing.T) {
 		}
 	})
 
-	t.Run("CreateSignupURL が err=nil で空の signup_url を返すとき 502 を返し pending_bind を保つ（Req 1.2 / 1.4）", func(t *testing.T) {
+	t.Run("CreateSignupURL が err=nil で空の signup_url を返すとき 502 を返し Insert しない（Req 3.1 / #52 確認事項 4）", func(t *testing.T) {
 		// Arrange: AMAPI が成功扱い（err=nil）で空の URL を返す異常応答を模擬する。
 		h := newServiceHarness()
 		h.stub.OnCreateSignupURL = func(_ context.Context) (string, string, error) {
@@ -469,9 +467,9 @@ func TestService_Create(t *testing.T) {
 		if got := codeOf(t, err); got != pkgerrors.CodeUpstream {
 			t.Fatalf("expected CodeUpstream on empty signup url, got %s", got)
 		}
-		// テナントは pending_bind として永続化済みであること（Req 1.4）。
-		if h.repo.calls.insert != 1 {
-			t.Errorf("Insert must be called once, got %d", h.repo.calls.insert)
+		// 空応答時も Insert せず pending_bind 行を作らない（signup_url_name を永続化できないため / Req 3.1）。
+		if h.repo.calls.insert != 0 {
+			t.Errorf("Insert must not be called on empty signup url (Req 3.1), got %d", h.repo.calls.insert)
 		}
 		events := h.recorder.recorded()
 		if len(events) != 1 || events[0].Result != ResultFailure {
@@ -492,6 +490,37 @@ func TestService_Create(t *testing.T) {
 		// Assert
 		if got := codeOf(t, err); got != pkgerrors.CodeUpstream {
 			t.Fatalf("expected CodeUpstream on empty signup_url_name, got %s", got)
+		}
+	})
+
+	t.Run("成功時 CreateSignupURL 戻り値の signup_url_name が Insert 行に永続化される（Req 3.1）", func(t *testing.T) {
+		// Arrange: signup_url_name を発行元テナントへ束縛する正本として永続化する（#52 で create 順序を
+		// CreateSignupURL→Insert へ変更し signup_url_name を Insert 引数に積む / Req 3.1）。
+		h := newServiceHarness()
+		h.stub.OnCreateSignupURL = func(_ context.Context) (string, string, error) {
+			return testSignupURLSecret, testSignupURLName, nil
+		}
+
+		// Act
+		view, su, err := h.svc.Create(context.Background(), uuid.New(), CreateInput{Name: testTenantNameValue})
+
+		// Assert
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if h.repo.calls.insert != 1 {
+			t.Fatalf("expected Insert to be called once, got %d", h.repo.calls.insert)
+		}
+		// Insert された行の signup_url_name は CreateSignupURL 戻り値（永続化される正本）と一致する。
+		if h.repo.lastInsertRow.SignupURLName != testSignupURLName {
+			t.Errorf("inserted row signup_url_name must be the CreateSignupURL result %q, got %q", testSignupURLName, h.repo.lastInsertRow.SignupURLName)
+		}
+		// 返却された SignupURL.Name も同一の signup_url_name（後続 bind 用識別子）であること。
+		if su.Name != testSignupURLName {
+			t.Errorf("returned signup url name must match the persisted value %q, got %q", testSignupURLName, su.Name)
+		}
+		if h.repo.lastInsertRow.ID != view.ID {
+			t.Errorf("inserted row id %s must match returned view id %s", h.repo.lastInsertRow.ID, view.ID)
 		}
 	})
 
