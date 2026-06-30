@@ -54,7 +54,7 @@
   - _Requirements: 3.1_
   - _Boundary: service.go_
   - _Depends: 4.1_
-- [ ] 5.2 RecoverStaleBindings ユースケースと EnterpriseNameForTenant の binding 整合
+- [x] 5.2 RecoverStaleBindings ユースケースと EnterpriseNameForTenant の binding 整合
   - `RecoverStaleBindings(ctx, actor, olderThan)` を追加: Repository.RecoverStaleBindings を呼び、回収各行を `Record(recover)` + 構造化ログ（Req 2.1・2.4 / NFR 3.1）。回収後の再 bind は新 signup_url から再予約できる（二重作成しない / Req 2.2）
   - `EnterpriseNameForTenant` の status 分岐に `binding` を追加（未バインド扱いで 422 / Req 2.3・4.4）
   - 同タスク内に単体テスト追加（safety fallback のため同 task 内必須）: binding 行が回収され Record(recover) 発火（Req 2.1/2.4）/ EnterpriseNameForTenant が binding を 422 で拒否（Req 2.3/4.4）/ 回収→再 bind が新たな ReserveBinding を通る（Req 2.2）
