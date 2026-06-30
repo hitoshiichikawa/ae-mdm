@@ -61,7 +61,7 @@
   - _Requirements: 2.1, 2.2, 2.3, 2.4, 4.4_
   - _Boundary: service.go_
   - _Depends: 5.1_
-- [ ] 5.3 Disable の binding 整合（binding↔disable 競合制御）
+- [x] 5.3 Disable の binding 整合（binding↔disable 競合制御）
   - `Disable` の前提状態判定に `binding` を無効化可能として追加（pending_bind/bound/binding が無効化可、disabled のみ二重無効化拒否 / Req 1.6）。UpdateDisabled の `WHERE status!='disabled'` で binding 行も対象に入ることを利用
   - 同タスク内に単体テスト追加（failure path のため同 task 内必須）: binding 行の Disable が成功し disabled へ遷移 / その後 UpdateBound 相当が競合（affected=0）で 409（Req 1.6 のいずれか一方のみ確定）
   - _Requirements: 1.6_
