@@ -135,6 +135,8 @@ type fakeRepoCalls struct {
 	insert         int
 	get            int
 	list           int
+	reserveBinding int
+	releaseBinding int
 	updateBound    int
 	updateDisabled int
 }
@@ -149,6 +151,12 @@ type fakeRepository struct {
 	listRows  []TenantRow
 	listErr   error
 
+	// ReserveBinding / ReleaseBinding の制御（affected 行数・error / 2 段確定の予約・解放）。
+	reserveBindingAffected int64
+	reserveBindingErr      error
+	releaseBindingAffected int64
+	releaseBindingErr      error
+
 	// UpdateBound / UpdateDisabled の制御（affected 行数・error）。
 	updateBoundAffected    int64
 	updateBoundErr         error
@@ -159,6 +167,8 @@ type fakeRepository struct {
 	calls                fakeRepoCalls
 	lastInsertRow        TenantRow
 	lastGetID            uuid.UUID
+	lastReserveBindingID uuid.UUID
+	lastReleaseBindingID uuid.UUID
 	lastUpdateBoundID    uuid.UUID
 	lastUpdateBoundName  string
 	lastUpdateDisabledID uuid.UUID
@@ -194,8 +204,34 @@ func (r *fakeRepository) List(_ context.Context) ([]TenantRow, error) {
 	return r.listRows, nil
 }
 
-// UpdateBound は条件付き UPDATE（WHERE status='pending_bind'）を模擬する。affected 行数 /
-// error を設定可能にし、呼出回数・入力（id / enterprise_name）を記録する（task 5 Bind 検証用）。
+// ReserveBinding は条件付き UPDATE（WHERE status='pending_bind'）を模擬する。affected 行数 /
+// error を設定可能にし、呼出回数・入力 id を記録する（task 4.1 Bind の予約勝者/敗者検証用 / Req 1.1〜1.3）。
+func (r *fakeRepository) ReserveBinding(_ context.Context, id uuid.UUID) (int64, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.calls.reserveBinding++
+	r.lastReserveBindingID = id
+	if r.reserveBindingErr != nil {
+		return 0, r.reserveBindingErr
+	}
+	return r.reserveBindingAffected, nil
+}
+
+// ReleaseBinding は条件付き UPDATE（WHERE status='binding'）を模擬する。affected 行数 /
+// error を設定可能にし、呼出回数・入力 id を記録する（task 4.1 CreateEnterprise 失敗時の解放検証用 / Req 1.5）。
+func (r *fakeRepository) ReleaseBinding(_ context.Context, id uuid.UUID) (int64, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.calls.releaseBinding++
+	r.lastReleaseBindingID = id
+	if r.releaseBindingErr != nil {
+		return 0, r.releaseBindingErr
+	}
+	return r.releaseBindingAffected, nil
+}
+
+// UpdateBound は条件付き UPDATE（WHERE status='binding'）を模擬する。affected 行数 /
+// error を設定可能にし、呼出回数・入力（id / enterprise_name）を記録する（task 4.1 Bind 検証用）。
 func (r *fakeRepository) UpdateBound(_ context.Context, id uuid.UUID, enterpriseName string) (int64, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -842,19 +878,24 @@ func TestService_EnterpriseNameForTenant(t *testing.T) {
 	})
 }
 
-// ===== Bind =====
-
+// ===== Bind（2 段確定フロー / orphan 防止 / Req 1.x / 3.x / 4.2 / 4.3） =====
+//
+// 新 Bind は Get →（永続 signup_url_name 検証 / 空なら 422）→ ReserveBinding（affected=0 は
+// 409 で CreateEnterprise 未呼出）→ 勝者のみ CreateEnterprise（**永続値**を渡す）→ 成功
+// UpdateBound（WHERE binding）/ 失敗 ReleaseBinding の順に進む。body の signup_url_name は
+// 読まないため、各ケースは `h.repo.getRow.SignupURLName` に永続値を設定して勝者経路を組み立てる。
 func TestService_Bind(t *testing.T) {
-	t.Run("pending_bind から CreateEnterprise 成功 + UpdateBound(affected=1) のとき bound と enterprise_name を返し Record(bind,success) を行う", func(t *testing.T) {
+	t.Run("ReserveBinding 勝者 + CreateEnterprise 成功 + UpdateBound(affected=1) のとき bound と enterprise_name を返し Record(bind,success) を行う（Req 1.1/1.4）", func(t *testing.T) {
 		// Arrange
 		h := newServiceHarness()
 		actor := uuid.New()
 		id := uuid.New()
-		h.repo.getRow = TenantRow{ID: id, Name: testTenantNameValue, Status: StatusPendingBind}
+		h.repo.getRow = TenantRow{ID: id, Name: testTenantNameValue, Status: StatusPendingBind, SignupURLName: testSignupURLName}
+		h.repo.reserveBindingAffected = 1
 		h.repo.updateBoundAffected = 1
 		h.stub.OnCreateEnterprise = func(_ context.Context, signupURLName, projectID string) (string, error) {
 			if signupURLName != testSignupURLName {
-				t.Errorf("expected signup url name %q, got %q", testSignupURLName, signupURLName)
+				t.Errorf("expected the persisted signup url name %q, got %q", testSignupURLName, signupURLName)
 			}
 			if projectID != "test-project" {
 				t.Errorf("expected project id from config, got %q", projectID)
@@ -863,7 +904,7 @@ func TestService_Bind(t *testing.T) {
 		}
 
 		// Act
-		view, err := h.svc.Bind(context.Background(), actor, id, BindInput{SignupURLName: testSignupURLName})
+		view, err := h.svc.Bind(context.Background(), actor, id, BindInput{})
 
 		// Assert
 		if err != nil {
@@ -875,11 +916,20 @@ func TestService_Bind(t *testing.T) {
 		if view.EnterpriseName != testEnterpriseName {
 			t.Errorf("expected enterprise name %q, got %q", testEnterpriseName, view.EnterpriseName)
 		}
+		if h.repo.calls.reserveBinding != 1 {
+			t.Errorf("expected ReserveBinding to be called once, got %d", h.repo.calls.reserveBinding)
+		}
+		if h.stub.CallCount("CreateEnterprise") != 1 {
+			t.Errorf("expected CreateEnterprise to be called once, got %d", h.stub.CallCount("CreateEnterprise"))
+		}
 		if h.repo.calls.updateBound != 1 {
 			t.Fatalf("expected UpdateBound to be called once, got %d", h.repo.calls.updateBound)
 		}
 		if h.repo.lastUpdateBoundName != testEnterpriseName {
 			t.Errorf("UpdateBound must receive the created enterprise name, got %q", h.repo.lastUpdateBoundName)
+		}
+		if h.repo.calls.releaseBinding != 0 {
+			t.Errorf("ReleaseBinding must not be called on success, got %d", h.repo.calls.releaseBinding)
 		}
 		events := h.recorder.recorded()
 		if len(events) != 1 {
@@ -893,22 +943,90 @@ func TestService_Bind(t *testing.T) {
 		}
 	})
 
-	t.Run("CreateEnterprise が失敗したとき bound へ進まず UpdateBound 未呼出でエラー伝達し Record(bind,failure) を行う", func(t *testing.T) {
+	t.Run("ReserveBinding 敗者(affected=0) のとき 409 を返し CreateEnterprise・UpdateBound を呼ばない（Req 1.2 orphan 防止の核）", func(t *testing.T) {
+		// Arrange: 並行 bind の敗者は pending_bind→binding 予約に失敗する（affected=0）。
+		h := newServiceHarness()
+		id := uuid.New()
+		h.repo.getRow = TenantRow{ID: id, Name: testTenantNameValue, Status: StatusPendingBind, SignupURLName: testSignupURLName}
+		h.repo.reserveBindingAffected = 0
+		h.stub.OnCreateEnterprise = func(_ context.Context, _, _ string) (string, error) {
+			t.Errorf("CreateEnterprise must not be reached when reservation is lost")
+			return testEnterpriseName, nil
+		}
+
+		// Act
+		_, err := h.svc.Bind(context.Background(), uuid.New(), id, BindInput{})
+
+		// Assert
+		if got := codeOf(t, err); got != pkgerrors.CodeConflict {
+			t.Fatalf("expected CodeConflict on lost reservation, got %s", got)
+		}
+		if h.repo.calls.reserveBinding != 1 {
+			t.Errorf("expected ReserveBinding to be called once, got %d", h.repo.calls.reserveBinding)
+		}
+		if h.stub.CallCount("CreateEnterprise") != 0 {
+			t.Errorf("CreateEnterprise must not be called for the reservation loser (orphan 防止), got %d", h.stub.CallCount("CreateEnterprise"))
+		}
+		if h.repo.calls.updateBound != 0 {
+			t.Errorf("UpdateBound must not be called for the reservation loser, got %d", h.repo.calls.updateBound)
+		}
+		if _, ok := h.log.warnWithDenyReason(); !ok {
+			t.Errorf("expected a WARN log entry with deny_reason field (NFR 2.2)")
+		}
+		events := h.recorder.recorded()
+		if len(events) != 1 || events[0].Operation != OperationBind || events[0].Result != ResultFailure {
+			t.Errorf("expected a bind/failure audit event on lost reservation, got %+v", events)
+		}
+	})
+
+	t.Run("ReserveBinding がエラーを返すときその error を伝達し CreateEnterprise を呼ばない（異常系）", func(t *testing.T) {
 		// Arrange
 		h := newServiceHarness()
 		id := uuid.New()
-		h.repo.getRow = TenantRow{ID: id, Name: testTenantNameValue, Status: StatusPendingBind}
+		h.repo.getRow = TenantRow{ID: id, Name: testTenantNameValue, Status: StatusPendingBind, SignupURLName: testSignupURLName}
+		reserveErr := pkgerrors.New(pkgerrors.CodeUnavailable, "tenant binding reserve failed")
+		h.repo.reserveBindingErr = reserveErr
+
+		// Act
+		_, err := h.svc.Bind(context.Background(), uuid.New(), id, BindInput{})
+
+		// Assert
+		if !stderrors.Is(err, reserveErr) {
+			t.Fatalf("expected the reserve error to be propagated, got %v", err)
+		}
+		if h.stub.CallCount("CreateEnterprise") != 0 {
+			t.Errorf("CreateEnterprise must not be called when ReserveBinding fails, got %d", h.stub.CallCount("CreateEnterprise"))
+		}
+		events := h.recorder.recorded()
+		if len(events) != 1 || events[0].Result != ResultFailure {
+			t.Errorf("expected a bind/failure audit event on reserve failure, got %+v", events)
+		}
+	})
+
+	t.Run("CreateEnterprise が失敗したとき ReleaseBinding を呼び UpdateBound 未呼出で元 error を伝達する（Req 1.5/4.3）", func(t *testing.T) {
+		// Arrange: 予約勝者の CreateEnterprise が失敗 → binding→pending_bind へ解放して再 bind 可能化。
+		h := newServiceHarness()
+		id := uuid.New()
+		h.repo.getRow = TenantRow{ID: id, Name: testTenantNameValue, Status: StatusPendingBind, SignupURLName: testSignupURLName}
+		h.repo.reserveBindingAffected = 1
+		h.repo.releaseBindingAffected = 1
 		amapiErr := pkgerrors.New(pkgerrors.CodeUpstream, "amapi create enterprise failed")
 		h.stub.OnCreateEnterprise = func(_ context.Context, _, _ string) (string, error) {
 			return "", amapiErr
 		}
 
 		// Act
-		_, err := h.svc.Bind(context.Background(), uuid.New(), id, BindInput{SignupURLName: testSignupURLName})
+		_, err := h.svc.Bind(context.Background(), uuid.New(), id, BindInput{})
 
 		// Assert
 		if !stderrors.Is(err, amapiErr) {
 			t.Fatalf("expected the amapi error to be propagated, got %v", err)
+		}
+		if h.repo.calls.releaseBinding != 1 {
+			t.Errorf("ReleaseBinding must be called once to free the binding row (Req 1.5), got %d", h.repo.calls.releaseBinding)
+		}
+		if h.repo.lastReleaseBindingID != id {
+			t.Errorf("ReleaseBinding must target the bound tenant id %s, got %s", id, h.repo.lastReleaseBindingID)
 		}
 		if h.repo.calls.updateBound != 0 {
 			t.Errorf("UpdateBound must not be called when CreateEnterprise fails (NFR 1.3), got %d", h.repo.calls.updateBound)
@@ -919,14 +1037,65 @@ func TestService_Bind(t *testing.T) {
 		}
 	})
 
-	t.Run("bound 状態への再 bind のとき 409 を返し CreateEnterprise を呼ばない（新規 Enterprise を作らない）", func(t *testing.T) {
+	t.Run("CreateEnterprise 失敗時に ReleaseBinding も失敗したとき元 error を優先伝達し解放失敗を WARN ログに残す（design Error Strategy）", func(t *testing.T) {
+		// Arrange: CreateEnterprise 失敗 + ReleaseBinding 自体も error を返す。元の AMAPI error を優先。
+		h := newServiceHarness()
+		id := uuid.New()
+		h.repo.getRow = TenantRow{ID: id, Name: testTenantNameValue, Status: StatusPendingBind, SignupURLName: testSignupURLName}
+		h.repo.reserveBindingAffected = 1
+		h.repo.releaseBindingErr = pkgerrors.New(pkgerrors.CodeUnavailable, "tenant binding release failed")
+		amapiErr := pkgerrors.New(pkgerrors.CodeUpstream, "amapi create enterprise failed")
+		h.stub.OnCreateEnterprise = func(_ context.Context, _, _ string) (string, error) {
+			return "", amapiErr
+		}
+
+		// Act
+		_, err := h.svc.Bind(context.Background(), uuid.New(), id, BindInput{})
+
+		// Assert: 解放失敗ではなく元の AMAPI error を優先伝達する。
+		if !stderrors.Is(err, amapiErr) {
+			t.Fatalf("expected the original amapi error to take precedence, got %v", err)
+		}
+		if h.repo.calls.releaseBinding != 1 {
+			t.Errorf("ReleaseBinding must still be attempted, got %d", h.repo.calls.releaseBinding)
+		}
+		if h.repo.calls.updateBound != 0 {
+			t.Errorf("UpdateBound must not be called, got %d", h.repo.calls.updateBound)
+		}
+	})
+
+	t.Run("binding 状態への新規 bind のとき 409 を返し CreateEnterprise・ReserveBinding を呼ばない（Req 1.3）", func(t *testing.T) {
+		// Arrange: 既に予約中（binding）のテナントへの新規 bind は競合。
+		h := newServiceHarness()
+		id := uuid.New()
+		h.repo.getRow = TenantRow{ID: id, Name: testTenantNameValue, Status: StatusBinding, SignupURLName: testSignupURLName}
+
+		// Act
+		_, err := h.svc.Bind(context.Background(), uuid.New(), id, BindInput{})
+
+		// Assert
+		if got := codeOf(t, err); got != pkgerrors.CodeConflict {
+			t.Fatalf("expected CodeConflict on bind of a binding tenant, got %s", got)
+		}
+		if h.stub.CallCount("CreateEnterprise") != 0 {
+			t.Errorf("CreateEnterprise must not be called on bind of a binding tenant, got %d", h.stub.CallCount("CreateEnterprise"))
+		}
+		if h.repo.calls.reserveBinding != 0 {
+			t.Errorf("ReserveBinding must not be called on a binding tenant, got %d", h.repo.calls.reserveBinding)
+		}
+		if _, ok := h.log.warnWithDenyReason(); !ok {
+			t.Errorf("expected a WARN log entry with deny_reason field (NFR 2.2)")
+		}
+	})
+
+	t.Run("bound 状態への再 bind のとき 409 を返し CreateEnterprise・ReserveBinding を呼ばない（新規 Enterprise を作らない）", func(t *testing.T) {
 		// Arrange
 		h := newServiceHarness()
 		id := uuid.New()
-		h.repo.getRow = TenantRow{ID: id, Name: testTenantNameValue, Status: StatusBound, EnterpriseName: testEnterpriseName}
+		h.repo.getRow = TenantRow{ID: id, Name: testTenantNameValue, Status: StatusBound, EnterpriseName: testEnterpriseName, SignupURLName: testSignupURLName}
 
 		// Act
-		_, err := h.svc.Bind(context.Background(), uuid.New(), id, BindInput{SignupURLName: testSignupURLName})
+		_, err := h.svc.Bind(context.Background(), uuid.New(), id, BindInput{})
 
 		// Assert
 		if got := codeOf(t, err); got != pkgerrors.CodeConflict {
@@ -934,6 +1103,9 @@ func TestService_Bind(t *testing.T) {
 		}
 		if h.stub.CallCount("CreateEnterprise") != 0 {
 			t.Errorf("CreateEnterprise must not be called on re-bind of a bound tenant, got %d", h.stub.CallCount("CreateEnterprise"))
+		}
+		if h.repo.calls.reserveBinding != 0 {
+			t.Errorf("ReserveBinding must not be called on re-bind, got %d", h.repo.calls.reserveBinding)
 		}
 		if h.repo.calls.updateBound != 0 {
 			t.Errorf("UpdateBound must not be called on re-bind, got %d", h.repo.calls.updateBound)
@@ -943,14 +1115,14 @@ func TestService_Bind(t *testing.T) {
 		}
 	})
 
-	t.Run("disabled 状態への bind のとき 422 を返し CreateEnterprise を呼ばない", func(t *testing.T) {
+	t.Run("disabled 状態への bind のとき 422 を返し CreateEnterprise・ReserveBinding を呼ばない（Req 4.2）", func(t *testing.T) {
 		// Arrange
 		h := newServiceHarness()
 		id := uuid.New()
-		h.repo.getRow = TenantRow{ID: id, Name: testTenantNameValue, Status: StatusDisabled}
+		h.repo.getRow = TenantRow{ID: id, Name: testTenantNameValue, Status: StatusDisabled, SignupURLName: testSignupURLName}
 
 		// Act
-		_, err := h.svc.Bind(context.Background(), uuid.New(), id, BindInput{SignupURLName: testSignupURLName})
+		_, err := h.svc.Bind(context.Background(), uuid.New(), id, BindInput{})
 
 		// Assert
 		if got := codeOf(t, err); got != pkgerrors.CodeBusinessRule {
@@ -959,23 +1131,28 @@ func TestService_Bind(t *testing.T) {
 		if h.stub.CallCount("CreateEnterprise") != 0 {
 			t.Errorf("CreateEnterprise must not be called on bind of a disabled tenant, got %d", h.stub.CallCount("CreateEnterprise"))
 		}
+		if h.repo.calls.reserveBinding != 0 {
+			t.Errorf("ReserveBinding must not be called on a disabled tenant, got %d", h.repo.calls.reserveBinding)
+		}
 		if _, ok := h.log.warnWithDenyReason(); !ok {
 			t.Errorf("expected a WARN log entry with deny_reason field (NFR 2.2)")
 		}
 	})
 
-	t.Run("UpdateBound が affected=0 を返すとき競合として 409 を返す（楽観的競合制御）", func(t *testing.T) {
-		// Arrange
+	t.Run("UpdateBound が affected=0 を返すとき競合として 409 を返し ReleaseBinding を呼ばない（回収/disable 競合）", func(t *testing.T) {
+		// Arrange: 予約勝者の確定が回収/disable と競合し affected=0。sweep が後追い回収するため
+		// ここでは ReleaseBinding しない（design シーケンス / Req 2.1）。
 		h := newServiceHarness()
 		id := uuid.New()
-		h.repo.getRow = TenantRow{ID: id, Name: testTenantNameValue, Status: StatusPendingBind}
+		h.repo.getRow = TenantRow{ID: id, Name: testTenantNameValue, Status: StatusPendingBind, SignupURLName: testSignupURLName}
+		h.repo.reserveBindingAffected = 1
 		h.repo.updateBoundAffected = 0
 		h.stub.OnCreateEnterprise = func(_ context.Context, _, _ string) (string, error) {
 			return testEnterpriseName, nil
 		}
 
 		// Act
-		_, err := h.svc.Bind(context.Background(), uuid.New(), id, BindInput{SignupURLName: testSignupURLName})
+		_, err := h.svc.Bind(context.Background(), uuid.New(), id, BindInput{})
 
 		// Assert
 		if got := codeOf(t, err); got != pkgerrors.CodeConflict {
@@ -984,17 +1161,21 @@ func TestService_Bind(t *testing.T) {
 		if h.repo.calls.updateBound != 1 {
 			t.Errorf("expected UpdateBound to be called once, got %d", h.repo.calls.updateBound)
 		}
+		if h.repo.calls.releaseBinding != 0 {
+			t.Errorf("ReleaseBinding must not be called on UpdateBound conflict (sweep recovers), got %d", h.repo.calls.releaseBinding)
+		}
 		events := h.recorder.recorded()
 		if len(events) != 1 || events[0].Result != ResultFailure {
 			t.Errorf("expected a bind/failure audit event on conflict, got %+v", events)
 		}
 	})
 
-	t.Run("UpdateBound が CodeConflict（23505 写像）を返すときその error を伝達する", func(t *testing.T) {
+	t.Run("UpdateBound が CodeConflict（23505 写像）を返すときその error を伝達し ReleaseBinding を呼ばない", func(t *testing.T) {
 		// Arrange
 		h := newServiceHarness()
 		id := uuid.New()
-		h.repo.getRow = TenantRow{ID: id, Name: testTenantNameValue, Status: StatusPendingBind}
+		h.repo.getRow = TenantRow{ID: id, Name: testTenantNameValue, Status: StatusPendingBind, SignupURLName: testSignupURLName}
+		h.repo.reserveBindingAffected = 1
 		conflictErr := pkgerrors.New(pkgerrors.CodeConflict, "enterprise name already bound to another tenant")
 		h.repo.updateBoundErr = conflictErr
 		h.stub.OnCreateEnterprise = func(_ context.Context, _, _ string) (string, error) {
@@ -1002,51 +1183,118 @@ func TestService_Bind(t *testing.T) {
 		}
 
 		// Act
-		_, err := h.svc.Bind(context.Background(), uuid.New(), id, BindInput{SignupURLName: testSignupURLName})
+		_, err := h.svc.Bind(context.Background(), uuid.New(), id, BindInput{})
 
 		// Assert
 		if !stderrors.Is(err, conflictErr) {
 			t.Fatalf("expected the repository conflict error to be propagated, got %v", err)
 		}
+		if h.repo.calls.releaseBinding != 0 {
+			t.Errorf("ReleaseBinding must not be called on UpdateBound error (sweep recovers), got %d", h.repo.calls.releaseBinding)
+		}
 	})
 
-	t.Run("不在 id のとき CodeNotFound を返し CreateEnterprise を呼ばない（異常系）", func(t *testing.T) {
+	t.Run("不在 id のとき CodeNotFound を返し ReserveBinding・CreateEnterprise を呼ばない（異常系 / Req 4.3）", func(t *testing.T) {
 		// Arrange
 		h := newServiceHarness()
 		h.repo.getErr = pkgerrors.Wrap(pkgerrors.CodeNotFound, "tenant not found", nil)
 
 		// Act
-		_, err := h.svc.Bind(context.Background(), uuid.New(), uuid.New(), BindInput{SignupURLName: testSignupURLName})
+		_, err := h.svc.Bind(context.Background(), uuid.New(), uuid.New(), BindInput{})
 
 		// Assert
 		if got := codeOf(t, err); got != pkgerrors.CodeNotFound {
 			t.Fatalf("expected CodeNotFound, got %s", got)
 		}
+		if h.repo.calls.reserveBinding != 0 {
+			t.Errorf("ReserveBinding must not be called when tenant is absent, got %d", h.repo.calls.reserveBinding)
+		}
 		if h.stub.CallCount("CreateEnterprise") != 0 {
 			t.Errorf("CreateEnterprise must not be called when tenant is absent, got %d", h.stub.CallCount("CreateEnterprise"))
 		}
-		// 取得失敗（不在）も bind の失敗監査として記録する（Req 2.7 / NFR 2.1）。
+		// 取得失敗（不在）も bind の失敗監査として記録する（Req 1.7 / NFR 2.1）。
 		events := h.recorder.recorded()
 		if len(events) != 1 || events[0].Operation != OperationBind || events[0].Result != ResultFailure {
 			t.Errorf("expected a bind/failure audit event on lookup failure, got %+v", events)
 		}
 	})
 
-	t.Run("定義外 status のとき fail-closed で 422 を返す（NFR 1.2）", func(t *testing.T) {
+	t.Run("定義外 status のとき fail-closed で 422 を返し ReserveBinding を呼ばない（NFR 1.2）", func(t *testing.T) {
 		// Arrange
 		h := newServiceHarness()
 		id := uuid.New()
-		h.repo.getRow = TenantRow{ID: id, Name: testTenantNameValue, Status: Status("weird")}
+		h.repo.getRow = TenantRow{ID: id, Name: testTenantNameValue, Status: Status("weird"), SignupURLName: testSignupURLName}
 
 		// Act
-		_, err := h.svc.Bind(context.Background(), uuid.New(), id, BindInput{SignupURLName: testSignupURLName})
+		_, err := h.svc.Bind(context.Background(), uuid.New(), id, BindInput{})
 
 		// Assert
 		if got := codeOf(t, err); got != pkgerrors.CodeBusinessRule {
 			t.Fatalf("expected CodeBusinessRule on undefined state, got %s", got)
 		}
+		if h.repo.calls.reserveBinding != 0 {
+			t.Errorf("ReserveBinding must not be called on undefined state, got %d", h.repo.calls.reserveBinding)
+		}
 		if h.stub.CallCount("CreateEnterprise") != 0 {
 			t.Errorf("CreateEnterprise must not be called on undefined state, got %d", h.stub.CallCount("CreateEnterprise"))
+		}
+	})
+
+	t.Run("永続 signup_url_name が空白 trim 後に空のとき 422 を返し ReserveBinding・CreateEnterprise を呼ばない（Req 3.4 fail-closed）", func(t *testing.T) {
+		// Arrange: signup_url_name が永続化されていない（空文字）pending_bind 行。永続値の検証は
+		// Get の後に行うため Get は呼ばれる。
+		h := newServiceHarness()
+		id := uuid.New()
+		h.repo.getRow = TenantRow{ID: id, Name: testTenantNameValue, Status: StatusPendingBind, SignupURLName: "   "}
+
+		// Act
+		_, err := h.svc.Bind(context.Background(), uuid.New(), id, BindInput{})
+
+		// Assert
+		if got := codeOf(t, err); got != pkgerrors.CodeBusinessRule {
+			t.Fatalf("expected CodeBusinessRule on missing persisted signup_url_name, got %s", got)
+		}
+		if h.repo.calls.get != 1 {
+			t.Errorf("Get must be called once (persisted value is validated after Get), got %d", h.repo.calls.get)
+		}
+		if h.repo.calls.reserveBinding != 0 {
+			t.Errorf("ReserveBinding must not be called when signup_url_name is not provisioned (Req 3.4), got %d", h.repo.calls.reserveBinding)
+		}
+		if h.stub.CallCount("CreateEnterprise") != 0 {
+			t.Errorf("CreateEnterprise must not be called when signup_url_name is not provisioned, got %d", h.stub.CallCount("CreateEnterprise"))
+		}
+		if _, ok := h.log.warnWithDenyReason(); !ok {
+			t.Errorf("expected a WARN log entry with deny_reason field (NFR 2.2)")
+		}
+		events := h.recorder.recorded()
+		if len(events) != 1 || events[0].Result != ResultFailure {
+			t.Errorf("expected a bind/failure audit event, got %+v", events)
+		}
+	})
+
+	t.Run("永続 signup_url_name が CreateEnterprise の引数に渡り body の値は無視される（Req 3.2/3.3）", func(t *testing.T) {
+		// Arrange: 永続値 testSignupURLName と異なる値を body に渡しても、永続値が CreateEnterprise に
+		// 渡ることを示す（発行元テナントへの束縛 / body 値の混入経路を排除）。
+		h := newServiceHarness()
+		id := uuid.New()
+		h.repo.getRow = TenantRow{ID: id, Name: testTenantNameValue, Status: StatusPendingBind, SignupURLName: testSignupURLName}
+		h.repo.reserveBindingAffected = 1
+		h.repo.updateBoundAffected = 1
+		var receivedSignupURLName string
+		h.stub.OnCreateEnterprise = func(_ context.Context, signupURLName, _ string) (string, error) {
+			receivedSignupURLName = signupURLName
+			return testEnterpriseName, nil
+		}
+
+		// Act: body には永続値と異なる別テナントの値を渡す。
+		_, err := h.svc.Bind(context.Background(), uuid.New(), id, BindInput{SignupURLName: "signupUrls/OTHER-TENANT"})
+
+		// Assert
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if receivedSignupURLName != testSignupURLName {
+			t.Errorf("CreateEnterprise must receive the persisted signup_url_name %q (not the body value), got %q", testSignupURLName, receivedSignupURLName)
 		}
 	})
 
@@ -1054,14 +1302,15 @@ func TestService_Bind(t *testing.T) {
 		// Arrange
 		h := newServiceHarness()
 		id := uuid.New()
-		h.repo.getRow = TenantRow{ID: id, Name: testTenantNameValue, Status: StatusPendingBind}
+		h.repo.getRow = TenantRow{ID: id, Name: testTenantNameValue, Status: StatusPendingBind, SignupURLName: testSignupURLName}
+		h.repo.reserveBindingAffected = 1
 		h.repo.updateBoundAffected = 1
 		h.stub.OnCreateEnterprise = func(_ context.Context, _, _ string) (string, error) {
 			return testEnterpriseName, nil
 		}
 
 		// Act
-		_, _ = h.svc.Bind(context.Background(), uuid.New(), id, BindInput{SignupURLName: testSignupURLName})
+		_, _ = h.svc.Bind(context.Background(), uuid.New(), id, BindInput{})
 
 		// Assert: Event は機密値フィールドを持たないため enterprise_name / signup url name は記録されない。
 		for _, ev := range h.recorder.recorded() {
@@ -1074,45 +1323,27 @@ func TestService_Bind(t *testing.T) {
 		}
 	})
 
-	t.Run("signup_url_name が空白 trim 後に空のとき 400 を返し Get・CreateEnterprise を呼ばない（入力検証）", func(t *testing.T) {
-		// Arrange
+	t.Run("CreateEnterprise が空の enterprise_name を返すとき 502 を返し ReleaseBinding を呼び UpdateBound を呼ばない（Req 1.5/4.3）", func(t *testing.T) {
+		// Arrange: AMAPI が成功扱い（err=nil）で空の name を返す異常応答を模擬する。空応答も
+		// 予約勝者の作成失敗として ReleaseBinding で解放する。
 		h := newServiceHarness()
 		id := uuid.New()
-		h.repo.getRow = TenantRow{ID: id, Name: testTenantNameValue, Status: StatusPendingBind}
-
-		// Act
-		_, err := h.svc.Bind(context.Background(), uuid.New(), id, BindInput{SignupURLName: "   "})
-
-		// Assert
-		if got := codeOf(t, err); got != pkgerrors.CodeInvalidRequest {
-			t.Fatalf("expected CodeInvalidRequest on empty signup_url_name, got %s", got)
-		}
-		if h.repo.calls.get != 0 {
-			t.Errorf("Get must not be called when input is invalid, got %d", h.repo.calls.get)
-		}
-		if h.stub.CallCount("CreateEnterprise") != 0 {
-			t.Errorf("CreateEnterprise must not be called when input is invalid, got %d", h.stub.CallCount("CreateEnterprise"))
-		}
-		if _, ok := h.log.warnWithDenyReason(); !ok {
-			t.Errorf("expected a WARN log entry with deny_reason field (NFR 2.2)")
-		}
-	})
-
-	t.Run("CreateEnterprise が空の enterprise_name を返すとき 502 を返し UpdateBound を呼ばず pending_bind を保つ（NFR 1.3）", func(t *testing.T) {
-		// Arrange: AMAPI が成功扱い（err=nil）で空の name を返す異常応答を模擬する。
-		h := newServiceHarness()
-		id := uuid.New()
-		h.repo.getRow = TenantRow{ID: id, Name: testTenantNameValue, Status: StatusPendingBind}
+		h.repo.getRow = TenantRow{ID: id, Name: testTenantNameValue, Status: StatusPendingBind, SignupURLName: testSignupURLName}
+		h.repo.reserveBindingAffected = 1
+		h.repo.releaseBindingAffected = 1
 		h.stub.OnCreateEnterprise = func(_ context.Context, _, _ string) (string, error) {
 			return "  ", nil
 		}
 
 		// Act
-		_, err := h.svc.Bind(context.Background(), uuid.New(), id, BindInput{SignupURLName: testSignupURLName})
+		_, err := h.svc.Bind(context.Background(), uuid.New(), id, BindInput{})
 
 		// Assert
 		if got := codeOf(t, err); got != pkgerrors.CodeUpstream {
 			t.Fatalf("expected CodeUpstream on empty enterprise name, got %s", got)
+		}
+		if h.repo.calls.releaseBinding != 1 {
+			t.Errorf("ReleaseBinding must be called once on empty enterprise name (Req 1.5), got %d", h.repo.calls.releaseBinding)
 		}
 		if h.repo.calls.updateBound != 0 {
 			t.Errorf("UpdateBound must not be called when enterprise name is empty, got %d", h.repo.calls.updateBound)

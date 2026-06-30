@@ -53,6 +53,21 @@ type Repository interface {
 	// `*errors.Error{Code: CodeConflict}` に写像する。
 	UpdateBound(ctx context.Context, id uuid.UUID, enterpriseName string) (int64, error)
 
+	// ReserveBinding は pending_bind 状態のテナントを binding（予約中）へ原子遷移する（Req 1.1）。
+	//
+	// `WHERE id=$ AND status='pending_bind'` の条件付き UPDATE で、影響行数（affected）を返す。
+	// 並行 bind の勝者のみ affected=1 となり、敗者は affected=0 となる（Service が 409 競合・
+	// CreateEnterprise 未呼出と判定する材料 / Req 1.2 / 1.3 の orphan 防止の核）。
+	ReserveBinding(ctx context.Context, id uuid.UUID) (int64, error)
+
+	// ReleaseBinding は binding（予約中）状態のテナントを pending_bind へ戻す（Req 1.5）。
+	//
+	// `WHERE id=$ AND status='binding'` の条件付き UPDATE で、影響行数（affected）を返す。
+	// CreateEnterprise 失敗時に予約勝者の binding 行を pending_bind へ解放し、後続の再 bind を
+	// 可能化する（enterprise 識別子未保存のまま回復 / Req 4.3）。affected=0 は当該行が既に
+	// binding でない（解放済み / 無効化済み等）ことを示す。
+	ReleaseBinding(ctx context.Context, id uuid.UUID) (int64, error)
+
 	// UpdateDisabled は disabled 以外の状態のテナントを disabled へ遷移させ、無効化監査列
 	// （disabled_at=now() / disabled_by=actor）を記録する（Req 3.1）。
 	//
@@ -276,8 +291,8 @@ func (r *repository) UpdateBound(ctx context.Context, id uuid.UUID, enterpriseNa
 // Req 1.2 / 1.3 の orphan 防止の核）。affected rows 実挙動の検証は task 7.1 の integration test
 // へ deferred（実 PostgreSQL を要するため）。
 //
-// 本メソッドは `Repository` interface には未宣言（具象 `*repository` メソッドのみ）。interface
-// 宣言と service_test.go の fakeRepository 追従は消費側 task 4.1 へ deferred する（build-safe）。
+// 本メソッドは `Repository` interface 宣言を持つ（消費側 Service が task 4.1 で interface 経由で
+// 呼ぶ）。
 func (r *repository) ReserveBinding(ctx context.Context, id uuid.UUID) (int64, error) {
 	ctx = superAdminContext(ctx)
 	var affected int64
@@ -312,8 +327,8 @@ func (r *repository) ReserveBinding(ctx context.Context, id uuid.UUID) (int64, e
 // でない（解放済み / 無効化済み等）ことを示す。affected rows 実挙動の検証は task 7.1 の
 // integration test へ deferred。
 //
-// 本メソッドは `Repository` interface には未宣言（具象 `*repository` メソッドのみ）。interface
-// 宣言と fakeRepository 追従は消費側 task 4.1 へ deferred する（build-safe）。
+// 本メソッドは `Repository` interface 宣言を持つ（消費側 Service が task 4.1 で interface 経由で
+// 呼ぶ）。
 func (r *repository) ReleaseBinding(ctx context.Context, id uuid.UUID) (int64, error) {
 	ctx = superAdminContext(ctx)
 	var affected int64

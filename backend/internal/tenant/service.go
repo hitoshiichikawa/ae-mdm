@@ -40,18 +40,28 @@ type Service interface {
 	// actor は監査イベントの実行者識別子（admin_users.id）。
 	Create(ctx context.Context, actor uuid.UUID, in CreateInput) (TenantView, SignupURL, error)
 
-	// Bind は pending_bind テナントへ Enterprise をバインドする（Req 2.x / NFR 1.3）。
+	// Bind は pending_bind テナントへ Enterprise を予約状態経由の 2 段確定でバインドする
+	// （Req 1.x / 3.x / 4.2 / 4.3）。orphan Enterprise（DB に紐付かない AMAPI Enterprise）を
+	// 構造的に作らないため、CreateEnterprise の前に pending_bind→binding の原子予約を挟む。
 	//
-	//   - Repository.Get で現状態を取得する。pending_bind 以外は永続化も AMAPI 呼び出しも
-	//     せず拒否する: bound への再 bind は CodeConflict（Req 2.5、新規 Enterprise を作らない）、
-	//     disabled への bind は CodeBusinessRule（Req 2.6）、定義外 status は fail-closed で
-	//     CodeBusinessRule（NFR 1.2）、不在は CodeNotFound。
-	//   - pending_bind のときのみ amapi.CreateEnterprise を呼ぶ。失敗時は永続化せずエラーを
-	//     伝達し行を pending_bind に保つ（Req 2.4 / NFR 1.3）。AMAPI error は再分類しない。
-	//   - 成功時 Repository.UpdateBound で bound 確定する。affected=0 は競合とみなし CodeConflict
-	//     （Req 2.1 / 2.2 / 2.5）。
-	//   - 成否を EventRecorder.Record に渡す（Req 2.7）。拒否経路は構造化ログを出す（NFR 2.2）。
+	//   - Repository.Get で現状態を取得する。pending_bind 以外は予約も AMAPI 呼び出しもせず
+	//     拒否する: binding / bound への新規 bind は CodeConflict（Req 1.2 / 1.3、新規
+	//     Enterprise を作らない）、disabled への bind は CodeBusinessRule（Req 4.2）、定義外
+	//     status は fail-closed で CodeBusinessRule（NFR 1.2）、不在は CodeNotFound（Req 4.3）。
+	//   - 永続 row.SignupURLName を検証する。空（未永続化）なら fail-closed で CodeBusinessRule
+	//     （422）を返し、ReserveBinding も CreateEnterprise も呼ばない（Req 3.4）。
+	//   - Repository.ReserveBinding で pending_bind→binding を原子遷移する。affected=0（並行
+	//     敗者 / 既に遷移済み）は CodeConflict（Req 1.2）で CreateEnterprise を呼ばない。
+	//   - 予約勝者（affected=1）のみ amapi.CreateEnterprise を呼ぶ。**永続 row.SignupURLName** を
+	//     渡す（発行元テナントへの束縛 / body の値は使わない / Req 3.2 / 3.3）。失敗（または空
+	//     応答）時は Repository.ReleaseBinding で binding→pending_bind へ解放し再 bind 可能化
+	//     する（Req 1.5 / 4.3）。AMAPI error は再分類しない。
+	//   - 成功時 Repository.UpdateBound（WHERE status='binding'）で bound 確定する。affected=0 は
+	//     回収 / disable との競合とみなし CodeConflict（Req 1.4）。UpdateBound 失敗 / affected=0
+	//     では ReleaseBinding しない（sweep が後追い回収する / Req 2.1）。
+	//   - 成否を EventRecorder.Record に渡す（Req 1.7）。拒否経路は構造化ログを出す（NFR 2.2）。
 	//
+	// in は後方互換のため維持するが、signup_url_name は永続値を正本に使うため読まない（Req 3.2）。
 	// actor は監査イベントの実行者識別子（admin_users.id）。
 	Bind(ctx context.Context, actor uuid.UUID, id uuid.UUID, in BindInput) (TenantView, error)
 
@@ -196,41 +206,38 @@ func (s *service) Create(ctx context.Context, actor uuid.UUID, in CreateInput) (
 	return view, su, nil
 }
 
-// Bind は Service.Bind の実装（Req 2.x / NFR 1.2 / 1.3）。
+// Bind は Service.Bind の実装（Req 1.x / 3.x / 4.2 / 4.3 / NFR 1.2 / 2.1）。
 //
-// 状態遷移は「Get で現状態確認 → pending_bind のみ CreateEnterprise → 成功時のみ条件付き
-// UpdateBound で bound 確定」の順で行い、AMAPI I/O は tx の外に置く（design.md Bind シーケンス）。
-func (s *service) Bind(ctx context.Context, actor uuid.UUID, id uuid.UUID, in BindInput) (TenantView, error) {
-	// 0. 入力検証: signup_url_name は空白 trim 後に非空であること（設計 bind API の 400 契約）。
-	//    空のまま CreateEnterprise に渡すと入力検証を AMAPI 側の失敗に依存させてしまうため、
-	//    AMAPI 呼び出し・永続化の前にローカルで CodeInvalidRequest（400）を返す（Req 2.1）。
-	signupURLName := strings.TrimSpace(in.SignupURLName)
-	if signupURLName == "" {
-		err := pkgerrors.New(pkgerrors.CodeInvalidRequest, "signup_url_name is required")
-		s.logDeny(actor, id, "signup_url_name is empty")
-		s.record(ctx, actor, id, OperationBind, ResultFailure, false, "signup url name is empty")
-		return TenantView{}, err
-	}
-
+// 予約状態経由の 2 段確定で orphan Enterprise を防止する: 「Get で現状態確認 → 永続
+// signup_url_name 検証 → ReserveBinding（pending_bind→binding 原子予約）→ 勝者のみ
+// CreateEnterprise（永続値を渡す）→ 成功 UpdateBound（WHERE binding）/ 失敗 ReleaseBinding」の
+// 順で行い、AMAPI I/O は tx の外に置く（design.md Bind シーケンス）。in.SignupURLName は読まず、
+// 永続 row.SignupURLName を正本に使う（Req 3.2 / 3.3）。
+func (s *service) Bind(ctx context.Context, actor uuid.UUID, id uuid.UUID, _ BindInput) (TenantView, error) {
 	// 1. 現状態を取得（不在は CodeNotFound をそのまま伝達 → 404 / Req 4.3）。取得失敗も bind の
-	//    失敗経路として監査記録する（Req 2.7 / NFR 2.1）。
+	//    失敗経路として監査記録する（Req 1.7 / NFR 2.1）。
 	row, err := s.repo.Get(ctx, id)
 	if err != nil {
 		s.record(ctx, actor, id, OperationBind, ResultFailure, false, "tenant lookup failed")
 		return TenantView{}, err
 	}
 
-	// 2. 前提状態判定（状態機械）。pending_bind 以外は永続化も AMAPI も呼ばず拒否する。
+	// 2. 前提状態判定（状態機械）。pending_bind 以外は予約も AMAPI も呼ばず拒否する。
 	switch row.Status {
 	case StatusPendingBind:
-		// 正常な遷移可能状態。以降の AMAPI → UpdateBound へ進む。
+		// 正常な遷移可能状態。以降の signup_url_name 検証 → ReserveBinding へ進む。
+	case StatusBinding:
+		// 既に予約中のテナントへの新規 bind は競合。新規 Enterprise を作らない（Req 1.3）。
+		s.logDeny(actor, id, "tenant binding is already in progress")
+		s.record(ctx, actor, id, OperationBind, ResultFailure, false, "tenant already binding")
+		return TenantView{}, ErrConflict
 	case StatusBound:
-		// bound 済みテナントへの再 bind は競合。新規 Enterprise を作らない（Req 2.5）。
+		// bound 済みテナントへの再 bind は競合。新規 Enterprise を作らない（Req 1.2 / 1.3）。
 		s.logDeny(actor, id, "tenant is already bound")
 		s.record(ctx, actor, id, OperationBind, ResultFailure, false, "tenant already bound")
 		return TenantView{}, ErrConflict
 	case StatusDisabled:
-		// 無効化テナントへの bind は前提状態違反（Req 2.6）。
+		// 無効化テナントへの bind は前提状態違反（Req 4.2 / #38 Req 2.6 継続）。
 		s.logDeny(actor, id, "tenant is disabled")
 		s.record(ctx, actor, id, OperationBind, ResultFailure, false, "tenant disabled")
 		return TenantView{}, ErrInvalidState
@@ -241,40 +248,70 @@ func (s *service) Bind(ctx context.Context, actor uuid.UUID, id uuid.UUID, in Bi
 		return TenantView{}, ErrInvalidState
 	}
 
-	// 3. Enterprise を作成（AMAPI）。失敗時は永続化せずエラーを伝達し pending_bind を保つ
-	//    （Req 2.4 / NFR 1.3）。AMAPI 由来 error は #34 が Code 正規化済みのため再分類しない。
+	// 3. 永続 signup_url_name を発行元束縛の正本として検証する（Req 3.2 / 3.3 / 3.4）。
+	//    永続化されていない（空 / NULL→空文字）テナントの bind は fail-closed で 422 拒否し、
+	//    ReserveBinding も CreateEnterprise も呼ばない。body の signup_url_name は読まない
+	//    （他テナント値の混入経路を構造的に排除する / Req 3.3）。
+	signupURLName := strings.TrimSpace(row.SignupURLName)
+	if signupURLName == "" {
+		err := pkgerrors.New(pkgerrors.CodeBusinessRule, "tenant signup url name is not provisioned")
+		s.logDeny(actor, id, "tenant signup url name is not provisioned")
+		s.record(ctx, actor, id, OperationBind, ResultFailure, false, "signup url name not provisioned")
+		return TenantView{}, err
+	}
+
+	// 4. pending_bind→binding を原子予約する（Req 1.1）。並行 bind の勝者のみ affected=1 となり、
+	//    敗者（affected=0）は CreateEnterprise を呼ばずに 409 競合で拒否する（Req 1.2 orphan 防止の核）。
+	affected, err := s.repo.ReserveBinding(ctx, id)
+	if err != nil {
+		s.record(ctx, actor, id, OperationBind, ResultFailure, false, "binding reservation failed")
+		return TenantView{}, err
+	}
+	if affected == 0 {
+		// 並行敗者 / 既に遷移済み。CreateEnterprise を呼ばない（Req 1.2 / 1.3）。
+		s.logDeny(actor, id, "tenant binding reservation lost to a concurrent request")
+		s.record(ctx, actor, id, OperationBind, ResultFailure, false, "binding reservation conflict")
+		return TenantView{}, ErrConflict
+	}
+
+	// 5. 予約勝者のみ Enterprise を作成（AMAPI）。**永続 signup_url_name** を渡す（Req 3.2）。
+	//    失敗 / 空応答時は ReleaseBinding で binding→pending_bind へ解放し再 bind 可能化する
+	//    （Req 1.5 / 4.3）。AMAPI 由来 error は #34 が Code 正規化済みのため再分類しない。
 	enterpriseName, err := s.amapi.CreateEnterprise(ctx, signupURLName, s.cfg.AMAPIProjectID)
 	if err != nil {
+		s.releaseBindingBestEffort(ctx, id)
 		s.record(ctx, actor, id, OperationBind, ResultFailure, false, "enterprise creation failed")
 		return TenantView{}, err
 	}
 
-	// 3b. AMAPI が成功扱いで空の enterprise 識別子を返した場合は bound へ進めない（Req 2.1 / NFR 1.3）。
+	// 5b. AMAPI が成功扱いで空の enterprise 識別子を返した場合は bound へ進めない（Req 1.5 / NFR 1.2）。
 	//     enterprise_name は bound の不変条件（bound 時のみ非空 / NFR 1.1）であり、空のまま UpdateBound
 	//     すると status=bound かつ enterprise 識別子なしの不整合行を作り、後続の業務操作前提ガード
-	//     （Req 5.1）が壊れる。上流の異常応答として CodeUpstream（502）を返し pending_bind を保つ。
+	//     （Req 5.1）が壊れる。上流の異常応答として CodeUpstream（502）を返し binding を解放する。
 	if strings.TrimSpace(enterpriseName) == "" {
 		err := pkgerrors.New(pkgerrors.CodeUpstream, "amapi returned an empty enterprise name")
+		s.releaseBindingBestEffort(ctx, id)
 		s.logDeny(actor, id, "amapi returned empty enterprise name")
 		s.record(ctx, actor, id, OperationBind, ResultFailure, false, "empty enterprise name from amapi")
 		return TenantView{}, err
 	}
 
-	// 4. 条件付き UPDATE（WHERE status='pending_bind'）で bound 確定（Req 2.1 / 2.2）。
-	affected, err := s.repo.UpdateBound(ctx, id, enterpriseName)
+	// 6. 条件付き UPDATE（WHERE status='binding'）で bound 確定（Req 1.4）。affected=0 / error 時は
+	//    ReleaseBinding しない（回収 / disable と競合した敗者であり、sweep が後追い回収する / Req 2.1）。
+	boundAffected, err := s.repo.UpdateBound(ctx, id, enterpriseName)
 	if err != nil {
 		// 部分一意 index 違反（23505）は Repository が CodeConflict へ写像済み。そのまま伝達する。
 		s.record(ctx, actor, id, OperationBind, ResultFailure, false, "bind persistence failed")
 		return TenantView{}, err
 	}
-	if affected == 0 {
-		// 他要求との競合（既に bound 等）。新規 Enterprise を作っても行は更新されない（Req 2.5）。
+	if boundAffected == 0 {
+		// 回収 / disable との競合（既に binding でない）。新規 Enterprise を作っても行は更新されない（Req 1.4）。
 		s.logDeny(actor, id, "tenant bind conflicts with current state")
 		s.record(ctx, actor, id, OperationBind, ResultFailure, false, "bind conflict")
 		return TenantView{}, ErrConflict
 	}
 
-	// 5. バインド成功を監査記録（Req 2.7 / NFR 2.1）。
+	// 7. バインド成功を監査記録（Req 1.7 / NFR 2.1）。
 	s.record(ctx, actor, id, OperationBind, ResultSuccess, false, "")
 
 	return TenantView{
@@ -283,6 +320,18 @@ func (s *service) Bind(ctx context.Context, actor uuid.UUID, id uuid.UUID, in Bi
 		Status:         StatusBound,
 		EnterpriseName: enterpriseName,
 	}, nil
+}
+
+// releaseBindingBestEffort は CreateEnterprise 失敗 / 空応答時に binding 行を pending_bind へ
+// best-effort で解放する（Req 1.5 / 4.3）。ReleaseBinding 自体が失敗した場合は元の bind error を
+// 優先伝達するため戻り値を返さず、解放失敗を構造化ログに残す（sweep が後追い回収する保険 /
+// design.md Error Strategy）。
+func (s *service) releaseBindingBestEffort(ctx context.Context, id uuid.UUID) {
+	if _, err := s.repo.ReleaseBinding(ctx, id); err != nil {
+		s.log.Warn("tenant binding release failed after enterprise creation failure",
+			logger.TenantID(id),
+		)
+	}
 }
 
 // Disable は Service.Disable の実装（Req 3.x）。
