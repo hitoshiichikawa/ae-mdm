@@ -16,7 +16,17 @@ per-task ループで実装を進める。本ファイルは各 task の learnin
 | 1.5（CreateEnterprise 失敗時の再 bind 可能化） | task 3.1（`ReleaseBinding` 追加、binding→pending_bind）。affected rows 実挙動は partial 明示で task 7.1 へ deferred。Service 配線は task 4.1 |
 | 2.1（中断予約の回収手段） | task 3.2（`RecoverStaleBindings` sweep クエリ追加）。RLS 下挙動・しきい値境界は全て partial 明示で task 7.1 へ deferred。Service ユースケース配線は task 5.2 |
 
-> 上表は task 進行に伴い追記する（本 task 3 までが担保する AC を記載）。
+| 1.2（並行敗者の orphan 防止） | task 4.1（Bind 敗者 `reserveBindingAffected=0` → 409 + `CallCount("CreateEnterprise")==0` + UpdateBound 未呼出）。DB 層 affected 1/0 は task 7.1 |
+| 1.3（binding/bound への新規 bind 拒否） | task 4.1（`TestService_Bind`「binding 状態への新規 bind…409」「bound 状態への再 bind…409」）|
+| 1.4（UpdateBound 起点を binding へ / Service 配線） | task 4.1（勝者 `updateBoundAffected=1` で bound 確定 / `affected=0` で 409）。WHERE 変更自体は task 3.1、DB 回帰は task 7.1 |
+| 1.5（CreateEnterprise 失敗時の再 bind 可能化 / Service 配線） | task 4.1（`TestService_Bind`「CreateEnterprise 失敗…ReleaseBinding 呼出」「空 enterprise_name…ReleaseBinding 呼出」「解放失敗時も元 error 優先」）。ReleaseBinding 具象は task 3.1 |
+| 1.7（bind イベント監査対象化） | task 4.1（各経路で `Record(bind, success/failure)` 発火を全ケースで検証） |
+| 3.2（永続値を CreateEnterprise へ / body 除去の Service 側） | task 4.1（`TestService_Bind`「永続値が CreateEnterprise 引数に渡り body の値は無視される」）。DTO `BindInput.SignupURLName` 除去・create 応答整理は task 6.1 |
+| 3.4（未永続化 signup_url_name の fail-closed 拒否） | task 4.1（`TestService_Bind`「永続 signup_url_name 空…422 + ReserveBinding/CreateEnterprise 未呼出」）|
+| 4.2（disabled への bind 拒否継続） | task 4.1（`TestService_Bind`「disabled 状態への bind…422」）|
+| 4.3（不在 404 / 部分遷移を残さない） | task 4.1（不在 `CodeNotFound` / CreateEnterprise 失敗時 ReleaseBinding で binding を残さない）|
+
+> 上表は task 進行に伴い追記する（本 task 4 までが担保する AC を記載）。
 
 ## Implementation Notes
 
@@ -89,6 +99,34 @@ per-task ループで実装を進める。本ファイルは各 task の learnin
   `UpdateBound` が affected=0 になる integration 回帰は task 7.1（`_Boundary: tenant_repository_test.go_` /
   tasks.md L87）で解消。 (3) `ReserveBinding`/`ReleaseBinding`/`RecoverStaleBindings` の affected
   rows・sweep 実挙動テスト（Req 1.1/1.4/1.5/2.1）は `_Requirements_partial:_` 明示済みで task 7.1 へ deferred。
+
+### Task 4（service.go の Bind 2 段確定フロー / orphan 防止の核）
+
+- **採用方針**: `Bind` を「Get → 永続 signup_url_name 検証 → ReserveBinding → 勝者のみ
+  CreateEnterprise（永続値）→ UpdateBound(WHERE binding) / 失敗時 ReleaseBinding」の 2 段確定へ
+  書き換え、CreateEnterprise を予約勝者の 1 要求に限定して orphan を構造的に排除した。
+- **重要な判断**:
+  - **task 3 の interface deferral を本 task で完了**: `ReserveBinding` / `ReleaseBinding` を
+    `Repository` interface に宣言追加（具象は task 3.1 実装済み）。消費側 Service が interface
+    経由で呼ぶため compile に必須。`RecoverStaleBindings` は本 task で消費しないため interface に
+    **追加せず** task 5.2 へ残した（具象メソッドのみ存続）。
+  - **body の signup_url_name は読まない**: 永続 `row.SignupURLName` を正本に使い、`Bind` の
+    signature 第 4 引数 `in BindInput` は `_` で受けて未使用化（Req 3.2 / 3.3）。`BindInput` 型・
+    `BindInput.SignupURLName` フィールド削除・handler / create 応答整理は **task 6.1 へ残す**
+    （types.go / handler.go boundary 外で削除すると build が壊れる / task 2 deferral と同系）。
+  - **ReleaseBinding は CreateEnterprise 失敗・空応答時のみ**: `releaseBindingBestEffort` helper で
+    binding→pending_bind を best-effort 解放し、ReleaseBinding 自体の失敗は元 bind error を優先
+    伝達して WARN ログに残す（design L453-454）。**UpdateBound 失敗 / affected=0 では
+    ReleaseBinding しない**（回収 / disable 競合の敗者であり sweep が後追い回収する / Req 2.1）。
+  - **未永続化検証は Get の後**: 旧フロー（body 値を Get 前に 400 で弾く）を新仕様（永続値を Get
+    後に検証し未永続化なら 422 `CodeBusinessRule` インライン error）へ置換。新 sentinel を types.go
+    に足すと boundary 外のためインライン error に留めた（Req 3.4）。
+- **残存課題（次 task への影響）**: (1) `BindInput.SignupURLName` フィールド削除 / handler が body を
+  読まない化 / create 応答からの `signup_url_name` 除去 / recover-bindings endpoint は task 6.1。
+  (2) `RecoverStaleBindings` の Service ユースケース配線 + interface 追加 + `EnterpriseNameForTenant`
+  の binding 整合は task 5.2、`Create` の順序変更（CreateSignupURL→Insert）は task 5.1、`Disable` の
+  binding 整合は task 5.3。(3) ReserveBinding/ReleaseBinding の affected rows 実挙動・UpdateBound の
+  WHERE binding 回帰は task 7.1 の integration test。
 
 ## 確認事項
 
