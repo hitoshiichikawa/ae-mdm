@@ -5,6 +5,7 @@ import (
 	stderrors "errors"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 	"go.uber.org/zap/zapcore"
@@ -132,13 +133,14 @@ func (l *fakeLogger) containsSecret(secret string) bool {
 // ---- Fake Repository ----
 
 type fakeRepoCalls struct {
-	insert         int
-	get            int
-	list           int
-	reserveBinding int
-	releaseBinding int
-	updateBound    int
-	updateDisabled int
+	insert               int
+	get                  int
+	list                 int
+	reserveBinding       int
+	releaseBinding       int
+	recoverStaleBindings int
+	updateBound          int
+	updateDisabled       int
 }
 
 type fakeRepository struct {
@@ -157,6 +159,10 @@ type fakeRepository struct {
 	releaseBindingAffected int64
 	releaseBindingErr      error
 
+	// RecoverStaleBindings の制御（回収された tenant id 群・error / sweep 回収）。
+	recoverStaleBindingsIDs []uuid.UUID
+	recoverStaleBindingsErr error
+
 	// UpdateBound / UpdateDisabled の制御（affected 行数・error）。
 	updateBoundAffected    int64
 	updateBoundErr         error
@@ -169,6 +175,7 @@ type fakeRepository struct {
 	lastGetID            uuid.UUID
 	lastReserveBindingID uuid.UUID
 	lastReleaseBindingID uuid.UUID
+	lastRecoverOlderThan time.Duration
 	lastUpdateBoundID    uuid.UUID
 	lastUpdateBoundName  string
 	lastUpdateDisabledID uuid.UUID
@@ -228,6 +235,20 @@ func (r *fakeRepository) ReleaseBinding(_ context.Context, id uuid.UUID) (int64,
 		return 0, r.releaseBindingErr
 	}
 	return r.releaseBindingAffected, nil
+}
+
+// RecoverStaleBindings は sweep クエリ（WHERE status='binding' AND updated_at < ...）を模擬する。
+// 回収された tenant id 群 / error を設定可能にし、呼出回数・入力しきい値を記録する（task 5.2
+// RecoverStaleBindings ユースケース検証用 / Req 2.1）。
+func (r *fakeRepository) RecoverStaleBindings(_ context.Context, olderThan time.Duration) ([]uuid.UUID, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.calls.recoverStaleBindings++
+	r.lastRecoverOlderThan = olderThan
+	if r.recoverStaleBindingsErr != nil {
+		return nil, r.recoverStaleBindingsErr
+	}
+	return r.recoverStaleBindingsIDs, nil
 }
 
 // UpdateBound は条件付き UPDATE（WHERE status='binding'）を模擬する。affected 行数 /
@@ -729,6 +750,30 @@ func TestService_EnterpriseNameForTenant(t *testing.T) {
 		}
 		if !stderrors.Is(err, ErrTenantDisabled) {
 			t.Errorf("expected ErrTenantDisabled sentinel, got %v", err)
+		}
+		if _, ok := h.log.warnWithDenyReason(); !ok {
+			t.Errorf("expected a WARN log entry with deny_reason field (NFR 2.2)")
+		}
+	})
+
+	t.Run("binding のとき CodeBusinessRule（未バインド扱い）を返し構造化ログを出す（Req 2.3 / 4.4）", func(t *testing.T) {
+		// Arrange: バインド予約中（binding）は enterprise_name 未確定の中間状態であり bound とみなさない。
+		h := newServiceHarness()
+		id := uuid.New()
+		h.repo.getRow = TenantRow{ID: id, Name: testTenantNameValue, Status: StatusBinding}
+
+		// Act
+		name, err := h.svc.EnterpriseNameForTenant(superAdminCtx(), id)
+
+		// Assert
+		if got := codeOf(t, err); got != pkgerrors.CodeBusinessRule {
+			t.Fatalf("expected CodeBusinessRule on a binding tenant, got %s", got)
+		}
+		if !stderrors.Is(err, ErrNotBound) {
+			t.Errorf("expected ErrNotBound sentinel (binding is treated as not-bound), got %v", err)
+		}
+		if name != "" {
+			t.Errorf("expected empty enterprise name on rejection, got %q", name)
 		}
 		if _, ok := h.log.warnWithDenyReason(); !ok {
 			t.Errorf("expected a WARN log entry with deny_reason field (NFR 2.2)")
@@ -1380,6 +1425,127 @@ func TestService_Bind(t *testing.T) {
 		events := h.recorder.recorded()
 		if len(events) != 1 || events[0].Result != ResultFailure {
 			t.Errorf("expected a bind/failure audit event, got %+v", events)
+		}
+	})
+}
+
+// ===== RecoverStaleBindings（中断した予約の回収 / Req 2.1 / 2.2 / 2.4） =====
+//
+// RecoverStaleBindings は現時点で Service interface に未宣言（具象 *service メソッドのみ。
+// interface 宣言 + handler 配線は task 6.1 へ deferred）のため、white-box テスト（package tenant）
+// から concrete *service へ型アサーションして呼ぶ。
+func TestService_RecoverStaleBindings(t *testing.T) {
+	t.Run("古い binding 行が回収され各回収 id について Record(recover,success) を発火し件数を返す（Req 2.1/2.4）", func(t *testing.T) {
+		// Arrange: sweep が 2 件の binding 行を pending_bind へ回収する。
+		h := newServiceHarness()
+		actor := uuid.New()
+		recovered := []uuid.UUID{uuid.New(), uuid.New()}
+		h.repo.recoverStaleBindingsIDs = recovered
+		olderThan := 15 * time.Minute
+
+		// Act
+		count, err := h.svc.(*service).RecoverStaleBindings(context.Background(), actor, olderThan)
+
+		// Assert
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if count != len(recovered) {
+			t.Errorf("expected recovered count %d, got %d", len(recovered), count)
+		}
+		if h.repo.calls.recoverStaleBindings != 1 {
+			t.Errorf("expected RecoverStaleBindings to be called once, got %d", h.repo.calls.recoverStaleBindings)
+		}
+		if h.repo.lastRecoverOlderThan != olderThan {
+			t.Errorf("expected the threshold %s to be passed to the repository, got %s", olderThan, h.repo.lastRecoverOlderThan)
+		}
+		// 各回収 id について recover/success の監査イベントが発火する（Req 2.4）。
+		events := h.recorder.recorded()
+		if len(events) != len(recovered) {
+			t.Fatalf("expected %d recover audit events, got %d", len(recovered), len(events))
+		}
+		for i, ev := range events {
+			if ev.Operation != OperationRecover || ev.Result != ResultSuccess {
+				t.Errorf("event[%d] must be recover/success, got %s/%s", i, ev.Operation, ev.Result)
+			}
+			if ev.Actor != actor || ev.TenantID != recovered[i] {
+				t.Errorf("event[%d] must carry actor %s and tenant id %s, got %s / %s", i, actor, recovered[i], ev.Actor, ev.TenantID)
+			}
+		}
+	})
+
+	t.Run("回収 0 件のとき件数 0 を返し監査イベントを発火しない（境界値）", func(t *testing.T) {
+		// Arrange
+		h := newServiceHarness()
+		h.repo.recoverStaleBindingsIDs = []uuid.UUID{}
+
+		// Act
+		count, err := h.svc.(*service).RecoverStaleBindings(context.Background(), uuid.New(), time.Minute)
+
+		// Assert
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if count != 0 {
+			t.Errorf("expected 0 recovered, got %d", count)
+		}
+		if len(h.recorder.recorded()) != 0 {
+			t.Errorf("expected no audit events when nothing is recovered, got %+v", h.recorder.recorded())
+		}
+	})
+
+	t.Run("Repository が失敗したときエラーを伝達し件数 0 を返す（異常系）", func(t *testing.T) {
+		// Arrange
+		h := newServiceHarness()
+		sweepErr := pkgerrors.New(pkgerrors.CodeUnavailable, "tenant stale binding recover failed")
+		h.repo.recoverStaleBindingsErr = sweepErr
+
+		// Act
+		count, err := h.svc.(*service).RecoverStaleBindings(context.Background(), uuid.New(), time.Minute)
+
+		// Assert
+		if !stderrors.Is(err, sweepErr) {
+			t.Fatalf("expected the sweep error to be propagated, got %v", err)
+		}
+		if count != 0 {
+			t.Errorf("expected 0 recovered on error, got %d", count)
+		}
+	})
+
+	t.Run("回収後の再 bind が新たな ReserveBinding を通り二重作成しない（Req 2.2）", func(t *testing.T) {
+		// Arrange: 回収で binding→pending_bind へ戻した行を再 bind する。回収は status のみ戻し
+		// enterprise_name を書かないため、再 bind は通常の pending_bind 経路（ReserveBinding 勝者 →
+		// CreateEnterprise）を通る。これにより 1 行 1 回しか CreateEnterprise を呼ばず二重作成しない。
+		h := newServiceHarness()
+		id := uuid.New()
+		h.repo.recoverStaleBindingsIDs = []uuid.UUID{id}
+
+		// Act 1: 回収（binding→pending_bind）。
+		if _, err := h.svc.(*service).RecoverStaleBindings(context.Background(), uuid.New(), time.Minute); err != nil {
+			t.Fatalf("unexpected recover error: %v", err)
+		}
+
+		// Act 2: 回収済みの pending_bind 行を再 bind する。
+		h.repo.getRow = TenantRow{ID: id, Name: testTenantNameValue, Status: StatusPendingBind, SignupURLName: testSignupURLName}
+		h.repo.reserveBindingAffected = 1
+		h.repo.updateBoundAffected = 1
+		h.stub.OnCreateEnterprise = func(_ context.Context, _, _ string) (string, error) {
+			return testEnterpriseName, nil
+		}
+		view, err := h.svc.Bind(context.Background(), uuid.New(), id, BindInput{})
+
+		// Assert: 再 bind は新たな ReserveBinding 予約を経て確定し、CreateEnterprise は 1 回のみ呼ばれる。
+		if err != nil {
+			t.Fatalf("unexpected bind error after recovery: %v", err)
+		}
+		if view.Status != StatusBound {
+			t.Errorf("expected status bound after re-bind, got %s", view.Status)
+		}
+		if h.repo.calls.reserveBinding != 1 {
+			t.Errorf("re-bind after recovery must go through a fresh ReserveBinding once, got %d", h.repo.calls.reserveBinding)
+		}
+		if h.stub.CallCount("CreateEnterprise") != 1 {
+			t.Errorf("CreateEnterprise must be called exactly once after recovery (no double creation / Req 2.2), got %d", h.stub.CallCount("CreateEnterprise"))
 		}
 	})
 }

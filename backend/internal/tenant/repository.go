@@ -68,6 +68,15 @@ type Repository interface {
 	// binding でない（解放済み / 無効化済み等）ことを示す。
 	ReleaseBinding(ctx context.Context, id uuid.UUID) (int64, error)
 
+	// RecoverStaleBindings は updated_at が閾値より古い binding 行を pending_bind へ一括回収する
+	// （Req 2.1）。
+	//
+	// `WHERE status='binding' AND updated_at < now() - $olderThan RETURNING id` で、クラッシュ /
+	// AMAPI タイムアウトで binding のまま中断した予約を再び bind 可能・無効化可能な状態へ戻し、
+	// 回収された tenant id 群を返す（Service が Record(recover) に使う / Req 2.4）。回収が 0 件でも
+	// 非 nil の空 slice を返す。RLS 下挙動・しきい値境界の検証は task 7.1 の integration test へ deferred。
+	RecoverStaleBindings(ctx context.Context, olderThan time.Duration) ([]uuid.UUID, error)
+
 	// UpdateDisabled は disabled 以外の状態のテナントを disabled へ遷移させ、無効化監査列
 	// （disabled_at=now() / disabled_by=actor）を記録する（Req 3.1）。
 	//
@@ -364,8 +373,8 @@ func (r *repository) ReleaseBinding(ctx context.Context, id uuid.UUID) (int64, e
 // 回収が 0 件でも非 nil の空 slice を返す（List の慣習踏襲）。RLS 下挙動・しきい値境界の検証は
 // task 7.1 の integration test へ deferred。
 //
-// 本メソッドは `Repository` interface には未宣言（具象 `*repository` メソッドのみ）。interface
-// 宣言と fakeRepository 追従は消費側 task 5.2 / 4.1 へ deferred する（build-safe）。
+// 本メソッドは `Repository` interface 宣言を持つ（消費側 Service が task 5.2 で interface 経由で
+// 呼ぶ。具象は task 3.2 で実装済み）。
 func (r *repository) RecoverStaleBindings(ctx context.Context, olderThan time.Duration) ([]uuid.UUID, error) {
 	ctx = superAdminContext(ctx)
 	// 0 件でも非 nil の空 slice を返す（Req 2.1 / List と同型）。

@@ -3,6 +3,7 @@ package tenant
 import (
 	"context"
 	"strings"
+	"time"
 
 	"github.com/google/uuid"
 
@@ -96,6 +97,8 @@ type Service interface {
 	//   - bound: enterprise_name + nil を返す。ただし bound 行の enterprise_name が空（データ
 	//     不整合）の場合は fail-closed で CodeBusinessRule（ErrInvalidState）を返す（NFR 1.1 防御）。
 	//   - pending_bind: 未バインドとして CodeBusinessRule（ErrNotBound）を返す（Req 5.2）。
+	//   - binding: バインド予約中の中間状態は bound とみなさず未バインド扱いで CodeBusinessRule
+	//     （ErrNotBound）を返す（Req 2.3 / 4.4）。
 	//   - disabled: 無効化として CodeBusinessRule（ErrTenantDisabled）を返す（Req 5.3）。
 	//   - 不在: CodeNotFound（ErrTenantNotFound）を返す（Req 5.1）。
 	//
@@ -343,6 +346,39 @@ func (s *service) releaseBindingBestEffort(ctx context.Context, id uuid.UUID) {
 	}
 }
 
+// RecoverStaleBindings は olderThan より古い binding（予約中）行を pending_bind へ回収する
+// ユースケース（Req 2.1 / 2.2 / 2.4 / NFR 3.1）。
+//
+// クラッシュ / AMAPI タイムアウトで binding のまま中断した行を再び bind 可能・無効化可能な
+// 状態へ戻す（恒久的に塩漬けになる行の防止）。Repository.RecoverStaleBindings へ委譲し、回収
+// された各 tenant id について Record(recover) と構造化ログ（NFR 3.1）を発火し、回収件数を返す。
+// 回収後の再 bind は新しい signup_url から再予約（ReserveBinding）を通るため enterprise 識別子を
+// 二重に作成・紐付けしない（Req 2.2 / design.md「回収方式の決定」）。
+//
+// 本メソッドは現時点で `Service` interface には宣言しない（具象 `*service` メソッドのみ）。
+// interface 宣言 + handler 配線 + handler_test.go の fakeTenantService 更新は消費側 task 6.1 へ
+// deferred する（interface へ今宣言すると handler_test.go の `var _ Service` assertion が壊れ
+// stage-a-verify gate が compile error になるため。task 3→4 の Repository interface deferral と
+// 対称な build-safe deferral）。
+//
+// actor は回収イベントの実行者識別子（admin_users.id）。olderThan は中断とみなす経過時間しきい値。
+func (s *service) RecoverStaleBindings(ctx context.Context, actor uuid.UUID, olderThan time.Duration) (int, error) {
+	recovered, err := s.repo.RecoverStaleBindings(ctx, olderThan)
+	if err != nil {
+		return 0, err
+	}
+	// 回収された各行を監査記録 + 構造化ログの対象とする（Req 2.4 / NFR 3.1）。signup_url_name 等の
+	// 機密値は出さない（Event は機密フィールドを持たず、ログにも tenant id のみ載せる / NFR 3.2）。
+	for _, id := range recovered {
+		s.record(ctx, actor, id, OperationRecover, ResultSuccess, false, "")
+		s.log.Info("tenant stale binding recovered",
+			logger.ActorID(actor),
+			logger.TenantID(id),
+		)
+	}
+	return len(recovered), nil
+}
+
 // Disable は Service.Disable の実装（Req 3.x）。
 //
 // 二段階確認テキスト方式で対象テナント名の再入力一致を検証し、条件付き UPDATE
@@ -474,6 +510,12 @@ func (s *service) EnterpriseNameForTenant(ctx context.Context, id uuid.UUID) (st
 	case StatusPendingBind:
 		// 未バインドテナントへの enterprise 識別子要求は拒否（Req 5.2）。
 		s.logDeny(tc.AdminUserID, id, "tenant is not bound to an enterprise")
+		return "", ErrNotBound
+	case StatusBinding:
+		// バインド予約中は未確定の中間状態であり bound とはみなさない（Req 2.3 / 4.4）。enterprise_name
+		// は未確定（NFR 1.2）のため、業務操作の前提として未バインド扱いで拒否する（pending_bind と同じ
+		// ErrNotBound / 422 / 回収・再 bind で確定するまで AMAPI 操作を許さない）。
+		s.logDeny(tc.AdminUserID, id, "tenant binding is in progress and not yet bound")
 		return "", ErrNotBound
 	case StatusDisabled:
 		// 無効化テナントへの業務操作要求は拒否（Req 5.3）。
