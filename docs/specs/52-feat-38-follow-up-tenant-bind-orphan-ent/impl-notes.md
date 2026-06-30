@@ -26,7 +26,15 @@ per-task ループで実装を進める。本ファイルは各 task の learnin
 | 4.2（disabled への bind 拒否継続） | task 4.1（`TestService_Bind`「disabled 状態への bind…422」）|
 | 4.3（不在 404 / 部分遷移を残さない） | task 4.1（不在 `CodeNotFound` / CreateEnterprise 失敗時 ReleaseBinding で binding を残さない）|
 
-> 上表は task 進行に伴い追記する（本 task 4 までが担保する AC を記載）。
+| 3.1（signup_url_name 永続化 / create 順序変更） | task 5.1（`Create` を CreateSignupURL→Insert 順へ変更し戻り値の signup_url_name を Insert 行に積む。`TestService_Create`「成功時…signup_url_name が Insert 行に永続化される」/「CreateSignupURL 失敗・空応答時に Insert しない」）。永続化往復（Insert→Get 一致）は task 7.1 |
+| 2.1（中断予約の回収 / Service 配線） | task 5.2（`RecoverStaleBindings` ユースケース：`TestService_RecoverStaleBindings`「古い binding 行が回収され Record(recover) 発火し件数を返す」/「0 件」/「Repository 失敗伝達」）。sweep の RLS 下挙動は task 7.1 |
+| 2.2（回収後の再 bind が二重作成しない） | task 5.2（`TestService_RecoverStaleBindings`「回収後の再 bind が新たな ReserveBinding を通り CreateEnterprise を 1 回のみ呼ぶ」）|
+| 2.3（binding を未バインド扱い） | task 5.2（`EnterpriseNameForTenant` の status 分岐に binding 追加。`TestService_EnterpriseNameForTenant`「binding のとき CodeBusinessRule（ErrNotBound）を返す」）|
+| 2.4（recover イベントの監査対象化 / Service 配線） | task 5.2（`RecoverStaleBindings` が各回収 id に `Record(recover, success)` 発火。`TestService_RecoverStaleBindings` で actor/tenant_id/operation/result を検証）。`OperationRecover` 型は task 2.1 |
+| 4.4（binding を 4 値 View / ガードで返す） | task 5.2（`EnterpriseNameForTenant` が binding を未バインド扱いで拒否。View 返却自体は task 2.1） |
+| 1.6（binding↔disable 競合制御） | task 5.3（`Disable` の前提状態判定に binding 追加。`TestService_Disable`「binding テナントの確認一致のとき disabled へ遷移できる」）。binding↔disable の DB 層 affected 競合回帰（UpdateBound affected=0）は task 7.1 |
+
+> 上表は task 進行に伴い追記する（本 task 5 までが担保する AC を記載）。
 
 ## Implementation Notes
 
@@ -128,7 +136,58 @@ per-task ループで実装を進める。本ファイルは各 task の learnin
   binding 整合は task 5.3。(3) ReserveBinding/ReleaseBinding の affected rows 実挙動・UpdateBound の
   WHERE binding 回帰は task 7.1 の integration test。
 
+### Task 5（service.go の create 順序変更・回収・状態整合）
+
+- **採用方針**: 既存 service.go の record/logDeny helper・doc コメント様式・状態 switch パターンを
+  踏襲し、Create 順序変更（5.1）・RecoverStaleBindings ユースケース + EnterpriseNameForTenant の
+  binding 整合（5.2）・Disable の binding 整合（5.3）を追加した。
+- **重要な判断**:
+  - **Create 順序変更で旧 Req 1.4 解釈を design 確定方針へ追従（5.1）**: `Create` を
+    「name 検証 → CreateSignupURL → 空応答チェック → Insert(pending_bind, signup_url_name) → record」
+    順へ変更し、signup_url_name（CreateSignupURL 戻り値）を発行元束縛の正本として Insert で永続化
+    （Req 3.1）。URL 生成失敗 / 空応答時は Insert せず pending_bind 行を作らない（design L443 /
+    確認事項 4 の新解釈。#38 Req 1.4「URL 生成失敗時 pending_bind 維持」を design が更新）。これに
+    伴い既存 Create テストの「URL 失敗時 Insert 呼出（pending_bind 維持）」assertion を新挙動
+    （Insert 未呼出）へ更新した（テストを弱めるのではなく design 確定済み挙動への追従）。
+  - **Service interface への RecoverStaleBindings 宣言を task 6.1 へ build-safe deferral（5.2）**:
+    具象 `*service.RecoverStaleBindings` のみ追加し、`Service` interface 宣言は task 6.1 へ残した。
+    今 interface に宣言すると handler_test.go の `fakeTenantService`（`var _ Service` assertion 付き /
+    task 5 boundary 外）が interface を満たさず stage-a-verify gate（`go test ./internal/tenant/...`）が
+    compile error で壊れるため。task 3→4 の Repository interface deferral と完全に対称。単体テストは
+    white-box（`package tenant`）から `h.svc.(*service).RecoverStaleBindings(...)` で具象を呼ぶ。
+    Repository interface への RecoverStaleBindings 宣言追加 + fakeRepository 追従は本 task で完了した
+    （task 4 が ReserveBinding/ReleaseBinding を追加したのと同じ consumer-task 追加）。
+  - **回収は status のみ戻し再 bind は通常経路（5.2）**: `RecoverStaleBindings` は
+    Repository へ委譲し回収各 id に Record(recover)+構造化ログ（tenant id のみ / NFR 3.2）を発火。
+    回収は enterprise_name を書かないため再 bind は通常の ReserveBinding 経路を通り二重作成しない
+    （Req 2.2）。EnterpriseNameForTenant は binding を pending_bind と同じ ErrNotBound（422）で拒否
+    （Req 2.3 / 4.4）。
+  - **Disable の binding 整合は Repository 変更不要（5.3）**: 前提状態 switch に binding を追加する
+    のみ。既存 UpdateDisabled の `WHERE status!='disabled'` が binding 行も対象に取るため SQL 変更不要。
+- **残存課題（次 task への影響）**: (1) Service interface への RecoverStaleBindings 宣言 + handler の
+  recover-bindings endpoint 配線 + handler_test.go の fakeTenantService 更新 + bind body 除去 +
+  create 応答整理 = task 6.1。 (2) ReserveBinding/ReleaseBinding/RecoverStaleBindings の affected rows・
+  sweep 実挙動、UpdateBound WHERE binding 回帰、binding↔disable の DB 層 affected 競合
+  （binding 行 UpdateDisabled affected=1 後 UpdateBound affected=0）、signup_url_name 永続化往復
+  （Insert→Get 一致）の integration 回帰 = task 7.1。
+
 ## 確認事項
+
+- **Service interface への `RecoverStaleBindings` 宣言を task 6.1 へ deferred（本 task 5.2 では実施せず）**:
+  具象 `*service.RecoverStaleBindings(ctx, actor, olderThan) (int, error)` のみ追加し、`Service`
+  interface への宣言追加は task 6.1 へ残した。理由: `handler_test.go` の `fakeTenantService`
+  （`var _ Service` 型 assertion 付き / task 5 の `_Boundary: service.go_` 外）が interface を満たさ
+  なくなり stage-a-verify gate（`go test ./internal/tenant/...`）が compile error で壊れるため。これは
+  task 3→4 の Repository interface deferral と完全に対称な build-safe deferral であり、Service interface
+  宣言 + handler 配線 + fakeTenantService 更新は consumer task 6.1 の責務。tasks.md は書き換えていない
+  （実装上の deferral 記録）。
+- **Create 順序変更（5.1）に伴う既存テスト更新（design 確定済み挙動への追従）**: `Create` を
+  CreateSignupURL→Insert 順へ変更し URL 生成失敗 / 空応答時は Insert しない仕様（design L440-444 /
+  確認事項 4）へ追従するため、既存 Create テスト 2 件の assertion を「Insert 呼出（pending_bind 維持 /
+  旧 Req 1.4）」から「Insert 未呼出（新 Req 3.1 解釈）」へ更新した。これは assert を緩めるのではなく
+  design が確定した挙動変更への追従であり、URL 生成失敗時に pending_bind 行を作らない新仕様を検証する。
+  なお requirements.md（Req 3.1）と design.md（L440-444 / 確認事項 4）は本挙動を確定済みであり spec 本文
+  との矛盾は検出していない（spec 本文は変更していない）。
 
 - **`BindInput.SignupURLName` 削除を task 4.1 / 6.1 へ deferred（本 task 2.1 では実施せず）**:
   tasks.md L16 は task 2.1 の作業項目に「`BindInput` の `SignupURLName` フィールド削除（Req 3.2/3.3）」を
