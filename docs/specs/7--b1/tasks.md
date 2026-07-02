@@ -41,7 +41,7 @@
   - _Requirements: 3.1, 3.2, 3.3, 3.5, 3.6, NFR 1.1, NFR 2.1, NFR 2.2, NFR 4.1_
   - _Boundary: EnrollmentNotificationHandler_
 
-- [ ] 6. エンロールフロー結合テスト（実 PostgreSQL / Req 6）
+- [x] 6. エンロールフロー結合テスト（実 PostgreSQL / Req 6）
   - `backend/test/integration/enrollment_flow_test.go`: `notification_dispatch_test.go` の setup 作法（migrate→truncate→app pool→bound tenant seed→`newMessage`）を踏襲し、`notification.NewDispatcher` に本 Issue の ENROLLMENT handler（`enrollment.NewRegistrar(pool)` を registrar に注入）を登録した in-test Dispatcher を組む（cmd/worker は無変更 / design リスク 7）
   - シナリオ: (1) `enrollment.Service.IssueToken` で発行（snapshot 確認）→ additionalData に発行元 tenant_id を載せた模擬 ENROLLMENT 通知を `Dispatcher.Handle` → `devices` に該当 amapi_device_name の行が 1 件登録（Req 6.1 / 3.1）、(2) additionalData.tenant_id を enterprise 由来と不一致にした通知→`unassigned_notifications` に退避・`devices` 無変化（Req 6.2 / 3.2 / NFR 2.2）、(3) 同一 amapi_device_name の通知を 2 回 Handle→`devices` 件数 1 のまま冪等更新（Req 6.3 / 3.4）、(4) 無効（非一致）通知で当該テナントに端末が作られないこと（Req 4.2 の observable「未登録」）
   - `DATABASE_URL` 未設定環境は `requireDBURLs` が `t.Skip`（helpers_test.go 規約）
