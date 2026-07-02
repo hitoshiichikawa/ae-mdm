@@ -6,7 +6,7 @@
 > 各タスクは独立コミット可能。並列可能タスクには `(P)` を付し `_Boundary:_` で担当 Components を明示する。
 > cmd/worker は変更しない（design.md リスク 7）。
 
-- [ ] 1. Enrollment domain 型・token repository 基盤
+- [x] 1. Enrollment domain 型・token repository 基盤
   - `internal/enrollment/doc.go`: package doc + 依存方向規約（許可: platform/amapi, platform/db, audit, logger, errors, config, authz/httpserver は handler のみ。禁止: 他 domain / cmd への直接 import。`policy/doc.go` を手本）
   - `internal/enrollment/types.go`: `Mode` enum（`fully_managed` / `dedicated` + `ParseMode`/`Valid`）、DTO（`IssueRequest{Mode, PolicyID *uuid, Duration}` / `TokenView{ID, Mode, ExpiresAt, Value, QRCodeData}` / `TokenSummary{ID, Mode, PolicyID, ExpiresAt, Status}` / `TokenRow`）、`AdditionalData{TenantID, IssuedBy, Mode}` 値オブジェクト + marshal helper、sentinel error（`ErrInvalidMode` / `ErrPolicyRequired` / `ErrTokenPersist`）、port IF（`enterpriseResolver` / `policyChecker` / `eventRecorder`）
   - `internal/enrollment/repository.go`: `TokenRepository`（`Insert` / `List`）の pgxpool 実装。tenant-scoped context のまま `db.BeginTxFunc` で RLS 分離（`policy.Repository` を手本、SuperAdmin 昇格しない）。`Value`/`QRCode` 列は持たず bind しない（NFR 3.1）。DB 失敗は `CodeUnavailable` へ wrap
