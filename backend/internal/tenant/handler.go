@@ -5,6 +5,7 @@ import (
 	stderrors "errors"
 	"io"
 	"net/http"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
@@ -13,6 +14,14 @@ import (
 	"github.com/hitoshiichikawa/ae-mdm/internal/logger"
 	"github.com/hitoshiichikawa/ae-mdm/internal/platform/httpserver"
 )
+
+// defaultStaleBindingThreshold は `POST /tenants/recover-bindings` が「中断した予約」とみなす
+// binding 行の経過時間しきい値の既定値（Req 2.1）。binding へ遷移してからこの時間を超えて
+// 更新されていない行を回収対象とする。
+//
+// **暫定値**: 具体値は運用要件として要確認（design.md 確認事項 3 / Open Q 3）。将来の config 化
+// までの既定値として 15 分を採用する。handler は body を読まず本既定値を Service へ渡す。
+const defaultStaleBindingThreshold = 15 * time.Minute
 
 // Handler は `/api/admin/tenants` 配下 5 endpoint の HTTP I/O を担う presentation 層
 // （design.md「tenant.Handler」節 / tasks.md task 6.1）。
@@ -43,17 +52,21 @@ func NewHandler(svc Service, log logger.Logger) *Handler {
 	return &Handler{svc: svc, log: log}
 }
 
-// Mount は `/tenants` プレフィックス配下に 5 つの route を sub-router で登録する
+// Mount は `/tenants` プレフィックス配下に 6 つの route を sub-router で登録する
 // （`internal/auth/handler.go` の `Mount` と同方式）。
 //
 // 呼び出し側（将来の main）が `Routers.Admin`（admin chain 適用済みの `/api/admin` サブルータ）
-// に対して `h.Mount(routers.Admin)` を呼ぶことで、`/api/admin/tenants` 配下 5 endpoint が
+// に対して `h.Mount(routers.Admin)` を呼ぶことで、`/api/admin/tenants` 配下 6 endpoint が
 // admin guard 継承で稼働する（Req 6.1）。`r.Route("/tenants", ...)` 経由で sub-router を作り、
 // root 相対登録（`r.Post("/tenants", ...)`）はしない（admin chain 配下に正しく入れるため）。
+//
+// `/recover-bindings` は静的 route であり、`/{id}/bind` の path param `{id}` とは chi の route
+// 解決上衝突しない（静的 segment が優先マッチする / Req 2.1）。
 //
 //	r.Route("/tenants", func(sub chi.Router) {
 //	    sub.Post("/", h.create)
 //	    sub.Get("/", h.list)
+//	    sub.Post("/recover-bindings", h.recoverBindings)
 //	    sub.Get("/{id}", h.get)
 //	    sub.Post("/{id}/bind", h.bind)
 //	    sub.Delete("/{id}", h.disable)
@@ -62,6 +75,7 @@ func (h *Handler) Mount(r chi.Router) {
 	r.Route("/tenants", func(sub chi.Router) {
 		sub.Post("/", h.create)
 		sub.Get("/", h.list)
+		sub.Post("/recover-bindings", h.recoverBindings)
 		sub.Get("/{id}", h.get)
 		sub.Post("/{id}/bind", h.bind)
 		sub.Delete("/{id}", h.disable)
@@ -71,17 +85,18 @@ func (h *Handler) Mount(r chi.Router) {
 // createResponse は `POST /tenants` のレスポンス body。
 //
 // Service の `Create` が返す `(TenantView, SignupURL, error)` を合成し、
-// `{id, name, status, signup_url, signup_url_name}` を返す。`signup_url_name` は後続
-// `POST /tenants/{id}/bind` の入力（`CreateEnterprise` の引数）として呼び出し側が必要とする
-// 識別子であり、DB には保存しないため作成応答で返さないと bind フロー（Req 2.1）が成立しない。
-// NFR 2.3（機密値の非ログ）はログ出力に対する制約であり、API レスポンスへの本識別子の露出は
-// 対象外（より機微な `signup_url` 本体も応答 body に載せている）。
+// `{id, name, status, signup_url}` を返す。
+//
+// #52 で `signup_url_name` フィールドを除去した（Req 3.2）。signup_url_name は create 時に
+// 発行元テナントのレコードへ永続化される正本（TenantRow.SignupURLName）となり、後続 bind は
+// 永続値を用いて body から受け取らないため、呼び出し側が bind body へコピペする導線が不要に
+// なった。admin がコピペで別テナントの signup_url_name を bind body に渡す事故経路を無くすため、
+// 作成応答からも本識別子を除去する（`signup_url`（admin が訪れる URL）は引き続き応答に載せる）。
 type createResponse struct {
-	ID            uuid.UUID `json:"id"`
-	Name          string    `json:"name"`
-	Status        Status    `json:"status"`
-	SignupURL     string    `json:"signup_url"`
-	SignupURLName string    `json:"signup_url_name"`
+	ID        uuid.UUID `json:"id"`
+	Name      string    `json:"name"`
+	Status    Status    `json:"status"`
+	SignupURL string    `json:"signup_url"`
 }
 
 // create は `POST /tenants` の HTTP handler（Req 1.1 / 1.3）。
@@ -105,21 +120,24 @@ func (h *Handler) create(w http.ResponseWriter, r *http.Request) {
 	}
 
 	resp := createResponse{
-		ID:            view.ID,
-		Name:          view.Name,
-		Status:        view.Status,
-		SignupURL:     su.URL,
-		SignupURLName: su.Name,
+		ID:        view.ID,
+		Name:      view.Name,
+		Status:    view.Status,
+		SignupURL: su.URL,
 	}
 	writeJSON(w, http.StatusCreated, resp)
 }
 
-// bind は `POST /tenants/{id}/bind` の HTTP handler（Req 2.x）。
+// bind は `POST /tenants/{id}/bind` の HTTP handler（Req 2.x / 3.2 / 3.3）。
 //
 //  1. path param {id} を UUID parse（失敗は 400）
-//  2. request body を BindInput に decode（JSON 不正は 400）
-//  3. Service.Bind を呼ぶ。bound 重複は 409 / disabled へ bind は 422 / 不在は 404 など
-//     Service の写像に委ねる
+//  2. request body は読まない。#52 で body から signup_url_name を除去し（Req 3.2 / 3.3）、
+//     bind は発行元テナントへ永続化済みの signup_url_name（正本）を用いる。後方互換のため body に
+//     余分フィールドがあっても無視し、空 body も許容する（`decodeJSONAllowEmpty` / 単一 JSON
+//     document 検証は維持）。decode 済み `BindInput` は空 struct であり Service へ渡しても構造的に
+//     何も起きない（body 値の混入経路を排除 / Req 3.3）
+//  3. Service.Bind を呼ぶ。bound / binding への新規 bind は 409 / disabled へ bind は 422 /
+//     未永続化 signup_url_name は 422 / 不在は 404 など Service の写像に委ねる
 //  4. 成功時は bound 状態の TenantView（enterprise_name 含む）を 200 で返す
 func (h *Handler) bind(w http.ResponseWriter, r *http.Request) {
 	id, err := parseID(r)
@@ -129,7 +147,7 @@ func (h *Handler) bind(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var in BindInput
-	if err := decodeJSON(r, &in); err != nil {
+	if err := decodeJSONAllowEmpty(r, &in); err != nil {
 		pkgerrors.WriteHTTP(w, r, err, h.log)
 		return
 	}
@@ -141,6 +159,33 @@ func (h *Handler) bind(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, view)
+}
+
+// recoverResponse は `POST /tenants/recover-bindings` のレスポンス body（Req 2.1）。
+// 回収された binding 行の件数を返す。
+type recoverResponse struct {
+	// Recovered は今回の sweep で binding→pending_bind へ回収した行数。
+	Recovered int `json:"recovered"`
+}
+
+// recoverBindings は `POST /tenants/recover-bindings` の HTTP handler（Req 2.1）。
+//
+// 中断した予約（binding のまま塩漬けになった行）を回収する運用手段を admin 操作として露出する。
+//
+//  1. request body は不要（読まない）。しきい値は既定値 `defaultStaleBindingThreshold` を用いる
+//     （olderThan の config 化は運用要件として要確認 / design.md 確認事項 3）
+//  2. actor を AuthClaims から取得
+//  3. Service.RecoverStaleBindings を呼び、回収件数を得る。DB 失敗などは Service の Code 写像に
+//     委ねる（`errors.WriteHTTP` が Code → HTTP status に変換。DB 失敗は 503 / design.md API Contract）
+//  4. 成功時は `{recovered:<件数>}` を 200 で返す
+func (h *Handler) recoverBindings(w http.ResponseWriter, r *http.Request) {
+	actor := actorFromContext(r)
+	recovered, err := h.svc.RecoverStaleBindings(r.Context(), actor, defaultStaleBindingThreshold)
+	if err != nil {
+		pkgerrors.WriteHTTP(w, r, err, h.log)
+		return
+	}
+	writeJSON(w, http.StatusOK, recoverResponse{Recovered: recovered})
 }
 
 // disable は `DELETE /tenants/{id}` の HTTP handler（Req 3.x）。

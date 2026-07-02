@@ -7,17 +7,31 @@ import (
 	pkgerrors "github.com/hitoshiichikawa/ae-mdm/internal/errors"
 )
 
-// TestStatusValid は Status.Valid が定義済み 3 値を正常判定し、未定義値を弾くことを検証する
-// （NFR 1.1: 状態は常に pending_bind / bound / disabled の 3 値のいずれか 1 つ）。
+// TestStatusValid は Status.Valid が定義済み 4 値を正常判定し、未定義値を弾くことを検証する
+// （NFR 1.1: 状態は常に pending_bind / binding / bound / disabled の 4 値のいずれか 1 つ）。
 func TestStatusValid(t *testing.T) {
-	t.Run("定義済み 3 値のとき true を返す", func(t *testing.T) {
-		for _, s := range []Status{StatusPendingBind, StatusBound, StatusDisabled} {
+	t.Run("定義済み 4 値のとき true を返す", func(t *testing.T) {
+		for _, s := range []Status{StatusPendingBind, StatusBinding, StatusBound, StatusDisabled} {
 			// Act
 			got := s.Valid()
 			// Assert
 			if !got {
 				t.Errorf("Status(%q).Valid() = false, want true", s)
 			}
+		}
+	})
+
+	t.Run("binding を受理する（4 値化 / Req 4.1）", func(t *testing.T) {
+		// Arrange
+		s := StatusBinding
+		// Act
+		got := s.Valid()
+		// Assert
+		if !got {
+			t.Errorf("Status(%q).Valid() = false, want true", s)
+		}
+		if string(s) != "binding" {
+			t.Errorf("StatusBinding = %q, want %q", s, "binding")
 		}
 	})
 
@@ -44,12 +58,13 @@ func TestStatusValid(t *testing.T) {
 	})
 }
 
-// TestParseStatus は ParseStatus が定義済み 3 値を Status へ変換し、未定義値を
-// CodeInvalidRequest の *errors.Error として弾くことを検証する（NFR 1.1）。
+// TestParseStatus は ParseStatus が定義済み 4 値を Status へ変換し、未定義値を
+// CodeInvalidRequest の *errors.Error として弾くことを検証する（NFR 1.1 / Req 4.1）。
 func TestParseStatus(t *testing.T) {
-	t.Run("定義済み 3 値を対応する Status へ変換する（正常系）", func(t *testing.T) {
+	t.Run("定義済み 4 値を対応する Status へ変換する（正常系）", func(t *testing.T) {
 		cases := map[string]Status{
 			"pending_bind": StatusPendingBind,
+			"binding":      StatusBinding,
 			"bound":        StatusBound,
 			"disabled":     StatusDisabled,
 		}
@@ -130,6 +145,31 @@ func TestSentinelErrorCodes(t *testing.T) {
 	}
 }
 
+// TestOperationValues は Operation enum が監査対象の操作種別を期待文字列で保持することを
+// 検証する（NFR 2.1 / 回収操作の追加 Req 2.4）。
+func TestOperationValues(t *testing.T) {
+	t.Run("recover 操作が追加され文字列 recover を持つ（Req 2.4）", func(t *testing.T) {
+		// Act / Assert
+		if string(OperationRecover) != "recover" {
+			t.Errorf("OperationRecover = %q, want %q", OperationRecover, "recover")
+		}
+	})
+
+	t.Run("既存操作種別が期待文字列を保持する", func(t *testing.T) {
+		cases := map[Operation]string{
+			OperationCreate:  "create",
+			OperationBind:    "bind",
+			OperationDisable: "disable",
+		}
+		for op, want := range cases {
+			// Assert
+			if string(op) != want {
+				t.Errorf("Operation = %q, want %q", op, want)
+			}
+		}
+	})
+}
+
 // TestViewFromRow は TenantRow から TenantView への変換で id/name/status/enterprise_name が
 // 写像されることを検証する（Req 4.2 のシリアライズ前提）。
 func TestViewFromRow(t *testing.T) {
@@ -152,6 +192,21 @@ func TestViewFromRow(t *testing.T) {
 		// Assert
 		if view.EnterpriseName != "" {
 			t.Errorf("enterprise_name = %q, want empty", view.EnterpriseName)
+		}
+	})
+
+	t.Run("binding 行は status を binding として載せ enterprise_name を露出しない（Req 4.4）", func(t *testing.T) {
+		// Arrange: binding（予約中）は未バインド扱いであり enterprise_name は未確定（NFR 1.2）。
+		// 仮に DB 上に値が残っていても View には載せない（status!=bound 非露出契約 / Req 4.2 / 6.5）。
+		row := TenantRow{Name: "acme", Status: StatusBinding, EnterpriseName: "enterprises/LC123"}
+		// Act
+		view := ViewFromRow(row)
+		// Assert
+		if view.Status != StatusBinding {
+			t.Errorf("status = %q, want binding", view.Status)
+		}
+		if view.EnterpriseName != "" {
+			t.Errorf("binding tenant view must not expose enterprise_name, got %q", view.EnterpriseName)
 		}
 	})
 

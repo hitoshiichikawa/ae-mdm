@@ -26,6 +26,7 @@ import (
 
 	goidc "github.com/coreos/go-oidc/v3/oidc"
 	"github.com/go-chi/chi/v5"
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"golang.org/x/oauth2"
 
@@ -33,6 +34,7 @@ import (
 	"github.com/hitoshiichikawa/ae-mdm/internal/audit"
 	"github.com/hitoshiichikawa/ae-mdm/internal/auth"
 	"github.com/hitoshiichikawa/ae-mdm/internal/config"
+	"github.com/hitoshiichikawa/ae-mdm/internal/enrollment"
 	"github.com/hitoshiichikawa/ae-mdm/internal/logger"
 	"github.com/hitoshiichikawa/ae-mdm/internal/notification"
 	"github.com/hitoshiichikawa/ae-mdm/internal/platform/amapi"
@@ -114,11 +116,15 @@ func healthcheckURL(listenAddr string) string {
 //     Routers.Admin への `/notifications/unassigned` Mount（Issue #39 / A6b）
 //  10. policy domain（Repository / Service / Handler）の DI 配線 +
 //     Routers.API への `/policies` Mount（Issue #40 / B2b）。既存 amapiClient / auditSvc /
-//     tenantSvc / authorizer を再利用する（新規構築しない）
-//  11. app domain（Repository / Service / Handler）の DI 配線 +
+//     tenantSvc / authorizer を再利用する（新規構築しない）。policySvc を main レベルで構築し
+//     (11) enrollment と共有する（Issue #7）
+//  11. enrollment domain（TokenRepository / Service / Handler）の DI 配線 +
+//     Routers.API への `/enrollment-tokens` Mount（Issue #7 / B1）。既存 amapiClient / auditSvc /
+//     tenantSvc / authorizer / policySvc を再利用する。cmd/worker は変更しない（design リスク 7）
+//  12. app domain（Repository / Service / Handler）の DI 配線 +
 //     Routers.API への `/play-tokens` / `/apps` / `/apps/sync` Mount（Issue #11 / D1）。既存
 //     amapiClient / auditSvc / tenantSvc / authorizer を再利用する（新規構築しない）
-//  12. ListenAndServe goroutine + signal.NotifyContext で graceful shutdown
+//  13. ListenAndServe goroutine + signal.NotifyContext で graceful shutdown
 //
 // いずれかの初期化失敗で exit code 1 + 構造化 ERROR ログを出す（NFR 3.1 / 3.2）。
 // pool は defer で Close する（shutdown 順序: HTTP server.Shutdown → pool.Close）。
@@ -283,10 +289,31 @@ func runBootstrap(ctx context.Context) int {
 	//     持たず Handler の責務（design Components）。
 	//   - Handler を `routers.API`（/api chain）へ Mount し、`/api/policies` 配下 6 endpoint を
 	//     稼働させる。authorizer で own-tenant `policy` RBAC を判定する（Req 4.1）。
-	policyHandler := buildPolicyHandler(pool, amapiClient, auditSvc, authorizer, tenantSvc, log)
+	//
+	// policySvc は本 (10) で main レベルに構築し、(11) enrollment の policyChecker アダプタと共有する
+	// （Issue #7 / B1 / task 3）。DEDICATED 発行時の自テナント Kiosk policy 存在検証に policy.Service.Get を
+	// 再利用することで、policy の AMAPI policy id（= DB uuid 文字列）を enrollment の PolicyName へ渡す。
+	policySvc := buildPolicyService(pool, amapiClient, auditSvc, tenantSvc, log)
+	policyHandler := buildPolicyHandler(policySvc, authorizer, log)
 	routers.API.Mount("/policies", policyHandler)
 
-	// (11) app domain（D1 / Issue #11）の DI 配線 + Mount
+	// (11) enrollment domain（B1 / Issue #7）の DI 配線 + Mount
+	//
+	// pool / log / routers / 共有ラッパ（amapiClient / auditSvc / tenantSvc / authorizer）は既存
+	// bootstrap で構築済みのインスタンスをそのまま再利用し、新規構築しない（NFR 3.1 / Req 5.1）。
+	//   - TokenRepository は pgxpool 経由で tenant-scoped context のまま enrollment_tokens へアクセスし、
+	//     RLS にテナント分離を委ねる（SuperAdmin 昇格しない / 既存スキーマ 0004 を消費）。
+	//   - Service は amapiClient（AMAPI 発行）/ auditSvc（発行監査 / Req 5.1）/ tenantSvc（enterprise_name
+	//     解決 / Req 2.3）/ policyChecker アダプタ（(10) の policySvc 共有 / DEDICATED 検証 / Req 1.5）を
+	//     組み合わせて IssueToken / ListTokens を提供する。authz は持たず Handler の責務（design Components）。
+	//   - Handler を `routers.API`（/api chain）へ Mount し、`/api/enrollment-tokens` の POST 発行 /
+	//     GET 一覧を稼働させる。authorizer で own-tenant `enrollment_token` RBAC を判定する（Req 2.1 / 2.2）。
+	//
+	// cmd/worker は本 Issue では変更しない（ENROLLMENT 通知の worker 配線は #36 の責務 / design リスク 7）。
+	enrollmentHandler := buildEnrollmentHandler(pool, amapiClient, auditSvc, authorizer, tenantSvc, policySvc, log)
+	routers.API.Mount("/enrollment-tokens", enrollmentHandler)
+
+	// (12) app domain（D1 / Issue #11）の DI 配線 + Mount
 	//
 	// pool / log / routers は既存 bootstrap で構築済みのものを再利用する。App ドメインの共有ラッパ
 	// 依存（webToken 発行の amapiClient / 同期監査の auditSvc / enterprise_name 解決 + bind gate の
@@ -305,7 +332,7 @@ func runBootstrap(ctx context.Context) int {
 	appHandler := buildAppHandler(pool, amapiClient, auditSvc, authorizer, tenantSvc, log)
 	appHandler.Mount(routers.API)
 
-	// (12) ListenAndServe + graceful shutdown
+	// (13) ListenAndServe + graceful shutdown
 	return runHTTPServer(ctx, srv, log)
 }
 
@@ -353,30 +380,105 @@ func buildTenantRecorder(auditSvc audit.Service, log logger.Logger) tenant.Event
 	return tenantaudit.NewRecorder(auditSvc, log)
 }
 
-// buildPolicyHandler は policy ドメインの本番 DI（Repository → Service → Handler）を 1 箇所に
-// 束ねて構築する（Issue #40 / B2b / NFR 2.2 / Req 5.1）。
+// buildPolicyService は policy ドメインの本番 DI（Repository → Service）を構築する
+// （Issue #40 / B2b / NFR 2.2 / Req 5.1）。
 //
-// 共有ラッパ依存（amapiClient / auditSvc / tenantSvc / authorizer）はいずれも runBootstrap (7)(8) で
-// 構築済みのインスタンスを **再利用** する前提で受け取り、本 helper 内で新規構築しない。これにより
-// Policy の AMAPI 反映が共有 amapi ラッパ経由（NFR 2.2）/ 作成イベント監査が共有 audit Service 経由
-// （Req 5.1）であることを配線レベルで固定する。policy.Service は authorizer を持たず（authz は Handler の
-// 責務 / design Components）、authorizer は policy.NewHandler の第 2 引数へ渡す。
+// 共有ラッパ依存（amapiClient / auditSvc / tenantSvc）はいずれも runBootstrap (7)(8) で構築済みの
+// インスタンスを **再利用** する前提で受け取り、本 helper 内で新規構築しない。これにより Policy の
+// AMAPI 反映が共有 amapi ラッパ経由（NFR 2.2）/ 作成イベント監査が共有 audit Service 経由（Req 5.1）で
+// あることを配線レベルで固定する。
+//
+// 戻り値の policy.Service は runBootstrap (10) で policy.Handler の構築に用いるほか、(11) の enrollment
+// domain が DEDICATED 発行時の自テナント Kiosk policy 存在検証（policyChecker アダプタ）に **共有** する
+// （Issue #7 / B1 / task 3）。policy.NewRepository は pool を接続せず保持するだけのため、テストでは nil を
+// 渡せる（buildTenantRecorder テストが repo=nil で構築するのと同方針 / live DB 非依存）。
+func buildPolicyService(
+	pool *pgxpool.Pool,
+	amapiClient amapi.Client,
+	auditSvc audit.Service,
+	tenantSvc tenant.Service,
+	log logger.Logger,
+) policy.Service {
+	policyRepo := policy.NewRepository(pool)
+	return policy.NewService(policyRepo, amapiClient, auditSvc, tenantSvc, log)
+}
+
+// buildPolicyHandler は共有 policy.Service から policy ドメインの本番 Handler を構築する
+// （Issue #40 / B2b / Req 4.1）。
+//
+// policySvc は runBootstrap (10) で buildPolicyService により構築済みのインスタンスを **再利用** する
+// 前提で受け取る（enrollment domain と共有 / Issue #7 / task 3）。policy.Service は authorizer を持たず
+// （authz は Handler の責務 / design Components）、authorizer は policy.NewHandler の第 2 引数へ渡す。
 //
 // 本 wiring を独立関数として切り出すのは、main の本番配線が誤って Policy domain の DI を落とす /
 // stub へ巻き戻していないことを `cmd/api` の単体テスト（main_test.go）で **型レベルに回帰検知**できる
-// ようにするため（`buildTenantRecorder` / `buildOAuth2Configs` と同じ testability 方針）。pool は
-// policy.NewRepository が接続せず保持するだけのため、テストでは nil を渡せる。
+// ようにするため（`buildTenantRecorder` / `buildOAuth2Configs` と同じ testability 方針）。
 func buildPolicyHandler(
+	policySvc policy.Service,
+	authorizer *authz.Authorizer,
+	log logger.Logger,
+) *policy.Handler {
+	return policy.NewHandler(policySvc, authorizer, log)
+}
+
+// enrollmentPolicyChecker は policy.Service を包んで enrollment domain の policyChecker ポート
+// （consumer-defined / primitive 型 `ResolveOwnedPolicy`）を structural typing で満たす cmd/api 層の
+// アダプタ（Issue #7 / B1 / task 3 / Req 1.5 / 2.3）。
+//
+// enrollment domain は policy domain を直接 import しない（cross-domain import 回避 / doc.go 依存方向規約）
+// ため、本アダプタが cmd/api 側で両者を橋渡しする。
+type enrollmentPolicyChecker struct {
+	svc policy.Service
+}
+
+// ResolveOwnedPolicy は自テナントに policyID が存在すれば AMAPI policy id を返す（不在 / 越境は NotFound）。
+//
+// policy.Service.Get で自テナント policy の存在を検証する。不在 / 他テナント越境は policy domain が存在差
+// 非露出の ErrPolicyNotFound（404）へ写像済みのため、そのまま伝達する（Req 2.3）。存在する場合は
+// policyID.String() を AMAPI policy id として返す。これは policy の AMAPI policy id が DB uuid 文字列と
+// 一致する命名不変条件（policy.service.Create の buildAMAPIPolicyName(enterprise, id.String()) /
+// design「Existing Architecture Analysis」）に依拠する。
+func (c enrollmentPolicyChecker) ResolveOwnedPolicy(ctx context.Context, tenantID, policyID uuid.UUID) (string, error) {
+	if _, err := c.svc.Get(ctx, tenantID, policyID); err != nil {
+		return "", err
+	}
+	return policyID.String(), nil
+}
+
+// buildEnrollmentHandler は enrollment ドメインの本番 DI（TokenRepository → Service → Handler）を
+// 1 箇所に束ねて構築する（Issue #7 / B1 / task 3 / Req 2.1 / 2.2 / 2.3 / 4.1）。
+//
+// 共有ラッパ依存（amapiClient / auditSvc / tenantSvc / authorizer）および policySvc はいずれも runBootstrap
+// (7)(8)(10) で構築済みのインスタンスを **再利用** する前提で受け取り、本 helper 内で新規構築しない。これに
+// より enrollment の AMAPI 発行が共有 amapi ラッパ経由 / 発行監査が共有 audit Service 経由（Req 5.1）/
+// DEDICATED 検証が共有 policy.Service 経由（Req 1.5）であることを配線レベルで固定する。enrollment.Service は
+// authorizer を持たず（authz は Handler の責務 / design Components）、authorizer は enrollment.NewHandler の
+// 第 2 引数へ渡す。
+//
+// 本 wiring を独立関数として切り出すのは、main の本番配線が誤って enrollment domain の DI を落とす /
+// stub へ巻き戻していないことを `cmd/api` の単体テスト（main_test.go）で **型レベルに回帰検知**できる
+// ようにするため（`buildPolicyHandler` / `buildTenantRecorder` と同じ testability 方針）。pool は
+// enrollment.NewTokenRepository が接続せず保持するだけのため、テストでは nil を渡せる。
+func buildEnrollmentHandler(
 	pool *pgxpool.Pool,
 	amapiClient amapi.Client,
 	auditSvc audit.Service,
 	authorizer *authz.Authorizer,
 	tenantSvc tenant.Service,
+	policySvc policy.Service,
 	log logger.Logger,
-) *policy.Handler {
-	policyRepo := policy.NewRepository(pool)
-	policySvc := policy.NewService(policyRepo, amapiClient, auditSvc, tenantSvc, log)
-	return policy.NewHandler(policySvc, authorizer, log)
+) *enrollment.Handler {
+	tokenRepo := enrollment.NewTokenRepository(pool)
+	enrollmentSvc := enrollment.NewService(
+		tokenRepo,
+		amapiClient,
+		auditSvc,
+		tenantSvc,
+		enrollmentPolicyChecker{svc: policySvc},
+		enrollment.SystemClock{},
+		log,
+	)
+	return enrollment.NewHandler(enrollmentSvc, authorizer, log)
 }
 
 // buildAppHandler は app ドメインの本番 DI（Repository → Service → Handler）を 1 箇所に束ねて
