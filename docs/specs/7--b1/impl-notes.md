@@ -31,6 +31,41 @@
   しない」は、design.md の `eventRecorder` ポート契約（audit.Event 参照）と整合させ audit のみ import・
   amapi 非 import と解釈した。spec 本文は未改変）。
 
+### Task 2
+
+- **採用方針**: `policy.Service` を手本に enrollment Service（`IssueToken` / `ListTokens`）を実装。
+  AMAPI-first + inconsistency ログ / 秘密値非記録 / 成否いずれも監査、を踏襲。
+- **重要な判断**:
+  - deps は consumer-defined ポートに限定し、`enrollmentClient`（`CreateEnrollmentToken` のみ）と
+    最小 `Clock`（`Now()`）を service.go 内に宣言（amapi.StubClient / SystemClock が structural に満たす）。
+    `NewService(repo, client, recorder, tenants, policies, clock, log)`。log==nil→Default / clock==nil→SystemClock。
+  - `EnrollmentToken.ExpirationTime`（RFC3339）は `time.Parse` で変換。**parse 失敗は AMAPI 発行済みで
+    snapshot 確定不能な上流契約違反**とし、inconsistency ERROR ログ + 失敗監査 + `CodeUpstream` 伝達（安全側）。
+  - 検証失敗（不正モード / policy 未指定・不在 / enterprise 解決失敗 / AMAPI 失敗 / 永続化失敗）の
+    **全経路で失敗監査を Record**（design.md:161「成否いずれの経路でも」）。Detail は `{mode, expires_at, result, token_id}`
+    の安全 field のみで Value/QRCode を一切載せない。秘密値は `TokenView` の HTTP 応答一度きり。
+  - 永続化失敗は sentinel `ErrTokenPersist`(503) を伝達し、DB 原因は inconsistency ログ（amapi_token_name /
+    requires_reconciliation）へ退避（NFR 3.1 に抵触しない resource 名のみ記録）。
+- **残存課題（task 3 Handler へ影響）**: Service は authorizer を持たない（RBAC は Handler の責務）。
+  handler.go / cmd/api 配線 / policyChecker アダプタ（policy.Service.Get 包み）は task 3 で構築する。
+  DEDICATED の `PolicyName` は policyChecker が返す amapi policy id をそのまま設定する契約。
+
+#### AC Traceability（task 2 範囲: 1.1 / 1.2 / 1.3 / 1.4 / 1.5 / 1.6 / 5.1 / 5.2 / NFR 3.1）
+
+| Req ID | 担保テスト |
+|---|---|
+| 1.1 | `TestService_IssueToken_FullyManaged_UsesDisallowedPersonalUsage` / `_ReturnsSecretQRDataInViewOnly` |
+| 1.2 | `TestService_IssueToken_Dedicated_SetsResolvedPolicyName`（PolicyName=amapi policy id） |
+| 1.3 | `TestService_IssueToken_FullyManaged_EmbedsTenantIssuerModeInAdditionalData` |
+| 1.4 | `TestService_IssueToken_InvalidMode_ReturnsErrorWithoutCallingAMAPI`（空文字 / 未知値・AMAPI 非呼出） |
+| 1.5 | `_DedicatedWithoutPolicy_ReturnsErrRequiredWithoutCallingAMAPI`（nil / uuid.Nil）/ `_DedicatedPolicyNotFound_PropagatesWithoutCallingAMAPI` |
+| 1.6 | `TestService_IssueToken_AMAPIError_SkipsInsertAndRecordsFailureAudit`（Insert 非呼出）+ leak テストの Insert 失敗経路 |
+| 5.1 | `_AMAPIError_SkipsInsertAndRecordsFailureAudit`（失敗）/ `_Success_RecordsAuditWithSafeFields`（成功: actor/tenant/mode/expires_at/result） |
+| 5.2 / NFR 3.1 | `TestService_IssueToken_DoesNotLeakSecretToAuditOrLogs`（成功 + inconsistency ログ経路） |
+
+> 補助テスト（AC 非紐付け / 品質補完）: `_ListTokens_DerivesStatusFromExpiresAt`（Req 4.1 の Service 経由確認）/
+> `_ListTokens_RepositoryError_Propagates`（Repository エラー伝達）。
+
 ## AC Traceability（task 1 範囲: 1.3 / 4.1 / NFR 3.1）
 
 | Req ID | 担保テスト |
