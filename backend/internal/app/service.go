@@ -3,9 +3,11 @@ package app
 import (
 	"context"
 	"strings"
+	"time"
 
 	"github.com/google/uuid"
 
+	"github.com/hitoshiichikawa/ae-mdm/internal/audit"
 	pkgerrors "github.com/hitoshiichikawa/ae-mdm/internal/errors"
 	"github.com/hitoshiichikawa/ae-mdm/internal/logger"
 	"github.com/hitoshiichikawa/ae-mdm/internal/platform/amapi"
@@ -14,8 +16,8 @@ import (
 // Service は App ドメインのユースケース（webToken 発行 / カタログ参照・同期 / 承認済み read seam）の
 // 単一所有者（design.md「App Service」節 / internal/policy.Service に倣う）。
 //
-// **段階拡張 interface（本 task 2 では 2 メソッド）**: 本 task では webToken 発行（CreatePlayToken）と
-// カタログ参照（ListApps）のみを定義する。カタログ同期（SyncApps / task 3）と承認済み read seam
+// **段階拡張 interface（本 task 3 では 3 メソッド）**: webToken 発行（CreatePlayToken）と
+// カタログ参照（ListApps）に加え、本 task でカタログ同期（SyncApps）を追加する。承認済み read seam
 // （CheckAppsApproved / task 4）は後続 task で本 interface へ追加する（policy が task 間で interface を
 // 段階拡張したのと同方針。投機的に先取り定義しない）。
 //
@@ -42,6 +44,22 @@ type Service interface {
 	//   - 0 件のときは非 nil の空 slice を返す（Handler が `[]` をそのままシリアライズできる / Req 2.2）。
 	//   - read 操作のため監査記録は行わない。
 	ListApps(ctx context.Context, tenantID uuid.UUID) ([]TenantAppView, error)
+
+	// SyncApps は client-relayed 承認結果を自テナントのアプリカタログへアトミックに反映し、
+	// 反映件数と同期時刻を返す（Req 3.1 / 3.3 / 3.4 / 3.5 / 3.6 / NFR 3.1 / 3.2）。
+	//
+	//   - enterpriseResolver.EnterpriseNameForTenant で bind gate を通す。未バインド / disabled 等は
+	//     resolver が Code 付き error を返すため、Repository.Upsert を呼ばずそのまま伝達する（422 / Req 3.5）。
+	//   - 各 SyncApp の package_name / title が空 / 空白のみのときは CodeInvalidRequest（400）で
+	//     早期 return し、Repository.Upsert を呼ばない（tenant_apps.title は NOT NULL のための入力ガード）。
+	//   - Repository.Upsert で単一 tx にアトミック反映する。重複 package はレコードを増やさず更新する
+	//     （Req 3.1）。Repository が error を返した場合は反映件数 0 のまま伝達する（部分反映を残さない / Req 3.6）。
+	//   - 成功時は SyncResult{synced_at: now(), count} を返す（Req 3.3 / 空リストは count 0 / Req 3.4）。
+	//
+	// 成否いずれの経路でも app_sync 監査イベント（Detail={count, result}、sync 実行単位の粒度）を
+	// 記録する（NFR 3.1）。監査 Detail / 構造化ログに資格情報・OAuth トークン生値・enterprise_name 等の
+	// 機密値を一切載せない（NFR 3.2）。actor は監査イベントの実行者識別子、tenantID は claims 由来の所有テナント。
+	SyncApps(ctx context.Context, actor, tenantID uuid.UUID, in SyncRequest) (SyncResult, error)
 }
 
 // webTokenClient は Service が webToken 発行に用いる最小ポート（consumer-defines-interface / NFR 2.1）。
@@ -62,32 +80,51 @@ type enterpriseResolver interface {
 	EnterpriseNameForTenant(ctx context.Context, id uuid.UUID) (string, error)
 }
 
+// eventRecorder はカタログ同期の監査イベントを Audit Service へ渡す最小ポート（NFR 3.1）。
+//
+// policy.eventRecorder / tenant.EventRecorder と同型の最小 port（Record 1 本のみ）。audit.Service が
+// 満たす。投機的に全 audit.Service IF を要求せず、本 task が使う Record のみに限定する。
+type eventRecorder interface {
+	// Record は 1 件の監査イベントを記録する。永続化失敗は呼び出し側へ返り得る（呼び出し側が WARN 降格する）。
+	Record(ctx context.Context, ev audit.Event) error
+}
+
+// 監査イベント種別（design Data Models / NFR 3.1）。EventType は任意 string（audit.EventType）。
+const (
+	// eventTypeAppSync はアプリカタログ同期の監査イベント種別（sync 実行単位の粒度）。
+	eventTypeAppSync audit.EventType = "app_sync"
+)
+
 // service は Service interface の本番実装。
 //
 // deps は design.md「App Service」節の consumer-defines-interface に対応する最小依存:
-//   - repo:    app.Repository（tenant_apps のカタログ参照 / task 1 で実装済み）
-//   - amapi:   webTokenClient（webToken 発行の最小ポート / amapi.Client が満たす）
-//   - tenants: enterpriseResolver（enterprise_name 解決 / bind gate / tenant.Service が満たす）
-//   - log:     logger.Logger（拒否経路の構造化ログ / NFR 1.1 は Value を載せない）
+//   - repo:     app.Repository（tenant_apps のカタログ参照・同期 / task 1 で実装済み）
+//   - amapi:    webTokenClient（webToken 発行の最小ポート / amapi.Client が満たす）
+//   - recorder: eventRecorder（同期監査記録の最小ポート / audit.Service が満たす / task 3 で追加）
+//   - tenants:  enterpriseResolver（enterprise_name 解決 / bind gate / tenant.Service が満たす）
+//   - log:      logger.Logger（拒否経路の構造化ログ / NFR 1.1 は Value を載せない）
 //
-// **eventRecorder は持たない**: 同期監査は SyncApps（task 3）で追加する責務であり本 task では導入しない
-// （投機的に先取りしない）。**authorizer も持たない**: authz は Handler（task 5）の責務（design Components）。
+// **authorizer は持たない**: authz は Handler（task 5）の責務（design Components / policy と同方針）。
 type service struct {
-	repo    Repository
-	amapi   webTokenClient
-	tenants enterpriseResolver
-	log     logger.Logger
+	repo     Repository
+	amapi    webTokenClient
+	recorder eventRecorder
+	tenants  enterpriseResolver
+	log      logger.Logger
 }
 
 // NewService は本番用 Service を構築する（policy.NewService / tenant.NewService と同方式の deps 注入）。
 //
+// deps 順は policy.NewService 最終形（repo, client, recorder, tenants, log）と揃える。task 2 が
+// recorder 抜きの (repo, client, tenants, log) で暫定構築していたところへ、本 task で recorder を
+// client と tenants の間へ挿入した（段階拡張）。
+//
 // log が nil の場合は logger.Default()（未配線時は no-op）を採用し、DI 未配線でも構造化ログ呼び出しで
 // panic させない（amapi.NewClient / policy.NewService の nil-log フォールバックと同方針）。
-//
-// 後続 task 3（SyncApps）で eventRecorder が deps に追加される（本 task では未導入 / 段階拡張）。
 func NewService(
 	repo Repository,
 	client webTokenClient,
+	recorder eventRecorder,
 	tenants enterpriseResolver,
 	log logger.Logger,
 ) Service {
@@ -95,10 +132,11 @@ func NewService(
 		log = logger.Default()
 	}
 	return &service{
-		repo:    repo,
-		amapi:   client,
-		tenants: tenants,
-		log:     log,
+		repo:     repo,
+		amapi:    client,
+		recorder: recorder,
+		tenants:  tenants,
+		log:      log,
 	}
 }
 
@@ -146,6 +184,45 @@ func (s *service) ListApps(ctx context.Context, tenantID uuid.UUID) ([]TenantApp
 	return views, nil
 }
 
+// SyncApps は Service.SyncApps の実装。
+func (s *service) SyncApps(ctx context.Context, actor, tenantID uuid.UUID, in SyncRequest) (SyncResult, error) {
+	// 1. bind gate（tenant-scoped context / bound のみ成功 / Req 3.5）。未バインド / disabled 等は
+	//    resolver が Code 付き error（422）を返すため Repository.Upsert を呼ばずそのまま伝達する。
+	//    解決した enterprise_name は本経路（client-relayed 同期）では利用しないため破棄する。
+	if _, err := s.tenants.EnterpriseNameForTenant(ctx, tenantID); err != nil {
+		s.logDeny(actor, tenantID, "enterprise name resolution failed")
+		s.record(ctx, actor, tenantID, audit.ResultFailure, 0)
+		return SyncResult{}, err
+	}
+
+	// 2. 各 SyncApp の package_name / title 空検査（空 / 空白のみは入力不正として 400）。
+	//    tenant_apps.title は NOT NULL のため、空を弾いて DB 制約違反を未然に防ぐ。この経路でも
+	//    Repository.Upsert を呼ばず失敗監査する（部分反映を残さない）。
+	for _, a := range in.Apps {
+		if strings.TrimSpace(a.PackageName) == "" || strings.TrimSpace(a.Title) == "" {
+			s.logDeny(actor, tenantID, "sync app package_name / title is required")
+			s.record(ctx, actor, tenantID, audit.ResultFailure, 0)
+			return SyncResult{}, pkgerrors.New(pkgerrors.CodeInvalidRequest, "package_name and title are required")
+		}
+	}
+
+	// 3. Repository.Upsert（単一 tx / client-relayed 承認結果をアトミック反映 / Req 3.1）。
+	//    空リストは Repository が tx を開かず (0, nil) を返す（Req 3.4）。error 時は反映件数 0 のまま
+	//    伝達し、部分反映を残さない（Req 3.6）。
+	count, err := s.repo.Upsert(ctx, tenantID, in.Apps)
+	if err != nil {
+		s.logDeny(actor, tenantID, "tenant_apps upsert failed")
+		s.record(ctx, actor, tenantID, audit.ResultFailure, 0)
+		return SyncResult{}, err
+	}
+
+	// 4. 同期成功を監査記録し（NFR 3.1）、反映件数と同期時刻を返す（Req 3.3 / 空リストは count 0 / Req 3.4）。
+	//    SyncedAt は応答用の非永続値であり、app package には clock seam が無いため time.Now() を直接用いる
+	//    （auth / audit の Clock は別 package の DI 境界であり、本 task の _Boundary は service.go に閉じる）。
+	s.record(ctx, actor, tenantID, audit.ResultSuccess, count)
+	return SyncResult{SyncedAt: time.Now(), Count: count}, nil
+}
+
 // rowToView は tenant_apps の DB 行（TenantAppRow）を API 表現（TenantAppView）へ写像する
 // （List 経路 / Req 2.1）。id / tenant_id 等の内部 field は外部へ露出せず、package_name / title /
 // icon_url（nullable は null のまま）/ approved_at のみを返す。
@@ -160,8 +237,8 @@ func rowToView(row TenantAppRow) TenantAppView {
 
 // logDeny は拒否 / 失敗経路の原因分析属性（実行者・対象テナント・拒否理由）を構造化ログとして出力する。
 //
-// reason は人間可読な短い拒否理由のみで、webToken.Value 等の秘匿値は一切含めない（NFR 1.1 / policy.logDeny
-// と同方針）。
+// reason は人間可読な短い拒否理由のみで、webToken.Value 等の秘匿値は一切含めない（NFR 1.1 / NFR 3.2 /
+// policy.logDeny と同方針）。
 func (s *service) logDeny(actor, tenantID uuid.UUID, reason string) {
 	s.log.Warn("app operation denied",
 		logger.ActorID(actor),
@@ -170,6 +247,33 @@ func (s *service) logDeny(actor, tenantID uuid.UUID, reason string) {
 	)
 }
 
-// 型 assertion 用に service が Service interface（本 task 2 の 2 メソッド: CreatePlayToken / ListApps）を
-// 満たすことを compile-time で確認する。後続 task で interface が拡張されると本 check が乖離を検出する。
+// record はカタログ同期の監査イベントを eventRecorder へ渡す helper（NFR 3.1）。
+//
+// Detail には安全 field のみ（count / result）を載せ、資格情報・OAuth トークン生値・enterprise_name 等の
+// 機密値を一切載せない（NFR 3.2 / policy.record と同方針）。Record の失敗は WARN ログに留め、ユースケース
+// 本体の業務結果を覆さない（成否いずれの経路でも Record を呼ぶ NFR 3.1）。app_sync は sync 実行単位の
+// 粒度であり、個別アプリ単位の監査は行わない（design 確認事項の監査粒度）。
+func (s *service) record(ctx context.Context, actor, tenantID uuid.UUID, result audit.ResultType, count int) {
+	ev := audit.Event{
+		TenantID:  tenantID,
+		ActorID:   actor,
+		EventType: eventTypeAppSync,
+		Detail: map[string]any{
+			"result": string(result),
+			"count":  count,
+		},
+		Result: result,
+	}
+	if err := s.recorder.Record(ctx, ev); err != nil {
+		s.log.Warn("app audit record failed",
+			"event_type", string(eventTypeAppSync),
+			logger.ActorID(actor),
+			logger.TenantID(tenantID),
+		)
+	}
+}
+
+// 型 assertion 用に service が Service interface（本 task 3 の 3 メソッド: CreatePlayToken / ListApps /
+// SyncApps）を満たすことを compile-time で確認する。後続 task で interface が拡張されると本 check が
+// 乖離を検出する。
 var _ Service = (*service)(nil)
