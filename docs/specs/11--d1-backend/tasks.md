@@ -86,7 +86,7 @@
   - _Boundary: AppHandler_
   - _Depends: 4_
 
-- [ ] 6. cmd/api への配線と本番 DI 回帰検知
+- [x] 6. cmd/api への配線と本番 DI 回帰検知
   - `backend/cmd/api/main.go`: bootstrap に (12) app domain ブロックを追加。`buildAppHandler(pool, amapiClient,
     auditSvc, authorizer, tenantSvc, log)` helper を新設（`buildPolicyHandler` に倣い、既存共有インスタンス
     〔amapiClient / auditSvc / authorizer / tenantSvc〕を **再利用** し新規構築しない）。AMAPI 反映は共有ラッパ経由（NFR 2.1）
