@@ -10,6 +10,7 @@ import (
 
 	"github.com/hitoshiichikawa/ae-mdm/internal/audit"
 	"github.com/hitoshiichikawa/ae-mdm/internal/config"
+	"github.com/hitoshiichikawa/ae-mdm/internal/enrollment"
 	"github.com/hitoshiichikawa/ae-mdm/internal/platform/amapi"
 	"github.com/hitoshiichikawa/ae-mdm/internal/platform/authz"
 	"github.com/hitoshiichikawa/ae-mdm/internal/platform/oidc"
@@ -190,6 +191,9 @@ func TestBuildTenantRecorder_WiresAuditServiceAdapterNotInterimLogger(t *testing
 // 呼び、戻り値が非 nil の *policy.Handler であること（= Policy domain が確実に配線され stub/interim へ
 // 退行していないこと）を assert する。pool は policy.NewRepository(nil) が接続せず保持するだけなので
 // nil で足りる（buildTenantRecorder テストが repo=nil で構築するのと同方針 / live DB 非依存）。
+//
+// Issue #7 / task 3 で policySvc を main レベルへ引き上げたため、本 test は buildPolicyService で
+// policy.Service を構築してから buildPolicyHandler へ渡す（本番 runBootstrap (10) と同じ経路）。
 func TestBuildPolicyHandler_WiresPolicyDomainNotStub(t *testing.T) {
 	// Arrange: 本番 DI（main.go runBootstrap）と同じ実型で依存を構築する。
 	// repo は本 test で接続を伴う呼び出しをしないため pool=nil で足り、NewRepository は依存を保持するだけ。
@@ -198,11 +202,15 @@ func TestBuildPolicyHandler_WiresPolicyDomainNotStub(t *testing.T) {
 	authorizer := authz.New()
 	var amapiClient amapi.Client = &amapi.StubClient{}
 
-	// Act: main が実際に呼ぶ wiring helper を通して Policy Handler を構築する。
-	h := buildPolicyHandler(nil, amapiClient, auditSvc, authorizer, tenantSvc, nil)
+	// Act: main が実際に呼ぶ wiring helper を通して Policy Service → Handler を構築する。
+	policySvc := buildPolicyService(nil, amapiClient, auditSvc, tenantSvc, nil)
+	h := buildPolicyHandler(policySvc, authorizer, nil)
 
 	// Assert: Policy domain が確実に配線され、非 nil の *policy.Handler であること
 	// （stub / interim へ退行していないこと）。
+	if policySvc == nil {
+		t.Fatalf("buildPolicyService の戻り値が nil（Policy domain の DI が欠落した疑い / NFR 2.2 / Req 5.1）")
+	}
 	if h == nil {
 		t.Fatalf("buildPolicyHandler の戻り値が nil（Policy domain の DI が欠落した疑い / " +
 			"NFR 2.2 / Req 5.1）")
@@ -210,5 +218,42 @@ func TestBuildPolicyHandler_WiresPolicyDomainNotStub(t *testing.T) {
 	if _, ok := any(h).(*policy.Handler); !ok {
 		t.Fatalf("buildPolicyHandler の戻り値型 = %T, want *policy.Handler（Policy domain 配線が"+
 			"stub/interim へ退行した疑い / NFR 2.2 / Req 5.1）", h)
+	}
+}
+
+// TestBuildEnrollmentHandler_WiresEnrollmentDomainNotStub は、main の本番 DI が enrollment ドメイン
+// （TokenRepository / Service / Handler + policyChecker アダプタ）を共有ラッパ（amapiClient / auditSvc /
+// tenantSvc / authorizer / policySvc）から確実に組み立て、stub / interim へ退行していないことを型レベルに
+// 回帰検知する（Issue #7 / B1 / task 3 / Req 2.1 / 2.2 / 2.3 / 4.1）。
+//
+// buildPolicyHandler の testability 方針に倣う: アダプタ単体テスト（internal/enrollment/*_test.go）は
+// enrollment.NewService / enrollment.NewHandler を直接生成して契約を検証するが、main wiring が誤って
+// enrollment 配線を落とす / stub へ巻き戻しても失敗しない。main が実際に呼ぶ buildEnrollmentHandler の
+// 戻り値を assert することで、本番配線の退行（enrollment domain の DI 欠落）を捕捉する。
+//
+// helper を本番 DI と同じ実型で呼び、戻り値が非 nil の *enrollment.Handler であること（= enrollment domain が
+// 確実に配線され stub/interim へ退行していないこと）を assert する。pool は enrollment.NewTokenRepository(nil)
+// が接続せず保持するだけなので nil で足りる（buildPolicyHandler テストと同方針 / live DB 非依存）。
+func TestBuildEnrollmentHandler_WiresEnrollmentDomainNotStub(t *testing.T) {
+	// Arrange: 本番 DI（main.go runBootstrap）と同じ実型で依存を構築する。
+	auditSvc := audit.NewService(config.Config{}, nil, audit.SystemClock{}, nil)
+	tenantSvc := tenant.NewService(nil, nil, nil, config.Config{}, nil)
+	authorizer := authz.New()
+	var amapiClient amapi.Client = &amapi.StubClient{}
+	// policySvc は (10) で構築され enrollment と共有される（本番と同じ共有経路を再現する）。
+	policySvc := buildPolicyService(nil, amapiClient, auditSvc, tenantSvc, nil)
+
+	// Act: main が実際に呼ぶ wiring helper を通して enrollment Handler を構築する。
+	h := buildEnrollmentHandler(nil, amapiClient, auditSvc, authorizer, tenantSvc, policySvc, nil)
+
+	// Assert: enrollment domain が確実に配線され、非 nil の *enrollment.Handler であること
+	// （stub / interim へ退行していないこと）。
+	if h == nil {
+		t.Fatalf("buildEnrollmentHandler の戻り値が nil（enrollment domain の DI が欠落した疑い / " +
+			"Req 2.1 / 4.1）")
+	}
+	if _, ok := any(h).(*enrollment.Handler); !ok {
+		t.Fatalf("buildEnrollmentHandler の戻り値型 = %T, want *enrollment.Handler（enrollment domain 配線が"+
+			"stub/interim へ退行した疑い / Req 2.1 / 4.1）", h)
 	}
 }
