@@ -60,6 +60,16 @@
   - task 5 で `notification.StatusReport`（定数と衝突）→ `DeviceStatusReport` へ改名済みのため、実型名 `notification.DeviceStatusReport` を import して実装した（design.md L299 の port 表記 `notification.StatusReport` ではなく改名後の型名）。
 - **残存課題**: なし（task 6 の AC 7.1・7.2・3.2・NFR 2.1 は単体 + 結合テストで担保）。実 DB 結合テストは当環境 `DATABASE_URL` 未設定で **Skip**（compile 通過のみ確認）のため、CI / DB 有り環境で read-after-write の runtime 反映を最終確認されたい。cmd/worker の handlers map 本配線（StatusHandler ← StatusApplier 注入）は #36 の責務で本 task 対象外。
 
+### Task 7
+
+- **採用方針**: `handler.go` に tenant-console read-only の `device.Handler`（内包 chi.Router / `NewHandler` / `ServeHTTP` / GET `/` + GET `/{id}` のみ登録）を `policy.Handler` に忠実に写経。`authorize`（own-tenant `ResourceDevice`×`ActionRead`）/ `parseListFilter` / `parseID` / `writeJSON` を device package に新規定義し、DB 非依存の Service spy + WARN spy logger で列挙全 AC（1.1/1.6/2.1/2.4/3.4/5.1/5.2/7.3）を単体網羅（`handler_test.go`）。
+- **重要な判断**:
+  - **write endpoint 非公開（Req 7.3）を route レベルで担保**: `NewHandler` は GET 2 本のみ登録し POST/PUT/DELETE を登録しない。テストは TenantAdmin claims 付きで write method が 405/404（未登録 method 応答）に落ちること + read Service 未呼出を確認し、Service interface の write 不在（型担保）と二重成立。
+  - **deny(403) テストの role 生成**: TenantAdmin/Operator/Viewer は全て `ResourceDevice` read 許可のため、deny を作るには permissionMatrix に無い未知 role（`NoAccessRole`）を用いた（fail-closed / policy handler_test の deny と同趣旨）。handler-level reason は deny=`authz denied` / claims 不在=`missing auth claims` を logDeny で構造化 WARN（NFR 3.1）。
+  - **フィルタ parse 契約**: `compliance`/`mode`/`sync_state` の未定義値は 400（Req 1.6）、`unsupported` は第 4 の有効値として parse 成功（Req 3.4）。`sync_state` の query 名・値（`delayed`→true / `ok`→false）は design.md L316 記載（"例"）を canonical として採用。`page`/`page_size` は既定 1/50・非数値/1 未満は 400・上限 200 超は 400 にせず 200 に clamp（design.md 設計判断）。`defaultPage`/`defaultPageSize`/`maxPageSize` const 化でマジックナンバー排除。
+  - **存在差非露出（Req 2.4/5.1/5.2）**: 不在・越境とも Service が同一 sentinel `ErrDeviceNotFound` を返し `WriteHTTP` が同一 `{code, message}` body + 404 に写像。別 device ID の 2 要求で body 完全一致を確認するテストで Req 5.2 を担保。
+- **残存課題**: cmd/api 配線（`buildDeviceHandler` + `routers.API.Mount("/devices", ...)`）は task 8 の責務で本 task 対象外（`doRequest`/spy は task 8 の handler test でも流用可）。
+
 ## 確認事項
 
 - **実 DB repository テストの配置（task 文面との差異）**: task 3 文面は実 DB テストを `repository_test.go` と記すが、本 codebase の実 DB harness（`requireDBURLs`/`seedDummyData`/`newAppPool`/migration）は `test/integration`（package `integration_test`）内にしか無く、design.md File Structure Plan も「実 DB 結合は `backend/test/integration/`」と規定する。したがって実 DB テストは `backend/test/integration/device_repository_test.go` に配置し、`internal/device/repository_test.go` は DB 非依存の near-neighbor 単体テスト（scan / error mapping / bind helper）に充てた。spec 本文は書き換えていない。
