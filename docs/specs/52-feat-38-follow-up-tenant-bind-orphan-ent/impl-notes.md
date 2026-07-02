@@ -34,7 +34,11 @@ per-task ループで実装を進める。本ファイルは各 task の learnin
 | 4.4（binding を 4 値 View / ガードで返す） | task 5.2（`EnterpriseNameForTenant` が binding を未バインド扱いで拒否。View 返却自体は task 2.1） |
 | 1.6（binding↔disable 競合制御） | task 5.3（`Disable` の前提状態判定に binding 追加。`TestService_Disable`「binding テナントの確認一致のとき disabled へ遷移できる」）。binding↔disable の DB 層 affected 競合回帰（UpdateBound affected=0）は task 7.1 |
 
-> 上表は task 進行に伴い追記する（本 task 5 までが担保する AC を記載）。
+| 3.2（signup_url_name 永続値正本化 / DTO・応答除去） | task 6.1（`BindInput.SignupURLName` 削除で body 混入経路を型除去、`createResponse` から signup_url_name 除去。`TestCreate_Success_ReturnsPendingBindAndSignupURL`「応答に signup_url_name が含まれない」）。CreateEnterprise への永続値引き渡しは task 4.1 |
+| 3.3（他テナント値で bind 不可） | task 6.1（bind handler が `decodeJSONAllowEmpty` で body の signup_url_name を無視。`TestBind_Success_ReturnsBoundView`「body の別テナント signup_url_name を無視し bound」/ `TestBind_EmptyBody_UsesPersistedSignupURLName`「空 body でも永続値経路で bind」）|
+| 2.1（中断予約の回収 / handler 露出） | task 6.1（`Service` interface へ `RecoverStaleBindings` 宣言 + `POST /tenants/recover-bindings` endpoint 追加。`TestRecoverBindings_ReturnsRecoveredCount`「件数 JSON を返す + 既定 olderThan を渡す」/ `TestRecoverBindings_ServiceError_MapsToHTTPStatus`「DB 失敗を 503 へ写像」）。Service ユースケースは task 5.2、DB sweep は task 7.1 |
+
+> 上表は task 進行に伴い追記する（本 task 6 までが担保する AC を記載）。
 
 ## Implementation Notes
 
@@ -171,7 +175,48 @@ per-task ループで実装を進める。本ファイルは各 task の learnin
   （binding 行 UpdateDisabled affected=1 後 UpdateBound affected=0）、signup_url_name 永続化往復
   （Insert→Get 一致）の integration 回帰 = task 7.1。
 
+### Task 6（handler.go の bind 入力契約変更・recover endpoint・create 応答整理）
+
+- **採用方針**: 永続 signup_url_name を正本とする新契約を Handler 層で完結させ、先行 task
+  2.1 / 4.1 / 5.2 が build-safe deferral として 6.1 へ残した cross-file cleanup（BindInput
+  フィールド削除 / Service interface 宣言）をまとめて解消した。
+- **重要な判断**:
+  - **BindInput フィールド削除の cross-file 波及**: `BindInput.SignupURLName` を除去し空 struct 化。
+    consumer（`service_test.go:1364` の `BindInput{...}`・`handler_test.go` の
+    `lastBindIn.SignupURLName` 参照・`test/integration` の fakeTenantService）を同 commit で追従。
+    `Service.Bind` シグネチャは維持（design L211）し、body 値の混入経路を型レベルで排除（Req 3.3）。
+  - **bind は `decodeJSONAllowEmpty` へ**: body から signup_url_name を読まない。余分フィールド
+    無視 + 空 body 許容（単一 JSON document 検証は維持 / design L307-309）。
+  - **Service interface deferral 完了**: `RecoverStaleBindings` を interface へ宣言（Req 2.1）。
+    handler_test / integration の fakeTenantService が `var _ Service` を満たすようメソッド追加。
+  - **recover endpoint の olderThan 既定値**: `POST /tenants/recover-bindings`（静的 route。
+    chi では `/{id}/bind` と衝突しない）を追加。body を読まず package const
+    `defaultStaleBindingThreshold = 15 * time.Minute`（暫定値 / design Open Q 3・確認事項 3）を
+    Service へ渡す。DB 失敗は `errors.WriteHTTP` の Code 写像で 503（design API Contract L321）。
+  - **createResponse からの signup_url_name 除去**: 永続化済みで bind body 不要になったため除去
+    （Req 3.2）。`signup_url`（admin 訪問用）は維持。既存 create テストを「signup_url_name キーが
+    含まれない」検証へ変更（assert を緩めず新契約を検証）。
+- **残存課題（task 7/7.1 への影響）**: ReserveBinding/ReleaseBinding/RecoverStaleBindings の
+  affected rows・sweep 実挙動、UpdateBound WHERE binding 回帰、binding↔disable の DB 層 affected
+  競合、signup_url_name 永続化往復（Insert→Get 一致）の integration 回帰は task 7.1 へ残る。
+  recover-bindings の olderThan config 化（暫定 15 分の確定）は運用要件（design 確認事項 3）。
+
 ## 確認事項
+
+- **task 6.1 の boundary 拡張（handler.go 外への意図的な cross-file cleanup 完了）**: task 6.1 の
+  `_Boundary:_` は `handler.go` のみだが、`types.go`（`BindInput.SignupURLName` 削除）/
+  `service.go`（`Service` interface への `RecoverStaleBindings` 宣言）/ `service_test.go`
+  （`BindInput{}` への追従）/ `handler_test.go`（新契約テスト）/ `test/integration/tenant_admin_guard_test.go`
+  （fakeTenantService への `RecoverStaleBindings` 追加 = 新規公開 IF による既存テスト fixture 追従 / Issue #410）
+  にも触れた。これは scope creep ではなく、**先行 task 2.1 / 4.1 / 5.2 が build-safe deferral として
+  明示的に 6.1 へ残した cross-file cleanup の完了**である（各 task の impl-notes learning に deferred 先=6.1
+  と記録済み。design File Structure Plan L109-114 も同 spec 内の変更ファイルとして列挙）。tasks.md /
+  design.md 本文は書き換えていない（marker のみ）。
+- **recover-bindings の olderThan 既定 15 分は暫定値**: `defaultStaleBindingThreshold = 15 * time.Minute`
+  は design Open Q 3（L509-511）/ 確認事項 3 の「既定値 + 将来 config 化の余地。具体値は運用要件として
+  要確認」に基づく暫定採用値であり、確定値ではない。運用要件確定後に config 化 / 値見直しが必要
+  （派生タスク候補）。requirements.md（Req 2.1）は「回収手段の存在」のみを規定し具体しきい値を固定
+  していないため spec 本文との矛盾はない。
 
 - **Service interface への `RecoverStaleBindings` 宣言を task 6.1 へ deferred（本 task 5.2 では実施せず）**:
   具象 `*service.RecoverStaleBindings(ctx, actor, olderThan) (int, error)` のみ追加し、`Service`
