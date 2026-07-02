@@ -315,7 +315,78 @@ per-task ループで実装を進める。本ファイルは各 task の learnin
   本変更により pending_bind 行への `UpdateBound` が実 DB 上 affected=0 になる。当該 integration 回帰
   （tasks.md L87「pending_bind 行への UpdateBound affected=0」）は task 7.1
   （`_Boundary: tenant_repository_test.go_`）の責務であり、本 task では既存 integration test を触らない。
-- 上記 deferral を除き、現時点で spec（requirements.md / design.md / tasks.md）と実装の間に
-  その他の矛盾は検出していない。
+### PR #62 レビュー（codex round 3 / 4 findings legitimate）への対応区分
+
+PR #62 の codex レビュー（`aa1fb50` に対する 4 指摘 / 自動裁定 legitimate=4）を精読し、以下の
+4 件を「設計確定済み（対応不要）」2 件と「設計イテレーション要（impl PR スコープ外）」2 件に
+区分した。impl PR では design.md / tasks.md / requirements.md を書き換えないため（設計 PR で
+人間レビュー済み）、後者 2 件は本 確認事項に escalate し、返信本文でも「設計と矛盾/未確定のため
+本 impl PR では取り込まず設計イテレーション or 別 Issue 再提起を推奨」と明記した。
+
+- **[finding 1 / high・設計確定済み] `service.go:328` UpdateBound affected=0 経路の orphan**:
+  disable / RecoverStaleBindings が binding を先取りして勝つと、勝者の CreateEnterprise 成功済み
+  Enterprise が AMAPI 上 orphan として残る指摘。これは design.md「回収方式の決定」(L366-368) /
+  「binding↔disable の競合制御」(L379-383) と requirements Out of Scope（AMAPI 既存 orphan の能動削除は
+  対象外）で **明示的に受容したトレードオフ**であり、AMAPI ラッパに削除・逆引き IF が無いため能動補償は
+  構造的に不可能。既に NFR 3.1 の構造化ログ（`service.go:339-343`、enterprise_name 付き）で運用者が
+  手動棚卸しできる形に可観測化済み。**対応不要**（設計と矛盾するため取り込まない）。
+
+- **[finding 2 / high・設計イテレーション要] `repository.go:267`/`348` 予約に所有者/世代が無い（ABA lost update）**:
+  ReserveBinding→CreateEnterprise 実行中に RecoverStaleBindings が当該 binding を pending_bind へ解放し、
+  別リクエストが再予約（binding）した後、古い in-flight 要求の `UpdateBound WHERE status='binding'`（または
+  失敗経路の `ReleaseBinding WHERE status='binding'`）が **別リクエストの予約を誤確定/誤解放**し得る。
+  これは NFR 2.1「lost update を発生させない」に対する実挙動の反例であり、指摘は妥当。
+  - **根本原因**: binding 予約に所有者/世代（generation）を持たせていないため、`WHERE status='binding'` だけ
+    では「自分の予約」と「回収後に張られた別予約」を区別できない。
+  - **推奨修正（設計イテレーション / 別 Issue で確定すべき data-model・contract 変更）**:
+    - 案A（列追加）: `binding_token uuid`（または `binding_generation bigint`）列を migration 0018 で追加。
+      ReserveBinding が採番して `RETURNING` し、`UpdateBound` / `ReleaseBinding` の WHERE に
+      `AND binding_token = $token` を足す。堅牢だが design.md Data Models / Repository 契約の更新を伴う。
+    - 案B（既存列の楽観ロック化）: 既存 `updated_at`（または system column `xmin`）を世代トークンとして使い、
+      ReserveBinding が `RETURNING updated_at`、確定/解放を `AND updated_at = $reservedAt` で guard する。
+      migration 不要だが timestamptz / xid の round-trip 完全一致に依存するため **実 PostgreSQL での
+      integration 検証が必須**。
+  - **本 impl PR で fix しない理由**: (1) いずれの案も ReserveBinding/UpdateBound/ReleaseBinding の
+    **戻り値・引数（Repository 契約）と Data Models を変更**するため、設計 PR で人間レビュー済みの
+    design.md（L285-296 の現行シグネチャ）を impl PR が単独で書き換える範囲を超える。(2) 本 impl 環境に
+    実 PostgreSQL が無く（integration test は self-skip / 単体は fake repository）、SQL 層の並行 guard を
+    **検証不能**。guard 述語を誤ると happy path の UpdateBound が全件 affected=0 となり全 bind が壊れる
+    fail-broken リスクがあり、未検証のまま盲目 push はしない（CLAUDE.md「既存挙動を壊さない」/ 「Red→Green」）。
+  - **到達条件（重大度の補足）**: 本 ABA は CreateEnterprise が stale しきい値（暫定 15 分 / 確定 15 分）を
+    超えて in-flight し続け、その間に recover が走り、さらに別 bind が再予約する狭い極端 race。実害は
+    低確率だが NFR 2.1 反例のため設計イテレーションで generation を入れることを推奨。finding 1 の
+    「disable/recover が正当に勝った単一要求 orphan」は generation 導入後も受容トレードオフとして残る
+    （generation はクロス要求の誤確定=finding 2 のみを消す）。
+
+- **[finding 3 / medium・設計確定済み] `service.go:250` binding への再 bind が常に 409（Req 2.2 の冪等再 bind 未実装）**:
+  Req 2.2「binding のまま中断したテナントへの再 bind を冪等に扱い進行または完了させる」を Bind 単体で
+  実装していない指摘。design.md は Req 2.2 を **recover→再予約経路**で満たす設計（L156 / 「回収方式の決定」
+  L353-370）であり、「binding 行への再 bind 時に既存 Enterprise を照会して紐付け直す」冪等化は
+  **AMAPI に signup_url_name からの逆引き IF が無いため実現不可能**（L369-370 / 確認事項1）と設計判断済み。
+  Bind 内で binding 行を inline 回収すると、in-flight の元 CreateEnterprise がなお成功し得るため二重作成の
+  リスクがある。しきい値ベースの recover が意図的な機構。**対応不要**（設計と矛盾するため取り込まない /
+  逆引き IF が実在するなら設計変更余地ありは設計 PR 確認事項1 のまま）。
+
+- **[finding 4 / medium・設計イテレーション要] `repository.go:384` recover が signup_url_name を再発行しない**:
+  RecoverStaleBindings は status を pending_bind へ戻すのみで signup_url_name を更新せず、その後の Bind
+  （`service.go:301`）が同じ永続値を再利用するため、元の CreateEnterprise がタイムアウト後に成功して
+  signup URL を consume 済みだった場合、回収後の再 bind が恒久的に成立しない（塩漬け）指摘。妥当。
+  - **設計との関係**: design.md「回収方式の決定」(c)（L362-363）は「回収後の再 bind は **新しい signup_url**
+    から再予約する（古い signup_url_name は consume 済みの可能性があり再利用しない）」と **意図を明記**して
+    いるが、その新 signup_url を取得する機構（recover 内での再発行 / 別 re-provision endpoint）が design の
+    API Contract（L318-322）に未定義であり、impl は旧値再利用のまま = **設計意図と実装の乖離 + 設計の
+    機構未確定**。
+  - **推奨修正（設計イテレーション / 別 Issue で機構を確定）**:
+    - 案A: Service.RecoverStaleBindings が回収各テナントへ `amapi.CreateSignupURL` で新 signup_url を再発行し
+      新設 `Repository.UpdateSignupURLName` で永続化（sweep 内 AMAPI 呼び出し + 新 repo 契約）。
+    - 案B: 別 re-provision endpoint（`POST /tenants/{id}/reissue-signup-url` 等）を追加し、再 bind 前に admin が
+      新 signup_url を採り直す。
+  - **本 impl PR で fix しない理由**: いずれも design が gesture のみで未確定の機構（sweep への AMAPI 追加 /
+    新 repo・API 契約）の追加であり、Developer が impl PR で仕様を追加・解釈する範囲を超える（PM/Architect
+    差し戻し相当）。加えて AMAPI + PostgreSQL を要し本環境で検証不能。設計イテレーションで案A/Bを確定
+    することを推奨。
+
+- 上記 4 件（設計確定済み 2 / 設計イテレーション要 2）を除き、現時点で spec（requirements.md /
+  design.md / tasks.md）と実装の間にその他の矛盾は検出していない。
 
 STATUS: complete
