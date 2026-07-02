@@ -178,6 +178,47 @@
 > - **androidVersion パース不能フォールバック**: 上記「重要な判断」の通り `unknown`（登録継続）を採用。
 >   design L269 / requirements Req 3.5 / NFR 1.1 と矛盾しないことを確認済み（矛盾なし）。
 
+### Task 6
+
+- **採用方針**: notification_dispatch_test.go の setup 作法（migrate→truncate→app pool→SuperAdmin 検証）を
+  踏襲しつつ、ENROLLMENT 種別に実ドメインハンドラ（`NewEnrollmentHandler` + `enrollment.NewRegistrar(pool)`）を
+  登録した in-test Dispatcher を組み、発行→通知→登録の主動線を実 PostgreSQL で回帰検証する（cmd/worker 無変更 / design リスク 7）。
+- **重要な判断**:
+  - helpers_test.go の低レベルヘルパ（`requireDBURLs` / `applyMigrationsUp` / `truncateAll` / `newAppPool` /
+    `connectTimeout` / `boundEnterpriseName`）を再利用。手本 `setupDispatch` は countingHandler mock を登録し
+    pool を露出しないため、pool を露出し実 Registrar を注入する専用 `setupEnrollmentFlow` を新設した
+    （helpers_test.go / notification_dispatch_test.go は無改変）。
+  - additionalData は StubClient の `OnCreateEnrollmentToken` hook で発行時 `req.AdditionalData`（JSON 文字列）を
+    **捕捉**し、そのまま通知 payload の `enrollmentTokenData` へ回送（`enrollment.AdditionalData.Marshal` と同一
+    wire-format を保証 / design リスク 1）。不一致・無効ケースは `enrollment.AdditionalData{}.Marshal()` で直接組む。
+  - 冪等検証は **MessageID を変え amapi_device_name を同一**にした 2 通知で実施（同一 MessageID だと 2 回目が
+    dedupe fast-path で dispatch されず upsert 冪等性を検証できないため）。
+  - devices / enrollment_tokens は tenant-scoped RLS のため、cross-tenant 検証クエリは SuperAdmin context
+    （`platformdb.BeginTxFunc(saCtx, ...)`）で count/select する（手本の saCtx 検証作法と同型）。
+  - IssueToken は tenant-scoped ctx（`WithTenantContext{TenantID, AdminUserID}`）で駆動し、`EnterpriseNameForTenant`
+    の own-tenant ガードと enrollment_tokens / audit_logs の RLS INSERT を両立させる。`issued_by` / `actor_id` の FK を
+    満たすため発行元テナント配下に admin_user を seed する。
+- **残存課題（次 task に影響する事項）**: なし（task 6 が本 Issue 最終 task）。ENROLLMENT の本番稼働は #36 の
+  worker 配線後（design リスク 7）。手本 `seedBoundTenant` の latent 回帰（下記確認事項）は Issue #39 の範囲。
+
+#### AC Traceability（task 6 範囲: 6.1 / 6.2 / 6.3 / 3.4 / 4.2 / NFR 2.2）
+
+| Req ID | 担保テスト |
+|---|---|
+| 6.1 / 3.1 | `TestEnrollmentFlow_IssueThenEnroll_RegistersDeviceForIssuingTenant`（IssueToken 発行 + snapshot 1 件 → 通知 Handle → devices 1 件 + mode=fully_managed / compliance=unknown） |
+| 6.2 / 3.2 / NFR 2.2 | `TestEnrollmentFlow_TenantMismatchNotification_QuarantinedWithoutDeviceRegistration`（tenant_id 不一致 → unassigned 1 件退避 + 発行元 / 全 devices 0 件） |
+| 6.3 / 3.4 | `TestEnrollmentFlow_DuplicateDeviceNotification_IdempotentSingleDevice`（同一 amapi_device_name の 2 通知で devices 件数 1 のまま） |
+| 4.2 | `TestEnrollmentFlow_InvalidNotification_NoDeviceCreatedForTenant`（tenant_id 欠落 = 突合不能 → 当該テナントに端末未登録） |
+
+> **確認事項**:
+> - **手本 seedBoundTenant の latent 回帰（Issue #39 / #7 scope 外）**: notification_dispatch_test.go の
+>   `seedBoundTenant` は `Insert`（pending_bind 生成）→ `UpdateBound` の順だが、#52 で `UpdateBound` の WHERE が
+>   `status='binding'` に変更されたため pending_bind 行を bound 化できず（affected=0 を無視）、enterprise_name も
+>   設定されない。実 DB で走らせると当該手本の bound 逆引き前提が崩れる（DATABASE_URL 未設定のため latent）。本 task は
+>   影響を避けるため status='bound' + enterprise_name を 1 INSERT で確定する直接 seed を用いた。手本の修正は Issue #39 の
+>   範囲であり spec 本文は未改変。
+> - design / tasks / requirements 本文との矛盾は検出せず（本 task では未改変）。
+
 ## AC Traceability（task 1 範囲: 1.3 / 4.1 / NFR 3.1）
 
 | Req ID | 担保テスト |
