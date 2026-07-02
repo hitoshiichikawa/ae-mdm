@@ -35,7 +35,7 @@
   - _Boundary: EnrollmentRegistrar_
   - _Depends: 1_
 
-- [ ] 5. notification.EnrollmentNotificationHandler (P)
+- [x] 5. notification.EnrollmentNotificationHandler (P)
   - `internal/notification/enrollment_handler.go`: `NotificationHandler` 実装 + `EnrollmentRegistrar` port 宣言（consumer-defined / primitive 型 / `TenantResolver` を手本）。`Handle` 手順: `env.Payload` parse（`name`→amapi_device_name / `enrollmentTokenData`→additionalData / `softwareInfo.androidVersion`）→ additionalData parse で `tenant_id`/`mode` 抽出（欠落/parse 不能→退避 / Req 3.3）→ `db.FromContext(ctx).TenantID` と突合（不一致/ctx 未確立→退避 / Req 3.2 / NFR 2.2）→ 一致時 androidVersion<10 なら `unsupported` else `unknown` を決定（Req 3.5 / NFR 1.1）→ `registrar.UpsertEnrolledDevice`（Req 3.1）。退避は `UnassignedQueue.Enqueue(ctx, env)` を自ら呼び nil 返却（design 採用案 / Dispatcher 無改変）。transient 失敗はそのまま返し nack 保持（Req 3.6）。退避理由 / サポート対象外 / 失敗を非機密 field で構造化 WARN（NFR 4.1 / NFR 3.1）
   - 単体テスト（fake registrar + fake `UnassignedQueue`）: (1) 突合一致→Registrar 呼出・Enqueue 非呼出（Req 3.1）、(2) tenant_id 不一致→Enqueue のみ・Registrar 非呼出（Req 3.2 / NFR 2.1 / NFR 2.2）、(3) tenant_id 欠落/additionalData parse 不能→Enqueue（Req 3.3）、(4) androidVersion<10→compliance=`unsupported`（Req 3.5 / NFR 1.1）、(5) Registrar transient 失敗→非 ack error 返却（Req 3.6）、(6) 退避/サポート対象外/失敗の WARN に payload 生値非混入（NFR 4.1 / NFR 3.1）
   - _Requirements: 3.1, 3.2, 3.3, 3.5, 3.6, NFR 1.1, NFR 2.1, NFR 2.2, NFR 4.1_
