@@ -49,7 +49,7 @@
   - `backend/test/integration/device_test.go`（実 DB / Skip 可）: test-only 配線で `StatusHandler → StatusApplier → Repository` を通し、STATUS_REPORT 適用後に `Service.Get` が反映を返す read-after-write（NFR 2.1）+ 部分 payload で既存値保持（Req 7.1・7.2）
   - _Requirements: 7.1, 7.2, 3.2, NFR 2.1_
   - _Depends: 3, 5_
-- [ ] 7. device Handler（tenant-console）+ テスト
+- [x] 7. device Handler（tenant-console）+ テスト
   - `handler.go`: `GET /api/devices`（一覧）・`GET /api/devices/{id}`（詳細）。`authorize` は own-tenant `ResourceDevice`×`ActionRead`（claims 不在 401 / deny 403 / `policy.Handler` 手本）。`parseListFilter`: 未定義 enum 値は 400（Req 1.6）、`page`/`page_size` 既定 1/50・上限 200 clamp・非数値は 400。詳細不在/越境は `ErrDeviceNotFound`→404（存在差非露出 / Req 5.1・5.2）。JSON encode / parseID は `policy.Handler` と同方式。`chi.Router` 内包で `Mount("/devices", h)` 対応。**write endpoint を公開しない**（Req 7.3）
   - `handler_test.go`: parseListFilter 400（Req 1.6）、未認証 401 / deny 403、不在・越境 404 が同一応答（Req 5.1・5.2）、GET のみで write route 不在（Req 7.3）（同 task 内テスト / parse failure・existence-hiding）
   - _Requirements: 1.1, 1.6, 2.1, 2.4, 3.4, 5.1, 5.2, 7.3_
