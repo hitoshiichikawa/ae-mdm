@@ -150,6 +150,30 @@
   - Red→Green: authorize deny 分岐無効化で sync 403 テスト FAIL、CreatePlayToken の WriteHTTP 除去で 422/502 テスト FAIL を確認済（revert 済）。
 - 残存課題: task 6（cmd/api 配線 + `buildAppHandler` 回帰検知）/ task 6.1（real PG RLS 統合テスト）は本 Issue 内の後続。
 
+### Task 6
+
+- 採用方針: `buildPolicyHandler` / `buildTenantRecorder` の testability 方針をそのまま踏襲し、
+  `cmd/api/main.go` に app domain bootstrap ブロックと `buildAppHandler` helper を追加、`main_test.go` に
+  本番配線の型レベル退行検知テストを追記した。
+- 重要な判断:
+  - **共有インスタンス再利用**: `buildAppHandler(pool, amapiClient, auditSvc, authorizer, tenantSvc, log)` は
+    (7)(8) で構築済みの共有ラッパをそのまま受け取り新規構築しない。`app.NewService(repo, amapiClient,
+    auditSvc, tenantSvc, log)` は task 2/3 learning の deps 順（repo, client, recorder, tenants, log）に一致し、
+    呼び出し形は `policy.NewService` と同一（NFR 2.1: AMAPI 反映は共有ラッパ経由）。
+  - **Mount パターン**: App Handler は 3 endpoint が別々のトップレベルパスを持つため `appHandler.Mount(routers.API)`
+    で root 相対に登録（policy の `Mount("/prefix", h)` ではなく tenant.Handler.Mount 型 / task 5 learning と整合）。
+    `routers.API` は policy/audit が Mount する /api chain（TenantContextMiddleware = RLS tenant-scoped）と同一（Req 4.1）。
+  - **bootstrap 番号**: 既存 (7)〜(10) domain + (11) ListenAndServe の連番に app を挿入するため、app を (11)、
+    ListenAndServe を (12) へ繰り上げた（tasks.md 本文は「(12) app domain」と表記するが、ListenAndServe より
+    後段に配置すると server ループ後で到達不能になるため、sequential 順で app を先に置いた。確認事項参照）。
+- AC 担保テスト（`cmd/api/main_test.go` / `TestBuildAppHandler_WiresAppDomainNotStub`）:
+  - Req 4.1 / NFR 2.1: `buildAppHandler` を本番と同じ実型（amapi.Client / audit.Service / *authz.Authorizer /
+    tenant.Service）で呼び、戻り値が非 nil の `*app.Handler` であることを assert（App domain 配線が stub/interim へ
+    退行していないことを型レベルで回帰検知）。Red→Green: `buildAppHandler` を `return nil`（DI 欠落）へ変えると
+    `h == nil` fatal で FAIL することを確認済（revert 済）。
+- 残存課題: task 6.1（real PG RLS 統合テスト / list・sync・approved-check の越境不可視 + Upsert 冪等性）は
+  deferrable（`- [ ]*`）でスコープ外。本 task で HTTP 経路の実配線が完了したため 6.1 の統合テストが配線後 API を叩ける。
+
 ## 確認事項
 
 - design.md / requirements.md との矛盾は認めなかった。design の確認事項（Option A の
