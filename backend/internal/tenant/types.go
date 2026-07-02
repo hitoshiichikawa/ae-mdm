@@ -147,11 +147,14 @@ type CreateInput struct {
 
 // BindInput は Enterprise バインド要求の入力 DTO（Req 2.1）。
 // `POST /api/admin/tenants/{id}/bind` の request body に対応する。
-type BindInput struct {
-	// SignupURLName は CreateSignupURL が返した識別子（CreateEnterprise の引数）。
-	// admin が訪れる signupURL 自体ではなく、後続 Bind で使う識別子の方を渡す。
-	SignupURLName string `json:"signup_url_name"`
-}
+//
+// #52 で `SignupURLName` フィールドを除去した（Req 3.2 / 3.3）。bind は発行元テナントへ
+// 永続化済みの signup_url_name（正本 / TenantRow.SignupURLName）を用いるため、body から
+// signup_url_name を受け取らない。body 値の混入経路を構造的に排除することで「他テナントの
+// signup_url_name で bind する」事故を防ぐ（Req 3.3）。Service.Bind の第 4 引数として本型は
+// シグネチャ互換のため残す（design.md「シグネチャは維持」）が、フィールドを持たない空 struct
+// であり、body に余分フィールドがあっても Handler が無視する（`decodeJSONAllowEmpty`）。
+type BindInput struct{}
 
 // DisableInput はテナント無効化要求の入力 DTO（Req 3.1 / 3.2）。
 // `DELETE /api/admin/tenants/{id}` の request body に対応する。

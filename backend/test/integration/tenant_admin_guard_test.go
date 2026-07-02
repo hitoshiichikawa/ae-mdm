@@ -6,6 +6,7 @@ import (
 	"net/http/httptest"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 
@@ -31,7 +32,7 @@ import (
 
 // ---- fake Service（integration_test パッケージ用の tenant.Service テストダブル） ----
 
-// fakeTenantService は tenant.Service interface（6 メソッド）を満たす最小のテストダブル。
+// fakeTenantService は tenant.Service interface（7 メソッド / #52 で RecoverStaleBindings 追加）を満たす最小のテストダブル。
 // ガード通過後に Handler へ到達したか（List 呼出有無）を記録し、ガード拒否ケースでは Service が
 // 一切呼ばれないこと（Req 6.5 の存在露出防止 / 認可は guard 層で完結）を併せて検証できる。
 type fakeTenantService struct {
@@ -65,6 +66,12 @@ func (f *fakeTenantService) List(_ context.Context) ([]tenant.TenantView, error)
 
 func (f *fakeTenantService) EnterpriseNameForTenant(_ context.Context, _ uuid.UUID) (string, error) {
 	return "", nil
+}
+
+// RecoverStaleBindings は #52 で tenant.Service に追加された回収ユースケース。本ガード結合
+// テストでは回収経路を検証しないため、0 件・nil を返す最小実装で interface を満たす。
+func (f *fakeTenantService) RecoverStaleBindings(_ context.Context, _ uuid.UUID, _ time.Duration) (int, error) {
+	return 0, nil
 }
 
 func (f *fakeTenantService) listCalls() int {

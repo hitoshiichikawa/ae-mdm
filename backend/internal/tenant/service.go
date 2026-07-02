@@ -112,6 +112,14 @@ type Service interface {
 	//   - SuperAdmin context: 全 tenant 横断参照を許可。
 	// 拒否時は存在差を露出しない ErrTenantNotFound で統一し、構造化ログを出す（NFR 2.2）。
 	EnterpriseNameForTenant(ctx context.Context, id uuid.UUID) (string, error)
+
+	// RecoverStaleBindings は olderThan より古い binding（予約中）行を pending_bind へ回収する
+	// （Req 2.1 / 2.4）。クラッシュ / AMAPI タイムアウトで binding のまま中断した行を再び bind
+	// 可能・無効化可能な状態へ戻し、恒久的に塩漬けになる行を防ぐ。戻り値は回収件数。回収された
+	// 各 tenant については Record(recover) と構造化ログを発火する（NFR 3.1）。
+	//
+	// actor は回収イベントの実行者識別子（admin_users.id）。olderThan は中断とみなす経過時間しきい値。
+	RecoverStaleBindings(ctx context.Context, actor uuid.UUID, olderThan time.Duration) (int, error)
 }
 
 // service は Service interface の本番実装。
@@ -356,11 +364,8 @@ func (s *service) releaseBindingBestEffort(ctx context.Context, id uuid.UUID) {
 // 回収後の再 bind は新しい signup_url から再予約（ReserveBinding）を通るため enterprise 識別子を
 // 二重に作成・紐付けしない（Req 2.2 / design.md「回収方式の決定」）。
 //
-// 本メソッドは現時点で `Service` interface には宣言しない（具象 `*service` メソッドのみ）。
-// interface 宣言 + handler 配線 + handler_test.go の fakeTenantService 更新は消費側 task 6.1 へ
-// deferred する（interface へ今宣言すると handler_test.go の `var _ Service` assertion が壊れ
-// stage-a-verify gate が compile error になるため。task 3→4 の Repository interface deferral と
-// 対称な build-safe deferral）。
+// #52 task 6.1 で `Service` interface に本メソッドを宣言し、Handler の `POST /tenants/recover-bindings`
+// から消費する配線を完了した（task 5.2 の build-safe deferral を解消）。
 //
 // actor は回収イベントの実行者識別子（admin_users.id）。olderThan は中断とみなす経過時間しきい値。
 func (s *service) RecoverStaleBindings(ctx context.Context, actor uuid.UUID, olderThan time.Duration) (int, error) {

@@ -8,6 +8,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
@@ -33,6 +34,7 @@ type fakeServiceCalls struct {
 	get        int
 	list       int
 	enterprise int
+	recover    int
 }
 
 // fakeTenantService は tenant.Service を満たすテストダブル。
@@ -57,15 +59,19 @@ type fakeTenantService struct {
 	listViews []TenantView
 	listErr   error
 
+	recoverCount int
+	recoverErr   error
+
 	// 記録された入力
-	calls         fakeServiceCalls
-	lastActor     uuid.UUID
-	lastCreateIn  CreateInput
-	lastBindID    uuid.UUID
-	lastBindIn    BindInput
-	lastDisableID uuid.UUID
-	lastDisableIn DisableInput
-	lastGetID     uuid.UUID
+	calls           fakeServiceCalls
+	lastActor       uuid.UUID
+	lastCreateIn    CreateInput
+	lastBindID      uuid.UUID
+	lastBindIn      BindInput
+	lastDisableID   uuid.UUID
+	lastDisableIn   DisableInput
+	lastGetID       uuid.UUID
+	lastRecoverThan time.Duration
 }
 
 func (f *fakeTenantService) Create(_ context.Context, actor uuid.UUID, in CreateInput) (TenantView, SignupURL, error) {
@@ -132,6 +138,18 @@ func (f *fakeTenantService) EnterpriseNameForTenant(_ context.Context, _ uuid.UU
 	defer f.mu.Unlock()
 	f.calls.enterprise++
 	return "", nil
+}
+
+func (f *fakeTenantService) RecoverStaleBindings(_ context.Context, actor uuid.UUID, olderThan time.Duration) (int, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.calls.recover++
+	f.lastActor = actor
+	f.lastRecoverThan = olderThan
+	if f.recoverErr != nil {
+		return 0, f.recoverErr
+	}
+	return f.recoverCount, nil
 }
 
 // 型 assertion: fakeTenantService が Service interface を満たすことを compile-time で確認する。
@@ -280,10 +298,12 @@ func TestCreate_Success_ReturnsPendingBindAndSignupURL(t *testing.T) {
 	if resp["id"] != id.String() {
 		t.Errorf("id: want %q, got %v", id.String(), resp["id"])
 	}
-	// signup_url_name（後続 Bind の入力 / CreateEnterprise の引数）は応答に含める。DB に保存
-	// しないため、ここで返さないと利用者が `POST /tenants/{id}/bind` を実行できない（Req 2.1）。
-	if resp["signup_url_name"] != testHandlerSignupURLName {
-		t.Errorf("signup_url_name: want %q, got %v", testHandlerSignupURLName, resp["signup_url_name"])
+	// #52: create 応答から signup_url_name を除去した（Req 3.2）。signup_url_name は create 時に
+	// 発行元テナントへ永続化される正本となり、後続 bind は body から受け取らないため、応答へ
+	// 載せる必要がなくなった（admin がコピペで別テナントの値を bind body へ渡す導線を排除）。
+	// 応答に signup_url_name キーが含まれないことを検証する。
+	if _, ok := resp["signup_url_name"]; ok {
+		t.Errorf("create 応答に signup_url_name が含まれてはならない（Req 3.2）: got %v", resp["signup_url_name"])
 	}
 	// actor が AuthClaims.AdminUserID から Service へ伝播していること。
 	if fake.lastActor != actor {
@@ -551,6 +571,7 @@ func TestDisable_Success_Returns204NoContent(t *testing.T) {
 
 // ============================================================================
 // POST /tenants/{id}/bind: 正常 → 200 + bound TenantView（Req 2.x シリアライズ）
+// #52: body の signup_url_name を無視し永続値経路で動く（Req 3.3）
 // ============================================================================
 
 func TestBind_Success_ReturnsBoundView(t *testing.T) {
@@ -566,12 +587,12 @@ func TestBind_Success_ReturnsBoundView(t *testing.T) {
 	}
 	r := newTestHandlerRouter(t, fake)
 
-	// Act
-	req := httptest.NewRequest(http.MethodPost, "/tenants/"+id.String()+"/bind", strings.NewReader(`{"signup_url_name":"signupUrls/abc123"}`))
+	// Act: body に余分な signup_url_name を渡しても Handler は無視する（Req 3.3）。
+	req := httptest.NewRequest(http.MethodPost, "/tenants/"+id.String()+"/bind", strings.NewReader(`{"signup_url_name":"signupUrls/OTHER-TENANT"}`))
 	rec := httptest.NewRecorder()
 	r.ServeHTTP(rec, req)
 
-	// Assert
+	// Assert: 永続値経路で bind が成功し bound を返す。
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status: want 200, got %d", rec.Code)
 	}
@@ -585,16 +606,109 @@ func TestBind_Success_ReturnsBoundView(t *testing.T) {
 	if fake.lastBindID != id {
 		t.Errorf("Bind id: want %s, got %s", id, fake.lastBindID)
 	}
-	if fake.lastBindIn.SignupURLName != "signupUrls/abc123" {
-		t.Errorf("Bind signup_url_name: want signupUrls/abc123, got %s", fake.lastBindIn.SignupURLName)
+	// BindInput は空 struct であり、body の signup_url_name は Service へ渡らない（Req 3.3）。
+	if fake.calls.bind != 1 {
+		t.Errorf("Bind call count: want 1, got %d", fake.calls.bind)
+	}
+}
+
+// #52: bind は空 body でも動く（body から signup_url_name を読まない / Req 3.3）。
+func TestBind_EmptyBody_UsesPersistedSignupURLName(t *testing.T) {
+	// Arrange
+	id := uuid.New()
+	fake := &fakeTenantService{
+		bindView: TenantView{
+			ID:             id,
+			Name:           testHandlerTenantName,
+			Status:         StatusBound,
+			EnterpriseName: "enterprises/LC0123456789",
+		},
+	}
+	r := newTestHandlerRouter(t, fake)
+
+	// Act: body 無し（signup_url_name を渡さない）で bind する。
+	req := httptest.NewRequest(http.MethodPost, "/tenants/"+id.String()+"/bind", nil)
+	rec := httptest.NewRecorder()
+	r.ServeHTTP(rec, req)
+
+	// Assert: 空 body でも 400 にならず bind が成立する（永続値経路 / Req 3.3）。
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status: want 200, got %d (body=%s)", rec.Code, rec.Body.String())
+	}
+	if fake.calls.bind != 1 {
+		t.Errorf("Bind call count: want 1, got %d", fake.calls.bind)
+	}
+	if fake.lastBindID != id {
+		t.Errorf("Bind id: want %s, got %s", id, fake.lastBindID)
 	}
 }
 
 // ============================================================================
-// Mount された 5 route が解決され Handler に到達すること（Req 6.1 の mount 確認）
+// POST /tenants/recover-bindings: 回収件数 JSON を返す（Req 2.1）
 // ============================================================================
 
-func TestMount_RegistersAllFiveEndpoints(t *testing.T) {
+func TestRecoverBindings_ReturnsRecoveredCount(t *testing.T) {
+	// Arrange: fake が recovered=3 を返す設定。
+	actor := uuid.New()
+	fake := &fakeTenantService{recoverCount: 3}
+	r := newTestHandlerRouter(t, fake)
+
+	// Act: body 不要の POST。
+	req := httptest.NewRequest(http.MethodPost, "/tenants/recover-bindings", nil)
+	req = withActor(req, actor)
+	rec := httptest.NewRecorder()
+	r.ServeHTTP(rec, req)
+
+	// Assert: 200 + {"recovered":3}。
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status: want 200, got %d (body=%s)", rec.Code, rec.Body.String())
+	}
+	var resp map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("response is not valid JSON: %v (body=%s)", err, rec.Body.String())
+	}
+	if resp["recovered"] != float64(3) {
+		t.Errorf("recovered: want 3, got %v", resp["recovered"])
+	}
+	if fake.calls.recover != 1 {
+		t.Errorf("RecoverStaleBindings call count: want 1, got %d", fake.calls.recover)
+	}
+	// actor が AuthClaims.AdminUserID から Service へ伝播していること。
+	if fake.lastActor != actor {
+		t.Errorf("actor: want %s, got %s", actor, fake.lastActor)
+	}
+	// olderThan は既定しきい値が渡ること（handler は body を読まず既定値を使う）。
+	if fake.lastRecoverThan != defaultStaleBindingThreshold {
+		t.Errorf("olderThan: want %s, got %s", defaultStaleBindingThreshold, fake.lastRecoverThan)
+	}
+}
+
+// #52: recover-bindings が Service エラー時に Code 写像で応答すること（Req 2.1 / 503 経路）。
+func TestRecoverBindings_ServiceError_MapsToHTTPStatus(t *testing.T) {
+	// Arrange: Service が Unavailable（DB 失敗）を返す。
+	fake := &fakeTenantService{recoverErr: pkgerrors.New(pkgerrors.CodeUnavailable, "database unavailable")}
+	r := newTestHandlerRouter(t, fake)
+
+	// Act
+	req := httptest.NewRequest(http.MethodPost, "/tenants/recover-bindings", nil)
+	req = withActor(req, uuid.New())
+	rec := httptest.NewRecorder()
+	r.ServeHTTP(rec, req)
+
+	// Assert: 200 を返さず errors.WriteHTTP が Code → HTTP status へ写像する（503）。
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status: want 503, got %d (body=%s)", rec.Code, rec.Body.String())
+	}
+	if fake.calls.recover != 1 {
+		t.Errorf("RecoverStaleBindings call count: want 1, got %d", fake.calls.recover)
+	}
+}
+
+// ============================================================================
+// Mount された 6 route が解決され Handler に到達すること（Req 6.1 の mount 確認 / #52 recover 追加）
+// ============================================================================
+
+func TestMount_RegistersAllEndpoints(t *testing.T) {
 	// Arrange: 全メソッドが正常応答を返す fake Service。
 	id := uuid.New()
 	fake := &fakeTenantService{
@@ -604,10 +718,12 @@ func TestMount_RegistersAllFiveEndpoints(t *testing.T) {
 		getView:      TenantView{ID: id, Name: testHandlerTenantName, Status: StatusPendingBind},
 		listViews:    []TenantView{},
 		disableView:  TenantView{ID: id, Name: testHandlerTenantName, Status: StatusDisabled},
+		recoverCount: 0,
 	}
 	r := newTestHandlerRouter(t, fake)
 
-	// Act/Assert: 5 endpoint が 404 でなく Handler に到達し、想定の成功 status を返すこと。
+	// Act/Assert: 6 endpoint が 404 でなく Handler に到達し、想定の成功 status を返すこと。
+	// recover-bindings（静的 route）が /{id}/bind（path param）と衝突せず解決することも確認する。
 	cases := []struct {
 		name     string
 		method   string
@@ -617,8 +733,9 @@ func TestMount_RegistersAllFiveEndpoints(t *testing.T) {
 	}{
 		{"create", http.MethodPost, "/tenants", `{"name":"Acme Corp"}`, http.StatusCreated},
 		{"list", http.MethodGet, "/tenants", "", http.StatusOK},
+		{"recover", http.MethodPost, "/tenants/recover-bindings", "", http.StatusOK},
 		{"get", http.MethodGet, "/tenants/" + id.String(), "", http.StatusOK},
-		{"bind", http.MethodPost, "/tenants/" + id.String() + "/bind", `{"signup_url_name":"x"}`, http.StatusOK},
+		{"bind", http.MethodPost, "/tenants/" + id.String() + "/bind", "", http.StatusOK},
 		{"disable", http.MethodDelete, "/tenants/" + id.String(), `{"confirmation":"Acme Corp"}`, http.StatusNoContent},
 	}
 

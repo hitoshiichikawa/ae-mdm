@@ -1347,8 +1347,9 @@ func TestService_Bind(t *testing.T) {
 	})
 
 	t.Run("永続 signup_url_name が CreateEnterprise の引数に渡り body の値は無視される（Req 3.2/3.3）", func(t *testing.T) {
-		// Arrange: 永続値 testSignupURLName と異なる値を body に渡しても、永続値が CreateEnterprise に
-		// 渡ることを示す（発行元テナントへの束縛 / body 値の混入経路を排除）。
+		// Arrange: #52 で BindInput は空 struct になり body から signup_url_name を受け取れなくなった。
+		// 永続値 testSignupURLName（TenantRow.SignupURLName）が CreateEnterprise に渡ることを示す
+		// （発行元テナントへの束縛 / body 値の混入経路は構造的に排除済み）。
 		h := newServiceHarness()
 		id := uuid.New()
 		h.repo.getRow = TenantRow{ID: id, Name: testTenantNameValue, Status: StatusPendingBind, SignupURLName: testSignupURLName}
@@ -1360,8 +1361,8 @@ func TestService_Bind(t *testing.T) {
 			return testEnterpriseName, nil
 		}
 
-		// Act: body には永続値と異なる別テナントの値を渡す。
-		_, err := h.svc.Bind(context.Background(), uuid.New(), id, BindInput{SignupURLName: "signupUrls/OTHER-TENANT"})
+		// Act: bind は永続値のみを正本に使う（body に signup_url_name を渡す経路は BindInput から除去済み）。
+		_, err := h.svc.Bind(context.Background(), uuid.New(), id, BindInput{})
 
 		// Assert
 		if err != nil {
