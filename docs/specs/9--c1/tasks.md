@@ -16,7 +16,7 @@
   - _Requirements: 7.1, 2.1, NFR 1.1_
   - _Requirements_partial: 7.1, 2.1, NFR 1.1_
   - _Boundary: device.Repository_
-- [ ] 2. device ドメイン型・骨格（types.go / clock.go / doc.go）(P)
+- [x] 2. device ドメイン型・骨格（types.go / clock.go / doc.go）(P)
   - `types.go`: `ComplianceStatus`（compliant/non_compliant/unknown/unsupported / Req 3.1・3.4）・`DeviceMode` enum、`ListFilter`・`DeviceSummary`・`DeviceDetail`（jsonb 空 default `{}`/`[]` / Req 2.5）・`TenantOverview`・`TenantComplianceCount`・`DeviceRow`・`StatusApplyInput`・sentinel `ErrDeviceNotFound`（404 汎用 message）
   - `clock.go`: `Clock` interface + `SystemClock`（`auth.Clock`/`audit.Clock` と同型 / 同期遅延判定の時刻注入）
   - `doc.go`: package 責務・依存方向（`device → notification` 許可 / RLS 消費方針 / write 経路は StatusApplier のみ）
