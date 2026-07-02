@@ -29,7 +29,7 @@
   - `repository_test.go`（実 DB / `DATABASE_URL` 未設定は `t.Skip`）: 他テナント行の一覧非可視・詳細 0 行 → NotFound（存在秘匿 / Req 5.1・5.2・NFR 3.1）、COALESCE 部分更新で欠落フィールドの既存値保持（Req 7.2）、分類/mode/sync フィルタが該当行のみ（Req 1.2〜1.4）、集計と tenant_id 絞り込み（Req 6.1・6.3・6.4）
   - _Requirements: 1.1, 1.2, 1.3, 1.4, 1.5, 1.7, 2.4, 5.1, 5.2, 6.1, 6.3, 6.4, 7.2, NFR 3.1_
   - _Depends: 1, 2_
-- [ ] 4. device Service（read）+ 単体テスト
+- [x] 4. device Service（read）+ 単体テスト
   - `service.go`: `List`/`Get`/`Overview` 実装。`syncCutoff = Clock.Now() - config 閾値` を算出し filter と per-row `SyncDelayed` に共用。`isSyncDelayed`: `lastStatusAt!=nil && lastStatusAt.Before(cutoff)`（strict `<` / 閾値ちょうど非遅延 / Req 4.3、NULL は非遅延）
   - `Get` は `DeviceRow`→`DeviceDetail` 写像（mode/applied_policy_name/HW/SW/最終同期/compliance/installed_apps/sync flag / Req 2.1・2.2・2.3・2.5）。stored `compliance_status` を 4 分類でそのまま返却（未観測は 'unknown' / Req 3.1・3.3）+ 非準拠理由併記（Req 3.2）
   - `Overview` は flat 件数行を tenant 単位に畳み込み 4 分類 0 埋め（全体 0 件 → 空 slice / Req 6.1・6.4）。write メソッドは持たない（Req 7.3 の型担保）
