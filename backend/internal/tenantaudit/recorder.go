@@ -29,7 +29,11 @@ const (
 	EventTypeBind audit.EventType = "tenant_bind"
 	// EventTypeDisable はテナント無効化操作の監査イベント種別（Req 2.6）。
 	EventTypeDisable audit.EventType = "tenant_disable"
-	// EventTypeUnknown は定義済み 3 種別のいずれにも一致しない未知操作の監査イベント種別
+	// EventTypeRecover は中断したバインド予約（binding 行）の回収操作の監査イベント種別
+	// （#52 Req 2.4）。#52 が tenant.Operation へ recover を追加したのに伴い、回収監査イベントを
+	// tenant_unknown ではなく識別可能な固定種別として記録するための写像先。
+	EventTypeRecover audit.EventType = "tenant_recover"
+	// EventTypeUnknown は定義済み種別のいずれにも一致しない未知操作の監査イベント種別
 	// （Req 2.7）。無音破棄を避け、識別可能な種別として記録するための fallback 値。
 	EventTypeUnknown audit.EventType = "tenant_unknown"
 )
@@ -138,10 +142,12 @@ func (r *Recorder) logPersisted(e tenant.Event) {
 	r.log.Info("tenant audit event persisted", fields...)
 }
 
-// mapEventType は tenant.Operation を audit.EventType へ写像する（Req 2.4〜2.7）。
+// mapEventType は tenant.Operation を audit.EventType へ写像する（Req 2.4〜2.7 / #52 Req 2.4）。
 //
-// 定義済み 3 種別（create / bind / disable）に一致しない未知 Operation は EventTypeUnknown へ
-// 写像し、無音破棄を避ける（Req 2.7）。
+// 定義済み 4 種別（create / bind / disable / recover）に一致しない未知 Operation は EventTypeUnknown
+// へ写像し、無音破棄を避ける（Req 2.7）。recover は #52 で tenant.Operation へ追加された回収操作で
+// あり、tenant_unknown ではなく tenant_recover として識別可能に記録する（#52 Req 2.4 の監査ログ側 leg /
+// 構造化ログ側は service.go の "tenant stale binding recovered" が previous_status を残す）。
 func mapEventType(op tenant.Operation) audit.EventType {
 	switch op {
 	case tenant.OperationCreate:
@@ -150,6 +156,8 @@ func mapEventType(op tenant.Operation) audit.EventType {
 		return EventTypeBind
 	case tenant.OperationDisable:
 		return EventTypeDisable
+	case tenant.OperationRecover:
+		return EventTypeRecover
 	default:
 		return EventTypeUnknown
 	}

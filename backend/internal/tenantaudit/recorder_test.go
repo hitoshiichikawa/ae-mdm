@@ -72,6 +72,15 @@ func TestRecorder_Record_OperationMapping(t *testing.T) {
 			wantEventType: EventTypeDisable,
 			wantResult:    audit.ResultFailure,
 		},
+		{
+			// #52 Req 2.4: RecoverStaleBindings が発火する recover 監査イベントを、
+			// tenant_unknown ではなく識別可能な tenant_recover へ写像することを保証する。
+			name:          "recover 操作が成功のとき tenant_recover / success へ写像される",
+			op:            tenant.OperationRecover,
+			result:        tenant.ResultSuccess,
+			wantEventType: EventTypeRecover,
+			wantResult:    audit.ResultSuccess,
+		},
 	}
 
 	for _, tt := range tests {
@@ -541,6 +550,7 @@ func TestEventTypeConstants_FixedStringValues(t *testing.T) {
 		{EventTypeCreate, "tenant_create"},
 		{EventTypeBind, "tenant_bind"},
 		{EventTypeDisable, "tenant_disable"},
+		{EventTypeRecover, "tenant_recover"},
 	}
 	for _, c := range cases {
 		if string(c.got) != c.want {

@@ -3,6 +3,7 @@ package tenant
 import (
 	"context"
 	stderrors "errors"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgerrcode"
@@ -41,14 +42,40 @@ type Repository interface {
 	// 登録済みテナントが 0 件のときは非 nil の空 slice を返す（Req 4.4）。
 	List(ctx context.Context) ([]TenantRow, error)
 
-	// UpdateBound は pending_bind 状態のテナントを bound へ遷移させ enterprise_name を保存する
-	// （Req 2.1 / 2.2 / 2.3）。
+	// UpdateBound は binding（予約中）状態のテナントを bound へ遷移させ enterprise_name を保存する
+	// （Req 1.4 / 2 段確定の確定側）。
+	//
+	// `WHERE id=$ AND status='binding'` の条件付き UPDATE で、影響行数（affected）を返す。
+	// bound への確定は予約勝者（binding 行）からのみ許可する（#52 で WHERE を pending_bind→binding
+	// へ変更 / Req 1.4）。affected=0 は呼び出し側（Service）が「現状態が binding でない＝競合 /
+	// 既に解放・無効化された」と判定する材料（Req 1.2 / 1.3）。別テナントへの同一 enterprise_name
+	// 投入は部分一意 index 違反（pgerrcode 23505 / `uq_tenants_enterprise_name`）となり
+	// `*errors.Error{Code: CodeConflict}` に写像する。
+	UpdateBound(ctx context.Context, id uuid.UUID, enterpriseName string) (int64, error)
+
+	// ReserveBinding は pending_bind 状態のテナントを binding（予約中）へ原子遷移する（Req 1.1）。
 	//
 	// `WHERE id=$ AND status='pending_bind'` の条件付き UPDATE で、影響行数（affected）を返す。
-	// affected=0 は呼び出し側（Service）が「現状態が pending_bind でない＝競合」と判定する材料
-	// （Req 2.5）。別テナントへの同一 enterprise_name 投入は部分一意 index 違反（pgerrcode
-	// 23505 / `uq_tenants_enterprise_name`）となり `*errors.Error{Code: CodeConflict}` に写像する。
-	UpdateBound(ctx context.Context, id uuid.UUID, enterpriseName string) (int64, error)
+	// 並行 bind の勝者のみ affected=1 となり、敗者は affected=0 となる（Service が 409 競合・
+	// CreateEnterprise 未呼出と判定する材料 / Req 1.2 / 1.3 の orphan 防止の核）。
+	ReserveBinding(ctx context.Context, id uuid.UUID) (int64, error)
+
+	// ReleaseBinding は binding（予約中）状態のテナントを pending_bind へ戻す（Req 1.5）。
+	//
+	// `WHERE id=$ AND status='binding'` の条件付き UPDATE で、影響行数（affected）を返す。
+	// CreateEnterprise 失敗時に予約勝者の binding 行を pending_bind へ解放し、後続の再 bind を
+	// 可能化する（enterprise 識別子未保存のまま回復 / Req 4.3）。affected=0 は当該行が既に
+	// binding でない（解放済み / 無効化済み等）ことを示す。
+	ReleaseBinding(ctx context.Context, id uuid.UUID) (int64, error)
+
+	// RecoverStaleBindings は updated_at が閾値より古い binding 行を pending_bind へ一括回収する
+	// （Req 2.1）。
+	//
+	// `WHERE status='binding' AND updated_at < now() - $olderThan RETURNING id` で、クラッシュ /
+	// AMAPI タイムアウトで binding のまま中断した予約を再び bind 可能・無効化可能な状態へ戻し、
+	// 回収された tenant id 群を返す（Service が Record(recover) に使う / Req 2.4）。回収が 0 件でも
+	// 非 nil の空 slice を返す。RLS 下挙動・しきい値境界の検証は task 7.1 の integration test へ deferred。
+	RecoverStaleBindings(ctx context.Context, olderThan time.Duration) ([]uuid.UUID, error)
 
 	// UpdateDisabled は disabled 以外の状態のテナントを disabled へ遷移させ、無効化監査列
 	// （disabled_at=now() / disabled_by=actor）を記録する（Req 3.1）。
@@ -95,13 +122,16 @@ func superAdminContext(ctx context.Context) context.Context {
 	})
 }
 
-// nullableEnterpriseName は空文字を NULL（nil）へ、非空をそのまま *string へ写像する。
-// pending_bind 行は enterprise_name を NULL で持つため、INSERT の引数化に用いる。
-func nullableEnterpriseName(name string) *string {
-	if name == "" {
+// nullableString は空文字を NULL（nil）へ、非空をそのまま *string へ写像する汎用ヘルパ。
+//
+// nullable な text 列（enterprise_name / signup_url_name）の INSERT 引数化に用いる。
+// pending_bind 行は enterprise_name を NULL で持ち、signup_url_name も未発行時は NULL とする。
+// DB に依存しない純粋写像であり、in-package 単体テストの seam を提供する（DRY・単一責務）。
+func nullableString(s string) *string {
+	if s == "" {
 		return nil
 	}
-	return &name
+	return &s
 }
 
 // Insert は Repository.Insert の実装。
@@ -110,10 +140,12 @@ func (r *repository) Insert(ctx context.Context, t TenantRow) error {
 	return db.BeginTxFunc(ctx, r.pool, func(tx pgx.Tx) error {
 		// status は常に pending_bind で作成する（NFR 1.1 / 作成直後の初期状態）。
 		// enterprise_name は未確定のため NULL を入れる（空文字 → NULL 写像）。
+		// signup_url_name は発行元束縛の正本（Req 3.1）。未発行（空文字）は NULL を書く。
 		if _, err := tx.Exec(ctx,
-			`INSERT INTO tenants (id, name, status, enterprise_name)
-			 VALUES ($1, $2, $3, $4)`,
-			t.ID, t.Name, string(StatusPendingBind), nullableEnterpriseName(t.EnterpriseName),
+			`INSERT INTO tenants (id, name, status, enterprise_name, signup_url_name)
+			 VALUES ($1, $2, $3, $4, $5)`,
+			t.ID, t.Name, string(StatusPendingBind),
+			nullableString(t.EnterpriseName), nullableString(t.SignupURLName),
 		); err != nil {
 			return pkgerrors.Wrap(
 				pkgerrors.CodeUnavailable,
@@ -126,15 +158,19 @@ func (r *repository) Insert(ctx context.Context, t TenantRow) error {
 }
 
 // scanTenantRow は 1 行分の tenants 列を TenantRow へ走査する（Get / List 共通）。
-// enterprise_name の NULL は空文字へ写像する（TenantRow.EnterpriseName は string 表現）。
+// enterprise_name / signup_url_name の NULL は空文字へ写像する（TenantRow 側は string 表現）。
+//
+// SELECT 列順と Scan 引数順は厳密に一致させる必要がある。signup_url_name は
+// enterprise_name の直後に並べる（Get / List の SELECT 文も同順で signup_url_name を含む）。
 func scanTenantRow(row pgx.Row) (TenantRow, error) {
 	var (
 		t             TenantRow
 		statusStr     string
 		enterpriseSQL *string
+		signupURLSQL  *string
 	)
 	if err := row.Scan(
-		&t.ID, &t.Name, &statusStr, &enterpriseSQL,
+		&t.ID, &t.Name, &statusStr, &enterpriseSQL, &signupURLSQL,
 		&t.CreatedAt, &t.UpdatedAt, &t.DisabledAt, &t.DisabledBy,
 	); err != nil {
 		return TenantRow{}, err
@@ -142,6 +178,9 @@ func scanTenantRow(row pgx.Row) (TenantRow, error) {
 	t.Status = Status(statusStr)
 	if enterpriseSQL != nil {
 		t.EnterpriseName = *enterpriseSQL
+	}
+	if signupURLSQL != nil {
+		t.SignupURLName = *signupURLSQL
 	}
 	return t, nil
 }
@@ -152,7 +191,7 @@ func (r *repository) Get(ctx context.Context, id uuid.UUID) (TenantRow, error) {
 	var result TenantRow
 	err := db.BeginTxFunc(ctx, r.pool, func(tx pgx.Tx) error {
 		row := tx.QueryRow(ctx,
-			`SELECT id, name, status, enterprise_name, created_at, updated_at, disabled_at, disabled_by
+			`SELECT id, name, status, enterprise_name, signup_url_name, created_at, updated_at, disabled_at, disabled_by
 			 FROM tenants
 			 WHERE id = $1`,
 			id,
@@ -189,7 +228,7 @@ func (r *repository) List(ctx context.Context) ([]TenantRow, error) {
 	tenants := make([]TenantRow, 0)
 	err := db.BeginTxFunc(ctx, r.pool, func(tx pgx.Tx) error {
 		rows, err := tx.Query(ctx,
-			`SELECT id, name, status, enterprise_name, created_at, updated_at, disabled_at, disabled_by
+			`SELECT id, name, status, enterprise_name, signup_url_name, created_at, updated_at, disabled_at, disabled_by
 			 FROM tenants
 			 ORDER BY created_at ASC`,
 		)
@@ -232,12 +271,13 @@ func (r *repository) UpdateBound(ctx context.Context, id uuid.UUID, enterpriseNa
 	ctx = superAdminContext(ctx)
 	var affected int64
 	err := db.BeginTxFunc(ctx, r.pool, func(tx pgx.Tx) error {
-		// WHERE status='pending_bind' で条件付き UPDATE する。bound / disabled には遷移しない
-		// （affected=0 を Service が競合 / 不正状態として写像する / Req 2.2 / 2.5）。
+		// WHERE status='binding' で条件付き UPDATE する。bound への確定は予約勝者（binding）
+		// からのみ許可し、pending_bind / bound / disabled には遷移しない（2 段確定の核 / Req 1.4）。
+		// affected=0 を Service が競合 / 不正状態として写像する（Req 1.2 / 1.3）。
 		ct, err := tx.Exec(ctx,
 			`UPDATE tenants
 			 SET status = 'bound', enterprise_name = $1, updated_at = now()
-			 WHERE id = $2 AND status = 'pending_bind'`,
+			 WHERE id = $2 AND status = 'binding'`,
 			enterpriseName, id,
 		)
 		if err != nil {
@@ -263,6 +303,135 @@ func (r *repository) UpdateBound(ctx context.Context, id uuid.UUID, enterpriseNa
 		return 0, err
 	}
 	return affected, nil
+}
+
+// ReserveBinding は pending_bind 状態のテナントを binding（予約中）へ原子遷移する（Req 1.1）。
+//
+// `WHERE id=$ AND status='pending_bind'` の条件付き UPDATE で、影響行数（affected）を返す。
+// 同一テナントへ並行 bind が到達した場合、本遷移に成功した 1 要求のみが affected=1（勝者）と
+// なり、敗者は affected=0 となる（Service が 409 競合・CreateEnterprise 未呼出と判定する材料 /
+// Req 1.2 / 1.3 の orphan 防止の核）。affected rows 実挙動の検証は task 7.1 の integration test
+// へ deferred（実 PostgreSQL を要するため）。
+//
+// 本メソッドは `Repository` interface 宣言を持つ（消費側 Service が task 4.1 で interface 経由で
+// 呼ぶ）。
+func (r *repository) ReserveBinding(ctx context.Context, id uuid.UUID) (int64, error) {
+	ctx = superAdminContext(ctx)
+	var affected int64
+	err := db.BeginTxFunc(ctx, r.pool, func(tx pgx.Tx) error {
+		ct, err := tx.Exec(ctx,
+			`UPDATE tenants
+			 SET status = 'binding', updated_at = now()
+			 WHERE id = $1 AND status = 'pending_bind'`,
+			id,
+		)
+		if err != nil {
+			return pkgerrors.Wrap(
+				pkgerrors.CodeUnavailable,
+				"tenant binding reserve failed",
+				err,
+			)
+		}
+		affected = ct.RowsAffected()
+		return nil
+	})
+	if err != nil {
+		return 0, err
+	}
+	return affected, nil
+}
+
+// ReleaseBinding は binding（予約中）状態のテナントを pending_bind へ戻す（Req 1.5）。
+//
+// `WHERE id=$ AND status='binding'` の条件付き UPDATE で、影響行数（affected）を返す。
+// CreateEnterprise 失敗時に予約勝者の binding 行を pending_bind へ解放し、後続の再 bind を
+// 可能化する（enterprise 識別子未保存のまま回復 / Req 4.3）。affected=0 は当該行が既に binding
+// でない（解放済み / 無効化済み等）ことを示す。affected rows 実挙動の検証は task 7.1 の
+// integration test へ deferred。
+//
+// 本メソッドは `Repository` interface 宣言を持つ（消費側 Service が task 4.1 で interface 経由で
+// 呼ぶ）。
+func (r *repository) ReleaseBinding(ctx context.Context, id uuid.UUID) (int64, error) {
+	ctx = superAdminContext(ctx)
+	var affected int64
+	err := db.BeginTxFunc(ctx, r.pool, func(tx pgx.Tx) error {
+		ct, err := tx.Exec(ctx,
+			`UPDATE tenants
+			 SET status = 'pending_bind', updated_at = now()
+			 WHERE id = $1 AND status = 'binding'`,
+			id,
+		)
+		if err != nil {
+			return pkgerrors.Wrap(
+				pkgerrors.CodeUnavailable,
+				"tenant binding release failed",
+				err,
+			)
+		}
+		affected = ct.RowsAffected()
+		return nil
+	})
+	if err != nil {
+		return 0, err
+	}
+	return affected, nil
+}
+
+// RecoverStaleBindings は updated_at が閾値より古い binding 行を pending_bind へ一括回収する（Req 2.1）。
+//
+// `WHERE status='binding' AND updated_at < now() - make_interval(secs => $1) RETURNING id` で
+// 中断した予約（クラッシュ / AMAPI タイムアウトで binding のまま放置された行）を再び bind 可能・
+// 無効化可能な状態へ戻し、回収された tenant id 群を返す。しきい値は DB 側 `now()` 基準で評価する
+// （アプリ / DB のクロック乖離を避ける / design L289-293）。olderThan は秒（float64）として渡す。
+// 回収が 0 件でも非 nil の空 slice を返す（List の慣習踏襲）。RLS 下挙動・しきい値境界の検証は
+// task 7.1 の integration test へ deferred。
+//
+// 本メソッドは `Repository` interface 宣言を持つ（消費側 Service が task 5.2 で interface 経由で
+// 呼ぶ。具象は task 3.2 で実装済み）。
+func (r *repository) RecoverStaleBindings(ctx context.Context, olderThan time.Duration) ([]uuid.UUID, error) {
+	ctx = superAdminContext(ctx)
+	// 0 件でも非 nil の空 slice を返す（Req 2.1 / List と同型）。
+	recovered := make([]uuid.UUID, 0)
+	err := db.BeginTxFunc(ctx, r.pool, func(tx pgx.Tx) error {
+		rows, err := tx.Query(ctx,
+			`UPDATE tenants
+			 SET status = 'pending_bind', updated_at = now()
+			 WHERE status = 'binding' AND updated_at < now() - make_interval(secs => $1)
+			 RETURNING id`,
+			olderThan.Seconds(),
+		)
+		if err != nil {
+			return pkgerrors.Wrap(
+				pkgerrors.CodeUnavailable,
+				"tenant stale binding recover failed",
+				err,
+			)
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var id uuid.UUID
+			if scanErr := rows.Scan(&id); scanErr != nil {
+				return pkgerrors.Wrap(
+					pkgerrors.CodeUnavailable,
+					"tenant recovered id scan failed",
+					scanErr,
+				)
+			}
+			recovered = append(recovered, id)
+		}
+		if err := rows.Err(); err != nil {
+			return pkgerrors.Wrap(
+				pkgerrors.CodeUnavailable,
+				"tenant stale binding recover iteration failed",
+				err,
+			)
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return recovered, nil
 }
 
 // TenantIDByEnterpriseName は Repository.TenantIDByEnterpriseName の実装。
