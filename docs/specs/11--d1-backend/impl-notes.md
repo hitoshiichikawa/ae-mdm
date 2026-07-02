@@ -100,6 +100,30 @@
 - 残存課題: task 4（CheckAppsApproved）で interface を第 4 メソッドへ拡張する想定（本 task では `var _ Service` は 3 メソッド）。
   Handler（task 5）は SyncApps を ActionUpdate + own-tenant RBAC 配下で呼び、`{synced_at, count}` を返す。
 
+### Task 4
+
+- 採用方針: policy.Service の段階拡張 interface と同方針で App Service に承認済みアプリ read seam
+  `CheckAppsApproved` を追加し、interface を最終形（4 メソッド）へ確定した。
+- 重要な判断:
+  - **空入力の早期 return**: `len(packageNames)==0` は検証対象なしとして Repository を呼ばず `nil` を返す
+    （実 Repository も空入力で pool へ触れない契約と整合 / 不要な DB 往復回避）。fake の呼び出し捕捉で 0 回を assert。
+  - **越境 package の未承認扱い**: Repository.ApprovedPackages は tenant-scoped（RLS + tenant_id 述語）で
+    自テナント承認済みのみを返すため、越境 package は集合に現れず、走査時の欠落判定で自動的に未承認扱いになる
+    （越境検出用の特別分岐を持たない / Req 4.x / 存在有無を露出しない Req 4.2）。
+  - **DB error を握り潰さない**: ApprovedPackages の error（CodeUnavailable/503 等）はそのまま伝達し、
+    承認判定不能を ErrAppNotApproved(422) へ化けさせない。専用テストで 503 保持を確認。
+  - **sentinel は read-only**: `ErrAppNotApproved`（service_types.go 定義）を再代入せず直接返す（422 / Req 5.2）。
+  - **read seam のため監査なし**: ListApps と同じ read 方針で record/logDeny を呼ばない。
+  - **interface 最終形化**: interface doc コメントと `var _ Service = (*service)(nil)` の compile-time check
+    コメントを「段階拡張 / 本 task 3 では 3 メソッド」から 4 メソッド最終形へ更新した（service.go 内 = boundary 内）。
+- AC 担保テスト（`internal/app/service_test.go` / `TestService_CheckAppsApproved`）:
+  - Req 5.1: 「全 package が承認済み→nil / ApprovedPackages へ委譲（packageNames 捕捉）」/「DB error を握り潰さず伝達」
+  - Req 5.2: 「1 件未承認→ErrAppNotApproved(422)」/「越境 package→未承認扱いで 422」
+  - 境界値: 「空入力（nil / 空 slice）→nil かつ Repository 非呼び出し」
+  - Red→Green: 未承認検出ロジック無効化で未承認/越境テスト FAIL、空入力早期 return 無効化で空入力テスト FAIL を確認済（revert 済）。
+- 残存課題: task 5（Handler）/ task 6（cmd 配線）は本 Issue 内。CheckAppsApproved の enforcement 配線
+  （Policy Service #40 が本 seam を呼ぶ改修）は本 Issue スコープ外（design 確認事項 3）。
+
 ## 確認事項
 
 - design.md / requirements.md との矛盾は認めなかった。design の確認事項（Option A の
