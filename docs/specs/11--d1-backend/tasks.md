@@ -42,7 +42,7 @@
   - _Boundary: AppService_
   - _Depends: 1_
 
-- [ ] 3. App Service — カタログ同期（SyncApps + 監査）
+- [x] 3. App Service — カタログ同期（SyncApps + 監査）
   - `internal/app/service.go`: `Service` interface を `SyncApps` へ拡張（`policy` が task 間で interface を
     拡張したのと同方針）+ consumer-defines-interface `eventRecorder`（＝audit.Service）を追加
   - `SyncApps`: (1) `enterpriseResolver.EnterpriseNameForTenant` で bind gate・未バインドは upsert せず error 伝達
