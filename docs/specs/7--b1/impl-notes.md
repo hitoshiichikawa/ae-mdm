@@ -130,6 +130,54 @@
 > （BeginTx/Commit 由来の非 transient error も transient へ正規化）。
 > **確認事項**: なし（design.md / tasks.md との矛盾は検出せず。spec 本文は未改変）。
 
+### Task 5
+
+- **採用方針**: `TenantResolver` を手本に consumer-defined port `EnrollmentRegistrar`（primitive 型）を
+  notification package 内に宣言し、`EnrollmentNotificationHandler`（`NotificationHandler` 実装）で
+  additionalData 突合 → 登録 / 未割当退避を振り分ける（enrollment を import しない / doc.go 遵守）。
+- **重要な判断**:
+  - `Handle` は payload parse → additionalData parse（tenant_id 欠落/parse 不能→退避 tenant_missing）→
+    `db.FromContext`（未確立→退避 tenant_ctx_missing）→ `tenantMatches`（不一致→退避 tenant_mismatch）→
+    一致時のみ `register` の順（design 手順 1〜4 と 1:1）。退避は `UnassignedQueue.Enqueue` を自ら呼び
+    nil（ack）を返す採用案（Dispatcher 無改変）。関数を Handle/register/quarantine + 純粋 helper に分割し
+    40 行以内・単一責務を維持。
+  - `tenantMatches` は additionalData.tenant_id を `uuid.Parse` して ctx 由来 tenant と比較。parse 不能
+    （非 uuid）も突合不能として安全側で退避（false→mismatch）。
+  - **androidVersion パース不能フォールバックは `unknown`（登録継続）** を採用（design L269「それ以外は
+    unknown」/ 判定不能で登録する場合の解釈と整合）。root cause: パース不能を `unsupported` に倒すと
+    サポート端末を誤って対象外化しうるため、端末を登録して可視化する安全側（NFR 1.1）を選んだ。境界
+    （9=unsupported / 10=unknown / 11.0.0=unknown / 空・非数値=unknown）を単体テストで固定。
+  - amapi_device_name は payload `name`（`enterprises/.../devices/...`）を trim してそのまま bind
+    （design「リソース名 → amapi_device_name」/ devices.amapi_device_name は text）。mode は
+    additionalData.mode（fully_managed/dedicated の enum ラベル）を素通し。
+  - WARN は message_id（`logger.MessageID`）+ enterprise_name / notification_type / quarantine_reason /
+    failure_kind / compliance_status の**非機密 field のみ**。payload 生値・additionalData 生値・
+    tenant_id 生値は補間しない（NFR 3.1 / NFR 4.1）。単体テストで機密マーカーの WARN 非混入を固定。
+- **残存課題（task 6 への影響）**: 実 upsert の冪等性（同一 amapi_device_name の 2 回通知で devices
+  1 件）・突合不一致の実退避・発行→通知→登録の動線は task 6 の実 PostgreSQL 結合テストが所有する。
+  `NewEnrollmentHandler(enrollment.NewRegistrar(pool), NewUnassignedQueue(pool), log)` を in-test
+  Dispatcher の handler map（`Enrollment` キー）へ登録する契約で公開済み。cmd/worker wire-in は #36。
+
+#### AC Traceability（task 5 範囲: 3.1 / 3.2 / 3.3 / 3.5 / 3.6 / NFR 1.1 / NFR 2.1 / NFR 2.2 / NFR 4.1）
+
+| Req ID | 担保テスト |
+|---|---|
+| 3.1 | `TestEnrollmentHandler_Handle_TenantMatch_RegistersDeviceWithoutQuarantine`（一致→Registrar 1 回・退避 0・device/mode/compliance 写像） |
+| 3.2 / NFR 2.1 / NFR 2.2 | `_TenantMismatch_QuarantinesWithoutRegister`（不一致→退避のみ・Registrar 非呼出）/ `_MissingTenantContext_Quarantines`（ctx 未確立→退避） |
+| 3.3 | `_TenantMissing_Quarantines`（tenant_id 欠落 / 空 / enrollmentTokenData 空 / additionalData JSON 不正 の 4 subcase→退避） |
+| 3.5 / NFR 1.1 | `_AndroidVersion_MapsCompliance`（9/8.1.0→unsupported、10/11.0.0/空/非数値→unknown） |
+| 3.6 | `_RegistrarTransientError_ReturnsNack`（transient 失敗→非 ack error / ShouldAck=false・退避 0） |
+| NFR 4.1 | `_TenantMismatch_...`（quarantine_reason/enterprise_name の WARN 付与）/ `_WarnLogsDoNotLeakSecrets`（退避/サポート対象外/失敗の WARN に payload 生値・additionalData 生値・tenant_id 非混入 = NFR 3.1 も担保） |
+
+> 補助テスト（防御ガード / AC は NFR 2.2 に紐付け）: `_MalformedPayload_Quarantines`（payload JSON 不正→安全側退避）。
+> **確認事項**:
+> - **context-map.md の discrepancy**: watcher 生成 context-map の Candidate files 欄に Mermaid ノード表記
+>   `D[notification.Dispatcher]` が混入し不正確。実装対象は design.md File Structure Plan L100-104 の
+>   `enrollment_handler.go`（新規）+ `enrollment_handler_test.go`（新規）であり、そちらを正本とした
+>   （spec 本文は未改変）。
+> - **androidVersion パース不能フォールバック**: 上記「重要な判断」の通り `unknown`（登録継続）を採用。
+>   design L269 / requirements Req 3.5 / NFR 1.1 と矛盾しないことを確認済み（矛盾なし）。
+
 ## AC Traceability（task 1 範囲: 1.3 / 4.1 / NFR 3.1）
 
 | Req ID | 担保テスト |
