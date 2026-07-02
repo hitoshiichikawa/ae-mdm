@@ -124,6 +124,32 @@
 - 残存課題: task 5（Handler）/ task 6（cmd 配線）は本 Issue 内。CheckAppsApproved の enforcement 配線
   （Policy Service #40 が本 seam を呼ぶ改修）は本 Issue スコープ外（design 確認事項 3）。
 
+### Task 5
+
+- 採用方針: `policy.Handler`（authorize gate / decodeJSON / WriteHTTP 写像 / co-located test の fake +
+  httptest）と `tenant.Handler`（`Mount(r chi.Router)` route 登録）を組み合わせた hybrid で App Handler を実装。
+- 重要な判断:
+  - **Mount パターンの選択**: 3 endpoint が別々のトップレベルパス（`/play-tokens` / `/apps` / `/apps/sync`）を
+    持つため、policy の「embedded router + `Mount("/prefix", h)`」ではなく tenant の `Mount(r chi.Router)` を採用し、
+    渡された router へ root 相対で直接登録。task 6 が `appHandler.Mount(routers.API)` で `/api` chain へ配線する。
+  - **svc は package の Service（4 メソッド）を受ける**: policy と同じく package-level `Service` interface を
+    受け、Handler 用の subset port は新設しない（余計な interface 面を増やさない）。CheckAppsApproved は
+    endpoint へ配線しない read seam のため fake でのみ実装（呼び出されない）。
+  - **RBAC 対応**: play-tokens=ActionRead / apps=ActionRead / apps/sync=ActionUpdate（Resource=ResourceApp）。
+    既存 `authz/permissions.go` マトリクスに整合（Operator/Viewer は app:update 無 → sync 403、TenantAdmin は許可、
+    Viewer は read 系許可）。マトリクスは変更しない。
+  - **NFR 1.2 の Handler 境界検証**: 成功パスは無ログ。fake logger の `leaks()` で webToken.Value が
+    どのログエントリにも surface しないことを assert。
+- AC 担保テスト（`internal/app/handler_test.go`）:
+  - Req 1.1: `TestHandler_CreatePlayToken_Viewer_Returns200`（value 返却 + actor/tenant 委譲）/ `_NotBound_Returns422` / `_UpstreamError_Returns502`
+  - Req 1.2: `TestHandler_CreatePlayToken_MalformedJSON_Returns400`（svc 未呼出）
+  - Req 2.1 / 2.3 / 4.2: `TestHandler_ListApps_Viewer_Returns200OwnTenant`（own-tenant 委譲 + 一覧返却）
+  - Req 3.3: `TestHandler_SyncApps_TenantAdmin_Returns200`（`{synced_at,count}` + actor/tenant 委譲）
+  - Req 4.1: `TestHandler_SyncApps_Operator_Returns403` / `_SyncApps_Viewer_Returns403` / `_ListApps_NoClaims_Returns401` / TenantAdmin sync 許可（f）/ Viewer read 許可（a,e）
+  - NFR 1.2: `TestHandler_CreatePlayToken_DoesNotLogTokenValue`
+  - Red→Green: authorize deny 分岐無効化で sync 403 テスト FAIL、CreatePlayToken の WriteHTTP 除去で 422/502 テスト FAIL を確認済（revert 済）。
+- 残存課題: task 6（cmd/api 配線 + `buildAppHandler` 回帰検知）/ task 6.1（real PG RLS 統合テスト）は本 Issue 内の後続。
+
 ## 確認事項
 
 - design.md / requirements.md との矛盾は認めなかった。design の確認事項（Option A の
