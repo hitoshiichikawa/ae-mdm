@@ -201,6 +201,40 @@ per-task ループで実装を進める。本ファイルは各 task の learnin
   競合、signup_url_name 永続化往復（Insert→Get 一致）の integration 回帰は task 7.1 へ残る。
   recover-bindings の olderThan config 化（暫定 15 分の確定）は運用要件（design 確認事項 3）。
 
+### Task 7（integration test: RLS 下の予約・解放・回収・束縛・可逆性）
+
+- **採用方針**: 先行 task 3.1（Req 1.1/1.4/1.5）・3.2（Req 2.1）が `_Requirements_partial:_` で
+  deferred した「実 PostgreSQL を要する affected rows / sweep 挙動」を、既存
+  `tenant_repository_test.go` と同スタイルで 7 関数追記して解消した（DB env 未設定時は既存
+  `requireDBURLs` が self-skip）。
+- **重要な判断**:
+  - **updated_at のエイジングは pool 直叩き**: `RecoverStaleBindings` の「古い binding のみ回収」を
+    検証するため、`tenants.updated_at`（自動更新トリガー無し / Repository に過去化メソッド無し）を
+    isolation test と同じ `platformdb.BeginTxFunc(saCtx, pool, ...)` + SuperAdmin ctx で
+    `UPDATE ... updated_at = now() - make_interval(secs => $1)` により過去へ寄せた。しきい値評価は
+    DB 側 `now()` 基準（実装踏襲）なので stale を 1h 前・しきい値 30m とし margin を確保。
+    `setupTenantRepo` は repo しか返さないため当該テストのみ個別 setup を組み helper シグネチャは不変。
+  - **Req 4.1（enum 4 値 + signup_url_name 列の可逆性）は重複追加しない**: 既存
+    `migrations_reversible_test`（0017 込みの全 down→up / task 7.1 boundary 外・変更禁止）が担保済み。
+    本ファイルの各テストが 0017 適用済みスキーマ上で `binding` enum 値と `signup_url_name` 列を
+    実際に往復させることで Req 4.1 の実挙動証跡を兼ねる（tasks.md L90 の整理）。
+  - **既存テストは追記のみ・非改変**: prompt の「追記のみ / assertion 非改変」に従い、既存
+    `TestTenantRepository_*` は一切書き換えていない（下記残存課題の #38 テスト破損もこの制約により
+    本 task では修正せず flag に留めた）。
+- **残存課題（要 Architect / PM 判断・flag）**: task 3.1 が `UpdateBound` の WHERE を
+  `status='pending_bind'`→`status='binding'` へ変更した結果、#38 由来の既存 integration test
+  `TestTenantRepository_UpdateBound_AffectedAndDoubleBind`（L144）と
+  `TestTenantRepository_UpdateBound_DuplicateEnterpriseName_Conflict`（L186）が **実 DB では破損**する
+  （いずれも `Insert`（pending_bind）直後に `UpdateBound` を呼び affected=1 / bound を期待するが、
+  新 WHERE では affected=0 となり両テストが fail する）。本 task の `_Boundary:_` は当ファイルだが
+  prompt が「既存テストの assertion を弱めたり書き換えたりしない（追記のみ）」を明示するため、
+  ARRANGE 修正（`ReserveBinding` を挟んで binding 行にする fixture 追従）を本 task では実施していない。
+  自動 verify（DB env 未設定で self-skip）は green だが実 DB CI では red になるため、これら 2 件の
+  ARRANGE を新契約（binding 起点）へ追従させる修正の要否を Architect / PM / Reviewer に確認したい
+  （新 `TestTenantRepository_UpdateBound_BindingRowConfirmsBound` が正しい binding→bound 正常系を
+  既にカバーしており、旧 2 件は fixture 追従 or 統廃合の判断対象）。spec 本文（tasks.md / design.md /
+  requirements.md）は書き換えていない。
+
 ## 確認事項
 
 - **task 6.1 の boundary 拡張（handler.go 外への意図的な cross-file cleanup 完了）**: task 6.1 の
