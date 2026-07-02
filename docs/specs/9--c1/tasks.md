@@ -23,7 +23,7 @@
   - 型の zero-value / JSON tag / enum 値集合（4 分類に unsupported を含む）を検証する単体テストを近傍に追加（同 task 内テスト / Req 3.1・3.4・2.5 の宣言面）
   - _Requirements: 3.1, 3.4, 2.5_
   - _Boundary: device.Service, device.Repository, device.Handler, device.StatusApplier_
-- [ ] 3. device Repository（pgx + RLS）+ テスト
+- [x] 3. device Repository（pgx + RLS）+ テスト
   - `repository.go`: `ListByTenant`（filter + `syncCutoff` で `WHERE compliance_status/mode/last_status_at<cutoff` + `LIMIT/OFFSET` / Req 1.1〜1.5）・`GetByID`（0 行 → `ErrDeviceNotFound` / Req 2.4・5.1・5.2）・`AggregateOverview`（SuperAdmin ctx 信頼 / `GROUP BY tenant_id, compliance_status` / 任意 tenant_id 絞り込み / Req 6.1・6.3・6.4）・`UpdateFromStatusReport`（`WHERE amapi_device_name=$` の `COALESCE($n, col)` 部分更新 / affected 返却 / Req 7.2）
   - tenant-scoped メソッドは ambient TenantContext のまま `db.BeginTxFunc`（昇格しない / `policy.Repository` 手本）。列ごと型付き scan（jsonb→`json.RawMessage`, nullable→pointer）。0 件は非 nil 空 slice（Req 1.7）
   - `repository_test.go`（実 DB / `DATABASE_URL` 未設定は `t.Skip`）: 他テナント行の一覧非可視・詳細 0 行 → NotFound（存在秘匿 / Req 5.1・5.2・NFR 3.1）、COALESCE 部分更新で欠落フィールドの既存値保持（Req 7.2）、分類/mode/sync フィルタが該当行のみ（Req 1.2〜1.4）、集計と tenant_id 絞り込み（Req 6.1・6.3・6.4）
