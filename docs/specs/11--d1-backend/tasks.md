@@ -58,7 +58,7 @@
   - _Boundary: AppService_
   - _Depends: 2_
 
-- [ ] 4. App Service — 承認済みアプリ read seam（CheckAppsApproved / Requirement 5）
+- [x] 4. App Service — 承認済みアプリ read seam（CheckAppsApproved / Requirement 5）
   - `internal/app/service.go`: `Service` interface を `CheckAppsApproved(ctx, tenantID, packageNames) error` へ拡張
   - `Repository.ApprovedPackages` で自テナント承認済み集合を取得し（Req 5.1）、packageNames に未承認が 1 件でも
     あれば `ErrAppNotApproved`（422）を返す（Req 5.2）。tenant-scoped（自テナント境界のみ / RLS）
