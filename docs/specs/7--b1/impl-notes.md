@@ -66,6 +66,36 @@
 > 補助テスト（AC 非紐付け / 品質補完）: `_ListTokens_DerivesStatusFromExpiresAt`（Req 4.1 の Service 経由確認）/
 > `_ListTokens_RepositoryError_Propagates`（Repository エラー伝達）。
 
+### Task 3
+
+- **採用方針**: `policy.Handler` を手本に enrollment Handler（POST 発行 / GET 一覧）を追加し、cmd/api で
+  enrollment domain を配線。policyChecker アダプタは cmd/api 層で policy.Service を包み cross-domain import を回避。
+- **重要な判断**:
+  - Handler は own-tenant RBAC のみを担い、actor/tenantID は claims 由来のみを Service へ渡す（越境発行を
+    構造的に排除 / Req 2.3）。越境 policy 指定は policyChecker→policy.Service.Get が非露出 404 を返し、Handler は
+    `pkgerrors.WriteHTTP` でそのまま写像（handler test では fakeService の CodeNotFound で再現）。
+  - `policySvc` を `buildPolicyHandler` 内部から main レベルへ引き上げ（新設 `buildPolicyService`）、enrollment の
+    policyChecker と **共有**。命名不変条件（policy の amapi policy id == DB uuid 文字列）に依拠し
+    `ResolveOwnedPolicy` は `policyID.String()` を返す。既存 `TestBuildPolicyHandler_...` は新シグネチャ追従（assertion 不変）。
+  - GET の `TokenSummary.Status` は `expires_at` 由来（active/expired）のみ。4.2（使用済み）は列不在で能動追跡せず
+    Handler にコメント明示（design リスク 2 / observable「未登録」は notification path=task 6 が担保）。
+  - handler_test は service_test.go の `fakeLogger` を流用し、Service は `fakeHandlerService` spy で差し替え。
+- **残存課題（task 4/5/6 へ影響）**: なし（Handler/配線は完結。ENROLLMENT 通知経路の Registrar/handler は
+  task 4/5、結合テストは task 6 で別途構築。worker wire-in は #36 で本 Issue scope 外）。
+
+#### AC Traceability（task 3 範囲: 2.1 / 2.2 / 2.3 / 4.1）
+
+| Req ID | 担保テスト |
+|---|---|
+| 2.1 | `TestHandler_Issue_TenantAdmin_Returns200`（actor/tenant/body 写像）/ `TestHandler_Issue_Operator_Returns200` |
+| 2.2 | `TestHandler_Issue_Viewer_Returns403`（Create 未呼出 + deny WARN） |
+| 2.3 | `TestHandler_Issue_CrossTenantPolicy_Returns404NonExposing`（非露出 404 + own-tenant 境界の tenantID 写像） |
+| 4.1 | `TestHandler_List_ReturnsExpiresAtDerivedStatus`（active/expired 派生 + 自テナント scoped） |
+
+> 補助テスト（AC 非紐付け / 入力検証・防御ガード）: `TestHandler_Issue_MalformedJSON_Returns400` /
+> `TestHandler_Issue_NoClaims_Returns401`。cmd/api 配線回帰: `TestBuildEnrollmentHandler_WiresEnrollmentDomainNotStub`。
+> **確認事項**: なし（design/tasks との矛盾は検出せず。spec 本文は未改変）。
+
 ## AC Traceability（task 1 範囲: 1.3 / 4.1 / NFR 3.1）
 
 | Req ID | 担保テスト |
