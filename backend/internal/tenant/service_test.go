@@ -116,6 +116,23 @@ func (l *fakeLogger) warnDenyActor() (string, bool) {
 	return "", false
 }
 
+// fieldForMsg は指定 level / msg のエントリが持つ structured field key の値を返す（構造化ログの
+// 追加 field 検証用 / NFR 3.1）。deny_reason 以外の structured field（previous_status / enterprise_name
+// 等）を message 単位で検証するために用いる。
+func (l *fakeLogger) fieldForMsg(level, msg, key string) (any, bool) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	for _, e := range l.entries {
+		if e.Level != level || e.Msg != msg {
+			continue
+		}
+		if v, ok := e.Fields[key]; ok {
+			return v, true
+		}
+	}
+	return nil, false
+}
+
 // containsSecret は記録された全エントリの key/value 文字列に機密値が混入していないか検査する。
 func (l *fakeLogger) containsSecret(secret string) bool {
 	l.mu.Lock()
@@ -1242,6 +1259,12 @@ func TestService_Bind(t *testing.T) {
 		if len(events) != 1 || events[0].Result != ResultFailure {
 			t.Errorf("expected a bind/failure audit event on conflict, got %+v", events)
 		}
+		// CreateEnterprise 成功後に UpdateBound が競合で外れると、作成済み Enterprise は AMAPI 上 orphan
+		// になる。この受容トレードオフを silent に握り潰さず enterprise 識別子付きで可観測にする（NFR 3.1 /
+		// design.md「回収方式の決定」「binding↔disable の競合制御」）。
+		if v, ok := h.log.fieldForMsg("warn", "tenant bind conflict left an orphan enterprise in amapi", "enterprise_name"); !ok || v != testEnterpriseName {
+			t.Errorf("orphan enterprise conflict must be observable with the enterprise identifier (NFR 3.1), got %v (present=%v)", v, ok)
+		}
 	})
 
 	t.Run("UpdateBound が CodeConflict（23505 写像）を返すときその error を伝達し ReleaseBinding を呼ばない", func(t *testing.T) {
@@ -1472,6 +1495,10 @@ func TestService_RecoverStaleBindings(t *testing.T) {
 			if ev.Actor != actor || ev.TenantID != recovered[i] {
 				t.Errorf("event[%d] must carry actor %s and tenant id %s, got %s / %s", i, actor, recovered[i], ev.Actor, ev.TenantID)
 			}
+		}
+		// 回収の構造化ログは回収前状態（binding）を structured field として残す（Req 2.4 の「回収前状態」）。
+		if v, ok := h.log.fieldForMsg("info", "tenant stale binding recovered", "previous_status"); !ok || v != string(StatusBinding) {
+			t.Errorf("recovery log must carry previous_status=binding (Req 2.4), got %v (present=%v)", v, ok)
 		}
 	})
 

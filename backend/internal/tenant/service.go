@@ -328,6 +328,19 @@ func (s *service) Bind(ctx context.Context, actor uuid.UUID, id uuid.UUID, _ Bin
 	if boundAffected == 0 {
 		// 回収 / disable との競合（既に binding でない）。新規 Enterprise を作っても行は更新されない（Req 1.4）。
 		s.logDeny(actor, id, "tenant bind conflicts with current state")
+		// この経路は CreateEnterprise が成功済み（enterpriseName 非空）で到達するため、作成された Enterprise は
+		// DB のどのテナント行にも紐付かない orphan として AMAPI 上に残る（binding→disabled の disable 先勝ち /
+		// RecoverStaleBindings 回収先勝ちで UpdateBound WHERE status='binding' が外れる）。AMAPI に削除・逆引き
+		// IF が無く、disabled/pending_bind へは enterprise_name を書けない（NFR 1.2 / 未定義遷移 Req 4.2）ため
+		// 能動補償は構造的に不可能であり、AMAPI 上の孤児化は本設計が受容するトレードオフである（requirements
+		// Out of Scope「既存 orphan の能動削除」/ design.md「回収方式の決定」「binding↔disable の競合制御」）。
+		// 受容したトレードオフを silent に握り潰さず、運用者が手動棚卸しできるよう NFR 3.1 の構造化ログで
+		// enterprise 識別子付きで可観測にする（enterprise_name は API 応答にも載る非機密値 / NFR 3.2 対象外）。
+		s.log.Warn("tenant bind conflict left an orphan enterprise in amapi",
+			logger.ActorID(actor),
+			logger.TenantID(id),
+			"enterprise_name", enterpriseName,
+		)
 		s.record(ctx, actor, id, OperationBind, ResultFailure, false, "bind conflict")
 		return TenantView{}, ErrConflict
 	}
@@ -373,13 +386,17 @@ func (s *service) RecoverStaleBindings(ctx context.Context, actor uuid.UUID, old
 	if err != nil {
 		return 0, err
 	}
-	// 回収された各行を監査記録 + 構造化ログの対象とする（Req 2.4 / NFR 3.1）。signup_url_name 等の
-	// 機密値は出さない（Event は機密フィールドを持たず、ログにも tenant id のみ載せる / NFR 3.2）。
+	// 回収された各行を監査記録 + 構造化ログの対象とする（Req 2.4 / NFR 3.1）。回収前状態は
+	// RecoverStaleBindings の sweep 条件（WHERE status='binding'）により常に binding であり、Req 2.4 の
+	// 「回収前状態」を構造化ログの structured field として明示する（監査 Event は最小契約を維持するため
+	// 状態フィールドを持たず、AC 2.4 の「監査ログまたは構造化ログ」の後者で満たす）。signup_url_name 等の
+	// 機密値は出さない（Event は機密フィールドを持たず、ログにも tenant id と状態のみ載せる / NFR 3.2）。
 	for _, id := range recovered {
 		s.record(ctx, actor, id, OperationRecover, ResultSuccess, false, "")
 		s.log.Info("tenant stale binding recovered",
 			logger.ActorID(actor),
 			logger.TenantID(id),
+			"previous_status", string(StatusBinding),
 		)
 	}
 	return len(recovered), nil
