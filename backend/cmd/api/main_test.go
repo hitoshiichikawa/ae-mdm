@@ -8,6 +8,7 @@ import (
 	goidc "github.com/coreos/go-oidc/v3/oidc"
 	"golang.org/x/oauth2"
 
+	"github.com/hitoshiichikawa/ae-mdm/internal/app"
 	"github.com/hitoshiichikawa/ae-mdm/internal/audit"
 	"github.com/hitoshiichikawa/ae-mdm/internal/config"
 	"github.com/hitoshiichikawa/ae-mdm/internal/enrollment"
@@ -218,6 +219,47 @@ func TestBuildPolicyHandler_WiresPolicyDomainNotStub(t *testing.T) {
 	if _, ok := any(h).(*policy.Handler); !ok {
 		t.Fatalf("buildPolicyHandler の戻り値型 = %T, want *policy.Handler（Policy domain 配線が"+
 			"stub/interim へ退行した疑い / NFR 2.2 / Req 5.1）", h)
+	}
+}
+
+// TestBuildAppHandler_WiresAppDomainNotStub は、main の本番 DI が App ドメイン
+// （Repository / Service / Handler）を共有ラッパ（amapiClient / auditSvc / tenantSvc /
+// authorizer）から確実に組み立て、stub / interim へ退行していないことを型レベルに回帰検知する
+// （Issue #11 / task 6 / NFR 2.1 / Req 4.1）。
+//
+// buildPolicyHandler / buildTenantRecorder の testability 方針に倣う: アダプタ単体テスト
+// （internal/app/*_test.go）は app.NewService / app.NewHandler を直接生成して契約を検証するが、
+// main wiring が誤って App 配線を落とす / stub へ巻き戻しても失敗しない。main が実際に呼ぶ
+// buildAppHandler の戻り値を assert することで、本番配線の退行（App domain の DI 欠落）を捕捉する。
+//
+// 本テストが守る AC:
+//   - NFR 2.1（AMAPI 反映は共有ラッパ経由）: Service の webTokenClient に本番 amapi.Client を配線する
+//   - 4.1（own-tenant RBAC で 3 endpoint を /api chain へ配線）: authorizer 付き Handler を組み立てる
+//
+// helper を本番 DI と同じ実型（amapi.Client / audit.Service / *authz.Authorizer / tenant.Service）で
+// 呼び、戻り値が非 nil の *app.Handler であること（= App domain が確実に配線され stub/interim へ
+// 退行していないこと）を assert する。pool は app.NewRepository(nil) が接続せず保持するだけなので
+// nil で足りる（buildPolicyHandler テストが pool=nil で構築するのと同方針 / live DB 非依存）。
+func TestBuildAppHandler_WiresAppDomainNotStub(t *testing.T) {
+	// Arrange: 本番 DI（main.go runBootstrap）と同じ実型で依存を構築する。
+	// repo は本 test で接続を伴う呼び出しをしないため pool=nil で足り、NewRepository は依存を保持するだけ。
+	auditSvc := audit.NewService(config.Config{}, nil, audit.SystemClock{}, nil)
+	tenantSvc := tenant.NewService(nil, nil, nil, config.Config{}, nil)
+	authorizer := authz.New()
+	var amapiClient amapi.Client = &amapi.StubClient{}
+
+	// Act: main が実際に呼ぶ wiring helper を通して App Handler を構築する。
+	h := buildAppHandler(nil, amapiClient, auditSvc, authorizer, tenantSvc, nil)
+
+	// Assert: App domain が確実に配線され、非 nil の *app.Handler であること
+	// （stub / interim へ退行していないこと）。
+	if h == nil {
+		t.Fatalf("buildAppHandler の戻り値が nil（App domain の DI が欠落した疑い / " +
+			"NFR 2.1 / Req 4.1）")
+	}
+	if _, ok := any(h).(*app.Handler); !ok {
+		t.Fatalf("buildAppHandler の戻り値型 = %T, want *app.Handler（App domain 配線が"+
+			"stub/interim へ退行した疑い / NFR 2.1 / Req 4.1）", h)
 	}
 }
 

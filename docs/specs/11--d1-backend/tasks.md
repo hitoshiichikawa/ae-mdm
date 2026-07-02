@@ -5,7 +5,7 @@
 > （`docs/specs/11--d1-backend/requirements.md`）の numeric ID を指す。参照モデルは `internal/policy/`。
 > 各タスクは対応する co-located `*_test.go` を同一タスク内に含む（テスト後続 deferred は 6.1 のみ）。
 
-- [ ] 1. App Repository とパッケージ雛形（tenant_apps 永続化層）
+- [x] 1. App Repository とパッケージ雛形（tenant_apps 永続化層）
   - `internal/app/doc.go`: パッケージ doc + 依存方向ルール（`policy/doc.go` に倣い、cmd を import しない /
     Handler のみ httpserver を import / amapi・tenant・audit・authz・errors・logger のみ許可）
   - `internal/app/service_types.go`: `PlayTokenRequest{parent_frame_url}` / `PlayTokenView{value}` /
@@ -26,7 +26,7 @@
   - _Requirements: 2.2, 2.3, 3.2, 3.4, 5.1_
   - _Boundary: AppRepository, AppService_
 
-- [ ] 2. App Service — webToken 発行とカタログ参照（CreatePlayToken / ListApps）
+- [x] 2. App Service — webToken 発行とカタログ参照（CreatePlayToken / ListApps）
   - `internal/app/service.go`: `Service` interface（本タスクでは `CreatePlayToken` / `ListApps` を定義）+
     consumer-defines-interface（`webTokenClient`＝amapi.Client / `enterpriseResolver`＝tenant.Service）+ `NewService` DI。
     authz は持たない（Handler の責務 / `policy/service.go` と同方針）
@@ -42,7 +42,7 @@
   - _Boundary: AppService_
   - _Depends: 1_
 
-- [ ] 3. App Service — カタログ同期（SyncApps + 監査）
+- [x] 3. App Service — カタログ同期（SyncApps + 監査）
   - `internal/app/service.go`: `Service` interface を `SyncApps` へ拡張（`policy` が task 間で interface を
     拡張したのと同方針）+ consumer-defines-interface `eventRecorder`（＝audit.Service）を追加
   - `SyncApps`: (1) `enterpriseResolver.EnterpriseNameForTenant` で bind gate・未バインドは upsert せず error 伝達
@@ -58,7 +58,7 @@
   - _Boundary: AppService_
   - _Depends: 2_
 
-- [ ] 4. App Service — 承認済みアプリ read seam（CheckAppsApproved / Requirement 5）
+- [x] 4. App Service — 承認済みアプリ read seam（CheckAppsApproved / Requirement 5）
   - `internal/app/service.go`: `Service` interface を `CheckAppsApproved(ctx, tenantID, packageNames) error` へ拡張
   - `Repository.ApprovedPackages` で自テナント承認済み集合を取得し（Req 5.1）、packageNames に未承認が 1 件でも
     あれば `ErrAppNotApproved`（422）を返す（Req 5.2）。tenant-scoped（自テナント境界のみ / RLS）
@@ -70,7 +70,7 @@
   - _Boundary: AppService_
   - _Depends: 3_
 
-- [ ] 5. App Handler — 3 endpoint + RBAC + エラー写像
+- [x] 5. App Handler — 3 endpoint + RBAC + エラー写像
   - `internal/app/handler.go`: `Mount(r chi.Router)` で `POST /play-tokens`（ActionRead）/ `GET /apps`（ActionRead）/
     `POST /apps/sync`（ActionUpdate）を登録（`tenant.Handler.Mount` パターン）。`AuthClaimsFromContext` →
     `authz.Authorizer.AuthorizeAndLog`（`ResourceApp`, `AudienceTenantConsole`, `TargetTenantID=claims.TenantID`）で
@@ -86,7 +86,7 @@
   - _Boundary: AppHandler_
   - _Depends: 4_
 
-- [ ] 6. cmd/api への配線と本番 DI 回帰検知
+- [x] 6. cmd/api への配線と本番 DI 回帰検知
   - `backend/cmd/api/main.go`: bootstrap に (12) app domain ブロックを追加。`buildAppHandler(pool, amapiClient,
     auditSvc, authorizer, tenantSvc, log)` helper を新設（`buildPolicyHandler` に倣い、既存共有インスタンス
     〔amapiClient / auditSvc / authorizer / tenantSvc〕を **再利用** し新規構築しない）。AMAPI 反映は共有ラッパ経由（NFR 2.1）
