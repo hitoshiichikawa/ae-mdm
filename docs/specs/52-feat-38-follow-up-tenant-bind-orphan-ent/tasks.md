@@ -69,7 +69,7 @@
   - _Depends: 5.2_
 
 - [ ] 6. handler.go の bind 入力契約変更・recover endpoint・create 応答整理
-- [ ] 6.1 bind body 除去・recover-bindings endpoint・create 応答変更
+- [x] 6.1 bind body 除去・recover-bindings endpoint・create 応答変更
   - `bind` handler を body から `signup_url_name` を読まない形へ変更（余分フィールドは無視 / 空 body 許容 / Req 3.3）。`Service.Bind` を id + actor で呼ぶ
   - `POST /tenants/recover-bindings` を `Mount` の sub-route に追加し `Service.RecoverStaleBindings` を呼んで `{recovered:<件数>}` を返す（Req 2.1）。olderThan は既定値
   - `createResponse` から `signup_url_name` フィールドを除去（永続化済みで bind body 不要のため / Req 3.2）。`signup_url` は維持
