@@ -46,6 +46,34 @@
   Upsert の反映件数は `RowsAffected` 積算（ON CONFLICT DO UPDATE は 1/行）で算出する方針を後続
   task 3（SyncApps）が前提にする。
 
+### Task 2
+
+- 採用方針: `internal/policy.Service`（段階拡張 interface / consumer-defines-interface / NewService DI /
+  logDeny）と同一規約で App Service の webToken 発行（CreatePlayToken）とカタログ参照（ListApps）を実装。
+- 重要な判断:
+  - **interface を 2 メソッドに限定**: policy が task 間で interface を段階拡張したのと同方針で、
+    SyncApps（task 3）/ CheckAppsApproved（task 4）は先取り定義せず本 task では CreatePlayToken /
+    ListApps のみ宣言。`var _ Service = (*service)(nil)` の compile-time check で乖離を検出する。
+  - **consumer interface の置き場所**: `webTokenClient`（CreateWebToken のみ）/ `enterpriseResolver`
+    （EnterpriseNameForTenant のみ）を service.go に最小 port として定義。amapi.Client / tenant.Service が
+    満たす。`eventRecorder`（audit）は先取りせず task 3 で NewService に追加する（本 task では未導入）。
+  - **NewService の deps 順**: `(repo, client, tenants, log)`。policy 最終形 `(repo, client, recorder,
+    tenants, log)` から recorder を除いた形にし、task 3 が recorder を client と tenants の間へ自然に
+    挿入できるようにした。
+  - **Value ログ非出力（NFR 1.1）**: 成功パスは一切ログを出さず PlayTokenView 経由でのみ Value を返す。
+    エラーパスは logDeny で deny_reason のみ記録（Value を渡さない）。fake logger の `leaks()` で全ログ
+    エントリ（msg + field 値）に Value が surface しないことを assert。Red→Green は success 経路へ
+    `s.log.Info("...", "value", token.Value)` を混ぜると FAIL することを確認済（revert 済）。
+  - **row→view 写像の置き場所**: `rowToView`（service.go の非公開関数）で TenantAppRow→TenantAppView。
+    id / tenant_id を外部露出せず package_name / title / icon_url（nullable は null 保持）/ approved_at のみ返す。
+  - **parent_frame_url 空検査**: `strings.TrimSpace(...) == ""` で空 + 空白のみを 400 に倒す（amapi
+    requireEnterpriseName / policy name 検証と同じ TrimSpace 方針）。この経路では resolver / AMAPI を
+    呼ばないことを fake の callCount で確認（Req 1.2）。Red→Green は条件を無効化すると Req 1.2 テストが
+    FAIL することを確認済（revert 済）。
+- 残存課題: task 3（SyncApps）で NewService へ `eventRecorder` を追加し interface を SyncApps へ拡張する
+  想定。task 5（Handler）は本 Service の 2 メソッドを own-tenant RBAC 配下で呼ぶ（actor は claims 由来を渡す）。
+  CreatePlayToken の `actor` 引数は現状 logDeny のみで使用（監査は webToken 発行では行わない / design 確認事項 4）。
+
 ## 確認事項
 
 - design.md / requirements.md との矛盾は認めなかった。design の確認事項（Option A の
