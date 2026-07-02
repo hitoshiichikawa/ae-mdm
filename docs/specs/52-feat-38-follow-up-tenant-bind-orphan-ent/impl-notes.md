@@ -389,4 +389,55 @@ PR #62 の codex レビュー（`aa1fb50` に対する 4 指摘 / 自動裁定 l
 - 上記 4 件（設計確定済み 2 / 設計イテレーション要 2）を除き、現時点で spec（requirements.md /
   design.md / tasks.md）と実装の間にその他の矛盾は検出していない。
 
+### PR #62 レビュー（codex round 5 / 3 findings legitimate）への対応区分
+
+PR #62 の codex レビュー（`d3bdc75` に対する 3 指摘 / 自動裁定 legitimate=3）を精読した。3 件とも
+**確定済み design.md の記述と矛盾する**か、**design が機構を未確定にした論点**であり、impl PR では
+design.md / requirements.md / tasks.md を書き換えない（設計 PR で人間レビュー済み）ため、いずれも
+behavior change を積まず返信本文で「設計と矛盾/未確定のため本 impl PR では取り込まず設計イテレーション
+or 別 Issue 再提起を推奨」と明記した。round 3 の finding 1 / finding 4 の再提起 2 件に加え、round 5 で
+新規に出た `UpdateDisabled` の `enterprise_name` 保持（finding 3）を以下に区分する。
+
+- **[round5 finding 1 / high・設計確定済み・round3 finding 1 の再提起] `service.go:322` UpdateBound
+  affected=0 経路の orphan**: disable / RecoverStaleBindings が binding を先取りして勝つと勝者の
+  CreateEnterprise 成功済み Enterprise が AMAPI 上 orphan として残る指摘。design.md「回収方式の決定」
+  (L364-368) /「binding↔disable の競合制御」(L379-383) と requirements Out of Scope（AMAPI 既存 orphan の
+  能動削除は対象外）で **明示的に受容したトレードオフ**であり、AMAPI ラッパに削除・逆引き IF が無いため
+  能動補償は構造的に不可能。UpdateBound affected=0 の敗者が disabled/pending_bind へ enterprise_name を
+  書くのは未定義遷移（NFR 1.2 / Req 4.2）で不可。既に NFR 3.1 の構造化ログ（`service.go:339-343`、
+  enterprise_name 付き）で運用者が手動棚卸しできる形に可観測化済み。**behavior change 不要**（Req 1 の
+  objective 文言「bind 中の無効化でも残さない」と design 受容トレードオフの緊張は設計 PR で確定済み /
+  再検討するなら設計イテレーション）。
+
+- **[round5 finding 2 / high・設計イテレーション要・round3 finding 4 の再提起（medium→high 昇格）]
+  `repository.go:384` recover が signup_url_name を再発行しない**: RecoverStaleBindings は status を
+  pending_bind へ戻すのみで signup_url_name を更新せず、Bind（`service.go:301`）が同じ永続値を再利用する
+  ため、元 CreateEnterprise がタイムアウト後に成功し signup URL を consume 済みだった場合、回収後の再 bind
+  が成功しない（tenant は pending_bind のため disable は可能だが bind は成立しない）。design.md「回収方式の
+  決定」(c)(L361-363) は「回収後の再 bind は **新しい signup_url** から再予約する」と意図を明記しつつ、
+  その新 signup_url を得る機構（recover 内での再発行 / 別 re-provision endpoint）が design の API Contract
+  (L318-322) に未定義。**設計意図と実装の乖離 + 機構未確定**であり、修正には (案A) Service.RecoverStaleBindings
+  が回収各行へ `amapi.CreateSignupURL` で再発行し新設 `Repository.UpdateSignupURLName` で永続化、または
+  (案B) 別 re-provision endpoint 追加、のいずれか新規契約が要る。Developer が impl PR で仕様を追加・解釈する
+  範囲を超え（PM/Architect 差し戻し相当）、加えて AMAPI signup URL の single-use 意味論は design 確認事項 1
+  (L500-504) で未検証・本環境（AMAPI + PostgreSQL 不在）で検証不能。**設計イテレーションで案A/Bを確定推奨**。
+
+- **[round5 finding 3 / medium・設計確定済み（新規）] `repository.go:432` UpdateDisabled が
+  enterprise_name を残す**: bound→disabled で `UpdateDisabled` が status のみ更新し enterprise_name を
+  クリアしないのは NFR 1.2「enterprise 識別子を bound でのみ非空として保持」の保存不変条件に反する、という
+  指摘。これは design.md「binding↔disable の競合制御」(L382-383) が「disabled 行に enterprise_name が残るのは
+  #38 既存挙動… **意図的な選択**」と、`types.go:119-121` が「無効化された行は **監査目的で** DB 上
+  enterprise_name を保持し続ける（が disabled 応答には漏らさない）」と、**監査保全のための意図的な設計判断**
+  として明記済み。NFR 1.2 を **behavioral invariant**（disabled では enterprise_name を決して露出しない）で
+  解釈しており、`ViewFromRow`（`types.go:130-132`：bound のみ載せる）・`EnterpriseNameForTenant`
+  （`service.go:548-551`：disabled は ErrTenantDisabled 返却で保存値を読まない）が既にこれを満たす。指摘は
+  NFR 1.2 を **storage invariant**（保存値そのものを NULL 化）で解釈しており、design の behavioral 解釈と
+  対立する。impl PR で保存値をクリアすると (1) design L382-383 の意図的選択を単独で覆し、(2) どの Enterprise に
+  bound していたかの監査情報を破壊し、(3) 部分一意 index（`uq_tenants_enterprise_name`）のスロットを解放する
+  behavior change になる。**behavior change 不要**（NFR 1.2 の storage/behavioral 解釈の確定は設計イテレーション
+  で design L382-383・types.go 監査保全方針と併せて判断すべき論点）。
+
+- 上記 3 件はいずれも確定済み design と矛盾/未確定であり behavior change を積まない。round 5 時点で spec
+  （requirements.md / design.md / tasks.md）と実装の間に、上記論点以外の新たな矛盾は検出していない。
+
 STATUS: complete
