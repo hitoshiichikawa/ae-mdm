@@ -341,6 +341,138 @@ func TestEnrollmentHandler_Handle_WarnLogsDoNotLeakSecrets(t *testing.T) {
 	}
 }
 
+// TestEnrollmentHandler_Handle_InvalidMode_QuarantinesWithoutRegister は additionalData.mode が
+// devices.mode enum（fully_managed / dedicated）の値域外のとき、DB enum エラーによる再処理ループ
+// （毒メッセージ）を避けて安全側で退避し、Registrar を呼ばず ack することを検証する（Req 3.6 の
+// transient 限定整合 / PR #67 reviewer 指摘）。
+func TestEnrollmentHandler_Handle_InvalidMode_QuarantinesWithoutRegister(t *testing.T) {
+	tenantID := uuid.New()
+
+	tests := []struct {
+		name string
+		mode string
+	}{
+		{name: "mode 欠落のとき退避する", mode: ""},
+		{name: "mode が未知の値のとき退避する", mode: "kiosk"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Arrange: tenant は一致させ、mode のみ不正値にする。
+			reg := &fakeEnrollmentRegistrar{}
+			unassigned := &fakeUnassigned{}
+			log := &fakeLogger{}
+			h := NewEnrollmentHandler(reg, unassigned, log)
+			env := enrollmentEnvelope(tenantID, tt.mode, "11")
+
+			// Act
+			err := h.Handle(tenantCtx(tenantID), env)
+
+			// Assert
+			if err != nil {
+				t.Fatalf("退避経路は ack（nil）を返すべき: %v", err)
+			}
+			if reg.hit != 0 {
+				t.Errorf("不正 mode では Registrar を呼ぶべきでない（毒メッセージ防止）: got %d", reg.hit)
+			}
+			if unassigned.enqueueHit != 1 {
+				t.Errorf("不正 mode では退避を 1 回行うべき: got %d", unassigned.enqueueHit)
+			}
+			assertWarnField(t, log, "quarantine_reason", quarantineReasonModeInvalid)
+		})
+	}
+}
+
+// TestEnrollmentHandler_Handle_InvalidDeviceName_QuarantinesWithoutRegister は payload.name が AMAPI
+// device リソース名（enterprises/{ent}/devices/{dev}）の形式でないとき、実端末でない junk 登録を避けて
+// 退避し、Registrar を呼ばず ack することを検証する（NFR 2.2 / PR #67 reviewer 指摘）。
+func TestEnrollmentHandler_Handle_InvalidDeviceName_QuarantinesWithoutRegister(t *testing.T) {
+	tenantID := uuid.New()
+
+	tests := []struct {
+		name       string
+		deviceName string
+	}{
+		{name: "name 欠落のとき退避する", deviceName: ""},
+		{name: "name が enterprise だけのとき退避する", deviceName: "enterprises/LC01"},
+		{name: "name の device セグメントが空のとき退避する", deviceName: "enterprises/LC01/devices/"},
+		{name: "name の enterprise セグメントが空のとき退避する", deviceName: "enterprises//devices/d1"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Arrange: additionalData（tenant 一致 / mode 正常）は保ち、payload.name のみ不正にする。
+			add := fmt.Sprintf(`{"tenant_id":%q,"issued_by":%q,"mode":"fully_managed"}`,
+				tenantID.String(), uuid.New().String())
+			payload := fmt.Sprintf(
+				`{"name":%q,"enrollmentTokenData":%q,"softwareInfo":{"androidVersion":"11"}}`,
+				tt.deviceName, add)
+			env := Envelope{
+				MessageID:        "msg-bad-name",
+				NotificationType: Enrollment,
+				EnterpriseName:   "enterprises/LC01",
+				Payload:          []byte(payload),
+			}
+			reg := &fakeEnrollmentRegistrar{}
+			unassigned := &fakeUnassigned{}
+			log := &fakeLogger{}
+			h := NewEnrollmentHandler(reg, unassigned, log)
+
+			// Act
+			err := h.Handle(tenantCtx(tenantID), env)
+
+			// Assert
+			if err != nil {
+				t.Fatalf("退避経路は ack（nil）を返すべき: %v", err)
+			}
+			if reg.hit != 0 {
+				t.Errorf("不正 device name では Registrar を呼ぶべきでない（junk 登録防止）: got %d", reg.hit)
+			}
+			if unassigned.enqueueHit != 1 {
+				t.Errorf("不正 device name では退避を 1 回行うべき: got %d", unassigned.enqueueHit)
+			}
+			assertWarnField(t, log, "quarantine_reason", quarantineReasonDeviceNameInvalid)
+		})
+	}
+}
+
+// TestEnrollmentHandler_Handle_WarnLogsIncludeDeviceName は登録失敗 / サポート対象外記録 / 退避（tenant
+// 特定後）の各 WARN に対象端末（amapi_device_name）が載り、運用者が対象端末を事後追跡できることを
+// 検証する（NFR 4.1 / PR #67 reviewer 指摘）。
+func TestEnrollmentHandler_Handle_WarnLogsIncludeDeviceName(t *testing.T) {
+	const deviceName = "enterprises/LC01/devices/d1" // enrollmentEnvelope / envelopeWithRawFields が固定で載せる name
+	ctxTenant := uuid.New()
+	otherTenant := uuid.New()
+
+	tests := []struct {
+		name         string
+		addTenant    uuid.UUID
+		android      string
+		registrarErr error
+	}{
+		{name: "登録失敗の WARN に device name", addTenant: ctxTenant, android: "11", registrarErr: transientErr()},
+		{name: "サポート対象外記録の WARN に device name", addTenant: ctxTenant, android: "9"},
+		{name: "退避（不一致）の WARN に device name", addTenant: otherTenant, android: "11"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Arrange
+			reg := &fakeEnrollmentRegistrar{err: tt.registrarErr}
+			unassigned := &fakeUnassigned{}
+			log := &fakeLogger{}
+			h := NewEnrollmentHandler(reg, unassigned, log)
+			env := enrollmentEnvelope(tt.addTenant, "fully_managed", tt.android)
+
+			// Act
+			_ = h.Handle(tenantCtx(ctxTenant), env)
+
+			// Assert
+			assertWarnField(t, log, "amapi_device_name", deviceName)
+		})
+	}
+}
+
 // assertWarnField は WARN 呼び出し列に string の key=want field が含まれることを検証する（NFR 4.1 の正検証）。
 func assertWarnField(t *testing.T, log *fakeLogger, key, want string) {
 	t.Helper()

@@ -33,6 +33,20 @@ const (
 	quarantineReasonTenantCtxMissing = "tenant_ctx_missing"
 	// quarantineReasonPayloadInvalid は payload 本体が JSON として解釈できない（安全側で退避 / NFR 2.2）。
 	quarantineReasonPayloadInvalid = "payload_invalid"
+	// quarantineReasonDeviceNameInvalid は payload.name が AMAPI device リソース名の形式でない
+	// （実端末でない junk 登録を避けて安全側で退避 / NFR 2.2）。
+	quarantineReasonDeviceNameInvalid = "device_name_invalid"
+	// quarantineReasonModeInvalid は additionalData.mode が devices.mode enum の値域外（毒メッセージ防止）。
+	// そのまま upsert すると enum への INSERT が DB エラー→transient 扱いで再処理ループになるため退避する
+	// （Req 3.6 は「再試行で回復しうる」失敗のみ保持を要求するため、非回復な不正値は退避へ倒す）。
+	quarantineReasonModeInvalid = "mode_invalid"
+)
+
+// devices.mode enum（migration 0006 の device_mode）の値域。notification は enrollment パッケージを
+// import しない（doc.go 依存方向規約）ため、突合に必要な enum ラベルのみを最小に複製する。
+const (
+	deviceModeFullyManaged = "fully_managed"
+	deviceModeDedicated    = "dedicated"
 )
 
 // EnrollmentRegistrar は ENROLLMENT 通知で確定した端末を発行元テナントの端末インベントリへ
@@ -94,63 +108,78 @@ func NewEnrollmentHandler(registrar EnrollmentRegistrar, unassigned UnassignedQu
 //
 // 手順: payload parse → additionalData parse（tenant_id 欠落 / parse 不能→退避 / Req 3.3）→
 // ctx tenant context と突合（不一致 / ctx 未確立→退避 / Req 3.2 / NFR 2.2）→ 一致時のみ登録（Req 3.1）。
-// 退避は UnassignedQueue.Enqueue を自ら呼び nil（ack）を返す（design 採用案 / Dispatcher 無改変）。
-// transient DB 失敗はそのまま返し nack 保持（Req 3.6）。機密値（payload 生値・additionalData 生値）は
-// error 文言・構造化ログに補間しない（NFR 3.1）。
+// 登録直前に payload.name / additionalData.mode の妥当性を検証し、不正なら安全側で退避する（毒メッセージ・
+// junk 登録の防止 / register 参照）。退避は UnassignedQueue.Enqueue を自ら呼び nil（ack）を返す
+// （design 採用案 / Dispatcher 無改変）。transient DB 失敗はそのまま返し nack 保持（Req 3.6）。機密値
+// （payload 生値・additionalData 生値）は error 文言・構造化ログに補間しない（NFR 3.1）。
 func (h *enrollmentHandler) Handle(ctx context.Context, env Envelope) error {
 	payload, ok := parsePayload(env.Payload)
 	if !ok {
-		// payload 本体が JSON 不正 = テナント特定不能。安全側で退避する（NFR 2.2）。
-		return h.quarantine(ctx, env, quarantineReasonPayloadInvalid)
+		// payload 本体が JSON 不正 = テナント特定不能。安全側で退避する（NFR 2.2）。payload 未 parse の
+		// ため device name は不明（空）で退避する。
+		return h.quarantine(ctx, env, "", quarantineReasonPayloadInvalid)
 	}
+	// payload から特定できた対象端末名。以降の退避 / 登録の構造化 WARN に載せて事後追跡可能にする（NFR 4.1）。
+	deviceName := strings.TrimSpace(payload.Name)
 
 	add, ok := parseAdditionalData(payload.EnrollmentTokenData)
 	if !ok || strings.TrimSpace(add.TenantID) == "" {
 		// additionalData の tenant_id 欠落 / parse 不能は退避（Req 3.3）。
-		return h.quarantine(ctx, env, quarantineReasonTenantMissing)
+		return h.quarantine(ctx, env, deviceName, quarantineReasonTenantMissing)
 	}
 
 	tc, err := db.FromContext(ctx)
 	if err != nil {
 		// ctx tenant context 未確立は安全側で退避（NFR 2.2）。DB へ触れない。
-		return h.quarantine(ctx, env, quarantineReasonTenantCtxMissing)
+		return h.quarantine(ctx, env, deviceName, quarantineReasonTenantCtxMissing)
 	}
 
 	if !tenantMatches(tc.TenantID, add.TenantID) {
 		// additionalData.tenant_id と enterprise 由来テナントの不一致は退避（Req 3.2 / NFR 2.2）。
-		return h.quarantine(ctx, env, quarantineReasonTenantMismatch)
+		return h.quarantine(ctx, env, deviceName, quarantineReasonTenantMismatch)
 	}
 
 	// 突合一致時のみ発行元テナントへ登録する（Req 3.1 / NFR 2.1）。
-	return h.register(ctx, env, payload, add)
+	return h.register(ctx, env, deviceName, payload, add)
 }
 
 // register は突合一致した端末を発行元テナントの端末インベントリへ冪等 upsert する（Req 3.1 / 3.5）。
 //
+// 登録前に payload.name / additionalData.mode の妥当性を検証する:
+//   - name が AMAPI device リソース名（enterprises/{ent}/devices/{dev}）の形式でない場合、実端末を特定
+//     できない不正 payload として退避する（enterprise_name だけ解決できる payload での junk 登録の防止 / NFR 2.2）。
+//   - mode が devices.mode enum（fully_managed/dedicated）の値域外の場合、そのまま upsert すると enum への
+//     INSERT が DB エラー→transient 扱いで無限に再処理される毒メッセージになるため退避する（Req 3.6 は
+//     「再試行で回復しうる」失敗のみ保持を要求する。非回復な不正値を nack ループに載せない）。
+//
 // androidVersion の major が 10 未満なら compliance=unsupported（サポート対象外として残す / Req 3.5）、
 // それ以外（10 以上 / 判定不能）は unknown。transient な登録失敗はそのまま返し nack 保持（Req 3.6）。
-func (h *enrollmentHandler) register(ctx context.Context, env Envelope, payload enrollmentPayload, add enrollmentAdditionalData) error {
+func (h *enrollmentHandler) register(ctx context.Context, env Envelope, deviceName string, payload enrollmentPayload, add enrollmentAdditionalData) error {
+	if !isValidDeviceName(deviceName) {
+		// payload.name が AMAPI device リソース名の形式でない = 実端末を特定できない。安全側で退避（NFR 2.2）。
+		return h.quarantine(ctx, env, deviceName, quarantineReasonDeviceNameInvalid)
+	}
+	if !isValidDeviceMode(add.Mode) {
+		// mode が devices.mode enum 値でない = 毒メッセージ。DB enum エラーによる再処理ループを避けて退避する。
+		return h.quarantine(ctx, env, deviceName, quarantineReasonModeInvalid)
+	}
+
 	compliance := complianceForAndroidVersion(payload.SoftwareInfo.AndroidVersion)
-	deviceName := strings.TrimSpace(payload.Name)
 
 	if err := h.registrar.UpsertEnrolledDevice(ctx, deviceName, add.Mode, compliance); err != nil {
-		// transient DB 失敗はそのまま返し Dispatcher の nack（再処理保持 / Req 3.6）へ写像する。
+		// transient DB 失敗はそのまま返し Dispatcher の nack（再処理保持 / Req 3.6）へ写像する。対象端末名を
+		// 載せて登録失敗を事後追跡可能にする（NFR 4.1）。
 		h.log.Warn("notification: enrolled device registration failed; will retry",
-			logger.MessageID(env.MessageID),
-			"enterprise_name", env.EnterpriseName,
-			"notification_type", string(env.NotificationType),
-			"failure_kind", "registration_failed")
+			enrollmentWarnFields(env, deviceName, "failure_kind", "registration_failed")...)
 		return err
 	}
 
 	if compliance == complianceUnsupported {
-		// サポート対象外端末を残した旨を運用者が追跡できるよう構造化 WARN（NFR 4.1）。
+		// サポート対象外端末を残した旨を運用者が対象端末とともに追跡できるよう構造化 WARN（NFR 4.1）。
 		h.log.Warn("notification: enrolled device recorded as unsupported platform",
-			logger.MessageID(env.MessageID),
-			"enterprise_name", env.EnterpriseName,
-			"notification_type", string(env.NotificationType),
-			"compliance_status", complianceUnsupported,
-			"failure_kind", "unsupported_platform")
+			enrollmentWarnFields(env, deviceName,
+				"compliance_status", complianceUnsupported,
+				"failure_kind", "unsupported_platform")...)
 	}
 	return nil
 }
@@ -160,24 +189,56 @@ func (h *enrollmentHandler) register(ctx context.Context, env Envelope, payload 
 // UnassignedQueue.Enqueue は内部で SuperAdmin context を確立し dedupe 記録 + 退避 INSERT を同一 tx で
 // 冪等実行するため、ctx tenant context が未確立でも退避できる（unassigned.go）。退避の transient DB
 // 失敗はそのまま返し nack 保持（Req 3.6）。退避理由は非機密 enum ラベルで構造化 WARN（NFR 4.1）し、
-// payload 生値・additionalData 生値は補間しない（NFR 3.1）。
-func (h *enrollmentHandler) quarantine(ctx context.Context, env Envelope, reason string) error {
+// deviceName が特定できていれば対象端末として併記する（payload 未 parse 時は空で省略）。payload 生値・
+// additionalData 生値は補間しない（NFR 3.1）。
+func (h *enrollmentHandler) quarantine(ctx context.Context, env Envelope, deviceName, reason string) error {
 	if err := h.unassigned.Enqueue(ctx, env); err != nil {
 		h.log.Warn("notification: enrollment quarantine enqueue failed; will retry",
-			logger.MessageID(env.MessageID),
-			"enterprise_name", env.EnterpriseName,
-			"notification_type", string(env.NotificationType),
-			"quarantine_reason", reason,
-			"failure_kind", "quarantine_enqueue_failed")
+			enrollmentWarnFields(env, deviceName,
+				"quarantine_reason", reason,
+				"failure_kind", "quarantine_enqueue_failed")...)
 		return err
 	}
 	h.log.Warn("notification: enrollment notification quarantined to unassigned queue",
+		enrollmentWarnFields(env, deviceName,
+			"quarantine_reason", reason,
+			"failure_kind", "quarantined")...)
+	return nil
+}
+
+// enrollmentWarnFields は enrollment 通知処理の構造化 WARN 共通 field を組み立てる（NFR 4.1）。
+//
+// message_id / enterprise_name / notification_type の非機密 field を常に載せ、対象端末名
+// （amapi_device_name）は payload から特定できた場合のみ載せる（payload 不正で未特定なら省略）。
+// amapi_device_name は AMAPI リソース名であり秘密値ではない（NFR 3.1 の秘密値は Value / QRCode のみ）。
+// extra には呼び出しごとの追加 key/value ペアを渡す。
+func enrollmentWarnFields(env Envelope, deviceName string, extra ...any) []any {
+	fields := []any{
 		logger.MessageID(env.MessageID),
 		"enterprise_name", env.EnterpriseName,
 		"notification_type", string(env.NotificationType),
-		"quarantine_reason", reason,
-		"failure_kind", "quarantined")
-	return nil
+	}
+	if deviceName != "" {
+		fields = append(fields, "amapi_device_name", deviceName)
+	}
+	return append(fields, extra...)
+}
+
+// isValidDeviceMode は additionalData.mode が devices.mode enum（fully_managed / dedicated）の値域内かを
+// 判定する純粋関数。値域外（空文字含む）は false を返し、呼び出し側で毒メッセージとして退避へ倒す。
+func isValidDeviceMode(mode string) bool {
+	return mode == deviceModeFullyManaged || mode == deviceModeDedicated
+}
+
+// isValidDeviceName は payload.name が AMAPI device リソース名（enterprises/{ent}/devices/{dev}）の形式かを
+// 判定する純粋関数。4 セグメント かつ 各識別子が非空 の場合のみ true を返す。空文字・enterprise だけ・
+// device セグメント欠落等は false を返し、実端末でない junk 登録を防ぐ（NFR 2.2）。
+func isValidDeviceName(name string) bool {
+	parts := strings.Split(name, "/")
+	if len(parts) != 4 {
+		return false
+	}
+	return parts[0] == "enterprises" && parts[1] != "" && parts[2] == "devices" && parts[3] != ""
 }
 
 // parsePayload は env.Payload を enrollmentPayload へ unmarshal する。JSON 不正なら ok=false を返す
