@@ -20,7 +20,7 @@
   - _Requirements: 1.1, 1.2, 1.3, 1.4, 1.5, 1.6, 5.1, 5.2, NFR 3.1_
   - _Depends: 1_
 
-- [ ] 3. Enrollment Handler + cmd/api 配線
+- [x] 3. Enrollment Handler + cmd/api 配線
   - `internal/enrollment/handler.go`: `/api/enrollment-tokens` の `POST`（発行）/ `GET`（一覧）。`httpserver.AuthClaimsFromContext` + `authz.AuthorizeAndLog`（`ResourceEnrollment` × `ActionCreate`(POST) / `ActionRead`(GET)、`TargetTenantID=claims.TenantID`）で own-tenant RBAC。deny→403 / claims 不在→401（`policy.Handler` を手本）。Service エラーは `pkgerrors.WriteHTTP` で写像。`chi.Router` 内包で Mount 互換
   - `cmd/api/main.go`: `policySvc` を `buildPolicyHandler` 内部から main レベルへ引き上げ、enrollment の `policyChecker` アダプタ（`policy.Service.Get` で存在検証 + `policyID.String()` を amapi policy id として返す / design「Existing Architecture Analysis」の命名不変条件）と共有。`enrollment.NewTokenRepository` / `NewService`（amapiClient / auditSvc / tenantSvc / policyChecker 再利用）/ `NewHandler` を構築し `routers.API.Mount("/enrollment-tokens", handler)`
   - 単体テスト: (1) Viewer の POST→403（Req 2.2）、(2) TenantAdmin / Operator の POST→200（Req 2.1）、(3) 越境（他テナント policy 指定）→非露出 404 / 自テナント外アクセス不可（Req 2.3）、(4) GET が `expires_at` 由来 status（active/expired）を返す（Req 4.1）、(5) 不正 JSON→400。`cmd/api` main_test で enrollment 配線の型レベル回帰（`buildPolicyHandler` の testability 方針を踏襲）
