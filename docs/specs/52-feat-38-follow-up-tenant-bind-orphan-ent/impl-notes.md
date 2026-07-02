@@ -243,6 +243,27 @@ per-task ループで実装を進める。本ファイルは各 task の learnin
 
 ## 確認事項
 
+- **【要人間判断 / task 7.1】fixture 修正 commit が marker 後方に積まれた（post-marker / 非 docs）**:
+  task 7.1 の marker（`docs(tasks): mark 7.1 as done` = `0492658`）確定後に、既存 UpdateBound
+  integration test の fixture 追従（`efcabae` test(#52): `tenant_repository_test.go` = **非 docs**）と
+  その記録更新（`350c7c5` docs(impl-notes)）を追加 commit した。これは fixture 破損を marker 確定
+  **後**に検出し、per-task 制約（`git reset` / `git rebase` 禁止 = 既存 commit 温存）により commit 順序を
+  後付けで是正できなかったため（`既存 commit と矛盾する変更 → 追加 commit or 確認事項で人間判断` の
+  後者に該当）。結果、watcher の `pt_resolve_diff_range(7.1)` は review range 終端を `0492658` に固定し、
+  post-marker 群 {`9e87504`,`eabd04a`,`efcabae`,`350c7c5`} のうち `efcabae` が
+  `POST_MARKER_DOCS_ALLOWLIST`（`**/impl-notes.md,docs/specs/**/*.md`）外の非 docs 変更のため
+  `pt_classify_post_marker_paths` が `mixed` 判定 → **docs-only-auto-refresh は発火せず**、既定
+  `POST_MARKER_RECOVERY_MODE=fail-with-diagnostic` では task 7.1 の per-task Reviewer 起動前に
+  rc=5（silent range truncation 検出）で escalate し得る。
+  - **修正内容自体は正しく検証済み**（design.md L138/L151/L251 で `UpdateBound WHERE status='binding'` は
+    確定 / assert 非緩和・ARRANGE への `ReserveBinding` 追加のみ / `go build`・`go test ./internal/tenant/...`・
+    `./test/integration/...` は green [integration は DB env 未設定で self-skip]）。mechanics（marker 位置）の
+    問題であってレビュー対象コードの欠陥ではない。
+  - **推奨解消策（いずれか / 人間判断）**: (1) task 7.1 の per-task Reviewer 起動を
+    `POST_MARKER_RECOVERY_MODE=extend-range`（review range を HEAD まで拡張し `efcabae` を含める documented
+    opt-in）で回す、(2) 人間が marker を HEAD へ refresh する、(3) diagnostic を受けて手動レビュー。
+    orchestrator は reset/rebase 禁止・pushed 済みブランチのため history 書き換えは選択しなかった。
+
 - **task 6.1 の boundary 拡張（handler.go 外への意図的な cross-file cleanup 完了）**: task 6.1 の
   `_Boundary:_` は `handler.go` のみだが、`types.go`（`BindInput.SignupURLName` 削除）/
   `service.go`（`Service` interface への `RecoverStaleBindings` 宣言）/ `service_test.go`
