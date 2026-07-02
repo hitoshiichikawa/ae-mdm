@@ -13,7 +13,7 @@
   - 単体テスト: additionalData の JSON marshal（tenant_id/issued_by/mode を含む / Req 1.3）、`expires_at` からの `Status`（active/expired）派生（Req 4.1）、`TokenRow` に秘密値 field が無いこと（NFR 3.1）を pure helper で検証
   - _Requirements: 1.3, 4.1, NFR 3.1_
 
-- [ ] 2. Enrollment Service（トークン発行 + 一覧）
+- [x] 2. Enrollment Service（トークン発行 + 一覧）
   - `internal/enrollment/service.go`: `Service`（`IssueToken` / `ListTokens`）実装。手順: validateMode（不正/未指定→`ErrInvalidMode` で AMAPI 非呼出 / Req 1.4）→ DEDICATED は `policyChecker.ResolveOwnedPolicy` で自テナント policy 検証（未指定/不在→エラー / Req 1.5）→ `enterpriseResolver.EnterpriseNameForTenant`（bound のみ / Req 2.3 前提）→ additionalData 組立 → `amapi.Client.CreateEnrollmentToken`（`AllowPersonalUsage=PERSONAL_USAGE_DISALLOWED` 固定、DEDICATED は `PolicyName`=amapi policy id / Req 1.1 / 1.2）→ AMAPI エラー時は snapshot 非永続化で伝達（Req 1.6）→ `TokenRepository.Insert`（AMAPI-first、永続化失敗は inconsistency ERROR ログ）→ `eventRecorder.Record`（`enrollment_token_issue`、Detail は `{mode, expires_at, result}` のみ / Req 5.1 / 5.2）→ `TokenView`（Value/QRCode を一度だけ返却）
   - `ListTokens`: `TokenRepository.List` → `TokenSummary`（`expires_at` から status 派生 / Req 4.1）
   - 単体テスト（`amapi.StubClient` + fake ports）: (1) FULLY_MANAGED で AllowPersonalUsage=DISALLOWED + additionalData 検証（Req 1.1 / 1.3）、(2) DEDICATED で PolicyName 設定（Req 1.2）、(3) 不正モード→ErrInvalidMode・AMAPI 非呼出（Req 1.4）、(4) DEDICATED policy 不在→発行せずエラー（Req 1.5）、(5) AMAPI エラー→Insert 非呼出 + failure 監査（Req 1.6 / 5.1）、(6) 監査 Detail / TokenView 以外に Value/QRCode 非混入（Req 5.2 / NFR 3.1）
