@@ -22,7 +22,19 @@
   - `TenantComplianceCount` は `AggregateOverview` の flat 集計 1 行（GROUP BY tenant_id, compliance_status）、`TenantOverview` は tenant 単位に畳み込んだ 4 分類 0 埋め応答型として別型化。
 - **残存課題**: 後続 task 3 以降で Repository / Service / StatusApplier / Handler の interface と実装を追加する際、本 types.go の DTO 型を参照する。`ListFilter` のページング既定（page=1 / page_size=50 / 上限 200 clamp）は Handler（task 7）が補完する契約であり、型側では既定値を持たせていない（zero-value は Handler が解釈）。
 
+### Task 3
+
+- **採用方針**: `repository.go` を `policy.Repository` と同構造で実装（`rowScanner` / `scanDeviceRow` / `mapGetError` / `wrapSentinel` / `BeginTxFunc` 昇格なし / `RowsAffected()` 返却）。tenant-scoped は ambient TenantContext のまま RLS に分離を委ね、`AggregateOverview` のみ SuperAdmin ctx を信頼。
+- **重要な判断**:
+  - jsonb ↔ `json.RawMessage` は本 codebase に前例が無いため、`notification.scanUnassigned` の「jsonb→`[]byte` 中間変数→変換」手本に倣い、**scan は `[]byte` 経由**（`json.RawMessage(bytes)`）、**bind は `[]byte`（nil→NULL）+ `::jsonb` cast** とした。pgx v5.6.0 の named-slice-type scan / enum-OID encode の不確実性を回避し runtime で確実に動く形にした（notification の `[]byte`→jsonb bind 前例で裏付け）。enum は text 生ラベルを `string` 経由 scan、bind は `*string`（nil→NULL）+ `::compliance_status`/`::device_mode` cast（index を潰さないよう列は bare 保持）。
+  - `ListByTenant` は動的 WHERE をプレースホルダ番号を動的採番して組む。sync フィルタは Service.isSyncDelayed と同意味論（strict `<` / NULL は非遅延）。ページング安定化のため `ORDER BY enrolled_at ASC, id ASC` を必須付与。既定値補完は Handler 責務のため受領値をそのまま使用。
+  - `UpdateFromStatusReport` は design 記載どおり `WHERE amapi_device_name=$1`（(tenant_id, amapi_device_name) UNIQUE + RLS で高々 1 行）。全カラム `COALESCE($n, col)` で欠落=既存値保持。affected=0（未登録端末）は error に倒さず `(0, nil)`。
+- **残存課題**: enum/jsonb の実 DB bind/scan 検証は `test/integration/device_repository_test.go`（+ `seedDevice` の enum/jsonb cast INSERT）が担保するが、当環境は `DATABASE_URL` 未設定で **t.Skip**（compile のみ確認）。CI / DB 有り環境で実行し bind/scan の runtime 妥当性を最終確認されたい。NFR 1.1（index 妥当性 EXPLAIN）は task 8.1 の deferred。
+
 ## 確認事項
+
+- **実 DB repository テストの配置（task 文面との差異）**: task 3 文面は実 DB テストを `repository_test.go` と記すが、本 codebase の実 DB harness（`requireDBURLs`/`seedDummyData`/`newAppPool`/migration）は `test/integration`（package `integration_test`）内にしか無く、design.md File Structure Plan も「実 DB 結合は `backend/test/integration/`」と規定する。したがって実 DB テストは `backend/test/integration/device_repository_test.go` に配置し、`internal/device/repository_test.go` は DB 非依存の near-neighbor 単体テスト（scan / error mapping / bind helper）に充てた。spec 本文は書き換えていない。
+- **jsonb / enum の pgx bind/scan 実装判断**: jsonb は `json.RawMessage`↔`[]byte` 経由（`::jsonb` cast bind / `[]byte` scan）、enum は `string` 経由（`::compliance_status`/`::device_mode` cast bind / text scan）とした（前例 `notification.scanUnassigned` 準拠 / 詳細は上記 Task 3 learning）。`seedDevice` helper も同 cast で INSERT し、実 DB 実行時に SQL 契約を二重に検証する。
 
 - **migration 採番の 0018→0019 変更（人間確認事項）**: tasks.md / design.md は本 task の migration を `0018` と記載しているが、実作業ツリーには既に `0018_tenant_binding_state_and_signup_url.{up,down}.sql`（Issue #52 の再採番済み migration）が存在し `0018` は使用できない。design.md Risks 節（「migration 番号衝突 … merge 順で再採番が必要になり得る点を PR で明示する」）に従い、番号のみ `0019` に採番して実装した。spec（tasks.md / design.md）本文は書き換えていない。develop への merge 順によっては別 in-flight branch と `0019` が再衝突し、再々採番が必要になり得る点を merge 時に確認されたい。
 
