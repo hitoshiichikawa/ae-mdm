@@ -4,6 +4,7 @@ import (
 	"context"
 	stdErrors "errors"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -316,5 +317,344 @@ func TestTenantRepository_NonSuperAdminContext_TenantIsolation(t *testing.T) {
 	}
 	if got.ID != createdID {
 		t.Errorf("SuperAdmin Get().ID = %v; want %v", got.ID, createdID)
+	}
+}
+
+// 以下は Issue #52（#38 follow-up: Tenant Bind 競合制御強化）task 7.1 で追加した
+// 予約 / 解放 / 回収 / 束縛 / binding↔disable の競合テスト。先行 task 3.1（Req 1.1/1.4/1.5）・
+// task 3.2（Req 2.1）が `_Requirements_partial:_` 明示で task 7.1 へ deferred した「実 PostgreSQL を
+// 要する affected rows / sweep 挙動」の regression を解消する。DATABASE_URL 未設定環境では
+// requireDBURLs が t.Skip するため DB 不在でも false-fail しない（helpers_test.go の規約）。
+//
+// 検証シナリオ（tasks.md task 7.1 L84-90）:
+//   (1) ReserveBinding 並行: 同一 id 2 回で affected 1/0（Req 1.1 / NFR 2.1、orphan 防止の DB 層証跡）
+//   (2) ReleaseBinding: binding→pending_bind affected=1、pending_bind 行は affected=0（Req 1.5）
+//   (3) RecoverStaleBindings: 古い binding（updated_at 過去）のみ回収、新しい binding 据え置き（Req 2.1）
+//   (4) UpdateBound WHERE status='binding': pending_bind 行への UpdateBound affected=0（Req 1.4 の WHERE 変更回帰）
+//       / binding 行への UpdateBound affected=1 で bound 確定（対比・正常系）
+//   (5) binding↔disable: binding 行に UpdateDisabled affected=1、その後 UpdateBound affected=0（Req 1.6）
+//   (6) signup_url_name 永続化往復: Insert→Get で signup_url_name 一致 / 空文字は NULL→空文字写像（Req 3.1）
+//
+// enum 4 値 + signup_url_name 列の可逆性（Req 4.1）は既存 `migrations_reversible_test`（0017 込みの
+// 全 down→up）が担保するため本ファイルには重複追加しない。本ファイルの各テストが 0017 適用済み
+// スキーマ上で `binding` enum 値と `signup_url_name` 列を実際に往復させることで Req 4.1 の実挙動
+// 証跡を兼ねる（tasks.md L90 の整理）。
+
+// TestTenantRepository_ReserveBinding_ConcurrentWinnerAndLoser はシナリオ (1) 対応。
+// 同一 pending_bind テナントへの ReserveBinding を 2 回発行し、1 回目のみ勝者（affected=1、
+// pending_bind→binding）、2 回目は敗者（affected=0、既に binding）となることを確認する。
+// これは並行 bind で勝者 1 要求のみが CreateEnterprise に進み orphan Enterprise を作らない
+// ことの DB 層証跡（Req 1.1 / NFR 2.1）。
+func TestTenantRepository_ReserveBinding_ConcurrentWinnerAndLoser(t *testing.T) {
+	// Arrange
+	repo, ctx, cleanup := setupTenantRepo(t)
+	defer cleanup()
+	id := uuid.New()
+	if err := repo.Insert(ctx, tenant.TenantRow{ID: id, Name: "Reserve Target"}); err != nil {
+		t.Fatalf("Insert: %v", err)
+	}
+
+	// Act + Assert: 1 回目の予約は勝者（pending_bind→binding）で affected=1
+	affected1, err := repo.ReserveBinding(ctx, id)
+	if err != nil {
+		t.Fatalf("ReserveBinding(1): %v", err)
+	}
+	if affected1 != 1 {
+		t.Fatalf("ReserveBinding(1) affected = %d; want 1（勝者）", affected1)
+	}
+
+	// Act + Assert: 2 回目の予約は敗者（既に binding）で affected=0
+	affected2, err := repo.ReserveBinding(ctx, id)
+	if err != nil {
+		t.Fatalf("ReserveBinding(2): %v", err)
+	}
+	if affected2 != 0 {
+		t.Errorf("ReserveBinding(2) affected = %d; want 0（敗者・既に binding）", affected2)
+	}
+
+	// Assert: 状態は binding（勝者が確定した予約状態 / orphan 防止の DB 層証跡）
+	got, err := repo.Get(ctx, id)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got.Status != tenant.StatusBinding {
+		t.Errorf("Get().Status = %q; want %q", got.Status, tenant.StatusBinding)
+	}
+}
+
+// TestTenantRepository_ReleaseBinding_AffectedAndIdempotent はシナリオ (2) 対応。
+// binding 行への初回 ReleaseBinding は affected=1 で pending_bind へ戻り、2 回目（既に
+// pending_bind の行）は WHERE status='binding' に掛からず affected=0 となる。binding でない
+// 行は解放対象外であることを併せて確認する（Req 1.5 / CreateEnterprise 失敗時の再 bind 可能化）。
+func TestTenantRepository_ReleaseBinding_AffectedAndIdempotent(t *testing.T) {
+	// Arrange: binding 行を作る（Insert→ReserveBinding）
+	repo, ctx, cleanup := setupTenantRepo(t)
+	defer cleanup()
+	id := uuid.New()
+	if err := repo.Insert(ctx, tenant.TenantRow{ID: id, Name: "Release Target"}); err != nil {
+		t.Fatalf("Insert: %v", err)
+	}
+	if affected, err := repo.ReserveBinding(ctx, id); err != nil || affected != 1 {
+		t.Fatalf("ReserveBinding(setup): affected=%d err=%v; want affected=1 err=nil", affected, err)
+	}
+
+	// Act + Assert: binding→pending_bind 解放は affected=1
+	affected1, err := repo.ReleaseBinding(ctx, id)
+	if err != nil {
+		t.Fatalf("ReleaseBinding(1): %v", err)
+	}
+	if affected1 != 1 {
+		t.Fatalf("ReleaseBinding(1) affected = %d; want 1", affected1)
+	}
+	got, err := repo.Get(ctx, id)
+	if err != nil {
+		t.Fatalf("Get after release: %v", err)
+	}
+	if got.Status != tenant.StatusPendingBind {
+		t.Errorf("Get().Status = %q; want %q（解放後）", got.Status, tenant.StatusPendingBind)
+	}
+
+	// Act + Assert: 既に pending_bind の行への再解放は affected=0（binding でない行は対象外）
+	affected2, err := repo.ReleaseBinding(ctx, id)
+	if err != nil {
+		t.Fatalf("ReleaseBinding(2): %v", err)
+	}
+	if affected2 != 0 {
+		t.Errorf("ReleaseBinding(2) affected = %d; want 0（既に pending_bind）", affected2)
+	}
+}
+
+// TestTenantRepository_RecoverStaleBindings_RecoversOnlyStale はシナリオ (3) 対応。
+// 2 つの binding 行のうち updated_at を過去へ寄せた古い方だけがしきい値に掛かって回収され
+// （pending_bind へ戻る）、新しい方は binding のまま据え置かれることを確認する（Req 2.1）。
+//
+// `tenants.updated_at` には自動更新トリガーが無く、Repository には updated_at を過去へ設定する
+// メソッドが無いため、エイジングは pool 直叩き（SuperAdmin ctx で RLS 通過）で行う。setupTenantRepo
+// は repo しか返さないので、isolation test と同様に個別 setup を組む（helper シグネチャは変更しない）。
+func TestTenantRepository_RecoverStaleBindings_RecoversOnlyStale(t *testing.T) {
+	// Arrange: pool 直叩きが必要なため isolation test と同じ手順で個別 setup する。
+	urls := requireDBURLs(t)
+	ctx, cancel := context.WithTimeout(context.Background(), connectTimeout)
+	defer cancel()
+	applyMigrationsUp(t, urls.migrate)
+	truncateAll(t, ctx, urls)
+	pool := newAppPool(t, ctx, urls)
+	defer pool.Close()
+
+	repo := tenant.NewRepository(pool)
+	saCtx := platformdb.WithTenantContext(ctx, platformdb.TenantContext{
+		TenantID:     uuid.Nil,
+		IsSuperAdmin: true,
+	})
+
+	// 2 つの binding 行を用意（各 Insert→ReserveBinding）。
+	staleID := uuid.New()
+	freshID := uuid.New()
+	for _, id := range []uuid.UUID{staleID, freshID} {
+		if err := repo.Insert(saCtx, tenant.TenantRow{ID: id, Name: "Recover Target"}); err != nil {
+			t.Fatalf("Insert(%v): %v", id, err)
+		}
+		if affected, err := repo.ReserveBinding(saCtx, id); err != nil || affected != 1 {
+			t.Fatalf("ReserveBinding(%v): affected=%d err=%v; want affected=1 err=nil", id, affected, err)
+		}
+	}
+
+	// stale 側の updated_at を 1 時間前へ寄せる（pool 直叩き / SuperAdmin ctx で RLS 通過）。
+	// しきい値評価は DB 側 now() 基準（RecoverStaleBindings 実装）なので DB 内で相対的に古くする。
+	if err := platformdb.BeginTxFunc(saCtx, pool, func(tx pgx.Tx) error {
+		_, execErr := tx.Exec(ctx,
+			`UPDATE tenants SET updated_at = now() - make_interval(secs => $1) WHERE id = $2`,
+			(1 * time.Hour).Seconds(), staleID)
+		return execErr
+	}); err != nil {
+		t.Fatalf("updated_at のエイジング UPDATE: %v", err)
+	}
+
+	// Act: しきい値 30 分で回収（stale=1h 前は該当、fresh=直近は非該当）。
+	recovered, err := repo.RecoverStaleBindings(saCtx, 30*time.Minute)
+	if err != nil {
+		t.Fatalf("RecoverStaleBindings: %v", err)
+	}
+
+	// Assert: 回収対象は stale 側 1 件のみ。
+	if len(recovered) != 1 {
+		t.Fatalf("recovered len = %d; want 1（stale のみ回収）", len(recovered))
+	}
+	if recovered[0] != staleID {
+		t.Errorf("recovered[0] = %v; want %v（stale id）", recovered[0], staleID)
+	}
+
+	// Assert: stale 側は pending_bind へ回収、fresh 側は binding 据え置き。
+	gotStale, err := repo.Get(saCtx, staleID)
+	if err != nil {
+		t.Fatalf("Get(stale): %v", err)
+	}
+	if gotStale.Status != tenant.StatusPendingBind {
+		t.Errorf("stale.Status = %q; want %q（回収済み）", gotStale.Status, tenant.StatusPendingBind)
+	}
+	gotFresh, err := repo.Get(saCtx, freshID)
+	if err != nil {
+		t.Fatalf("Get(fresh): %v", err)
+	}
+	if gotFresh.Status != tenant.StatusBinding {
+		t.Errorf("fresh.Status = %q; want %q（据え置き）", gotFresh.Status, tenant.StatusBinding)
+	}
+}
+
+// TestTenantRepository_UpdateBound_PendingBindRowNotAffected はシナリオ (4) 対応。
+// #52 で UpdateBound の WHERE が status='pending_bind' から status='binding' へ変更された回帰を
+// 検証する。ReserveBinding を経ていない pending_bind 行への UpdateBound は WHERE に掛からず
+// affected=0 となり、bound へ部分遷移しない（Req 1.4 / Req 4.3）。
+func TestTenantRepository_UpdateBound_PendingBindRowNotAffected(t *testing.T) {
+	// Arrange: pending_bind 行（Insert 直後、ReserveBinding せず）
+	repo, ctx, cleanup := setupTenantRepo(t)
+	defer cleanup()
+	id := uuid.New()
+	if err := repo.Insert(ctx, tenant.TenantRow{ID: id, Name: "PendingBind Row"}); err != nil {
+		t.Fatalf("Insert: %v", err)
+	}
+
+	// Act: WHERE status='binding' へ変更されたため pending_bind 行は対象外
+	affected, err := repo.UpdateBound(ctx, id, "enterprises/LC9001")
+	if err != nil {
+		t.Fatalf("UpdateBound: %v", err)
+	}
+
+	// Assert: affected=0（Req 1.4 の WHERE 変更回帰）かつ状態は pending_bind のまま（部分遷移なし）
+	if affected != 0 {
+		t.Errorf("UpdateBound(pending_bind) affected = %d; want 0（WHERE binding）", affected)
+	}
+	got, err := repo.Get(ctx, id)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got.Status != tenant.StatusPendingBind {
+		t.Errorf("Get().Status = %q; want %q（bound へ部分遷移しない）", got.Status, tenant.StatusPendingBind)
+	}
+}
+
+// TestTenantRepository_UpdateBound_BindingRowConfirmsBound はシナリオ (4) の対比（正常系）。
+// 予約勝者（binding）への UpdateBound は affected=1 で bound へ確定し enterprise_name を保存する
+// （2 段確定の確定側 / Req 1.4）。シナリオ (4) の pending_bind 行 affected=0 と対で WHERE binding の
+// 意味を明確化する。
+func TestTenantRepository_UpdateBound_BindingRowConfirmsBound(t *testing.T) {
+	// Arrange: binding 行（Insert→ReserveBinding）
+	repo, ctx, cleanup := setupTenantRepo(t)
+	defer cleanup()
+	id := uuid.New()
+	if err := repo.Insert(ctx, tenant.TenantRow{ID: id, Name: "Binding Row"}); err != nil {
+		t.Fatalf("Insert: %v", err)
+	}
+	if affected, err := repo.ReserveBinding(ctx, id); err != nil || affected != 1 {
+		t.Fatalf("ReserveBinding(setup): affected=%d err=%v; want affected=1 err=nil", affected, err)
+	}
+
+	// Act: 予約勝者（binding）への UpdateBound は affected=1 で bound 確定
+	affected, err := repo.UpdateBound(ctx, id, "enterprises/LC9002")
+	if err != nil {
+		t.Fatalf("UpdateBound: %v", err)
+	}
+
+	// Assert: affected=1 かつ bound + enterprise_name 保存
+	if affected != 1 {
+		t.Fatalf("UpdateBound(binding) affected = %d; want 1", affected)
+	}
+	got, err := repo.Get(ctx, id)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got.Status != tenant.StatusBound {
+		t.Errorf("Get().Status = %q; want %q", got.Status, tenant.StatusBound)
+	}
+	if got.EnterpriseName != "enterprises/LC9002" {
+		t.Errorf("Get().EnterpriseName = %q; want %q", got.EnterpriseName, "enterprises/LC9002")
+	}
+}
+
+// TestTenantRepository_BindingDisableConflict はシナリオ (5) 対応。
+// binding 行への UpdateDisabled は affected=1 で disabled へ遷移し監査列（disabled_at /
+// disabled_by）を記録する。無効化の勝者確定後、同 id への UpdateBound は status が binding では
+// ないため affected=0（binding↔disable 競合の敗者）となり、予約中要求と無効化要求のいずれか
+// 一方のみが確定することを確認する（Req 1.6）。
+func TestTenantRepository_BindingDisableConflict(t *testing.T) {
+	// Arrange: binding 行（Insert→ReserveBinding）
+	repo, ctx, cleanup := setupTenantRepo(t)
+	defer cleanup()
+	id := uuid.New()
+	actor := uuid.New()
+	if err := repo.Insert(ctx, tenant.TenantRow{ID: id, Name: "Binding Disable Target"}); err != nil {
+		t.Fatalf("Insert: %v", err)
+	}
+	if affected, err := repo.ReserveBinding(ctx, id); err != nil || affected != 1 {
+		t.Fatalf("ReserveBinding(setup): affected=%d err=%v; want affected=1 err=nil", affected, err)
+	}
+
+	// Act + Assert: binding 行への UpdateDisabled は affected=1 で disabled 遷移
+	disabledAffected, err := repo.UpdateDisabled(ctx, id, actor)
+	if err != nil {
+		t.Fatalf("UpdateDisabled: %v", err)
+	}
+	if disabledAffected != 1 {
+		t.Fatalf("UpdateDisabled(binding) affected = %d; want 1", disabledAffected)
+	}
+	got, err := repo.Get(ctx, id)
+	if err != nil {
+		t.Fatalf("Get after disable: %v", err)
+	}
+	if got.Status != tenant.StatusDisabled {
+		t.Errorf("Get().Status = %q; want %q", got.Status, tenant.StatusDisabled)
+	}
+	if got.DisabledAt == nil {
+		t.Errorf("Get().DisabledAt = nil; want 非 nil（監査列記録）")
+	}
+	if got.DisabledBy == nil {
+		t.Errorf("Get().DisabledBy = nil; want %v", actor)
+	} else if *got.DisabledBy != actor {
+		t.Errorf("Get().DisabledBy = %v; want %v", *got.DisabledBy, actor)
+	}
+
+	// Act + Assert: 無効化の勝者確定後、同 id への UpdateBound は affected=0（binding↔disable 競合の敗者）
+	boundAffected, err := repo.UpdateBound(ctx, id, "enterprises/LC9003")
+	if err != nil {
+		t.Fatalf("UpdateBound after disable: %v", err)
+	}
+	if boundAffected != 0 {
+		t.Errorf("UpdateBound(disabled) affected = %d; want 0（binding↔disable 競合の敗者 / Req 1.6）", boundAffected)
+	}
+}
+
+// TestTenantRepository_SignupURLName_PersistRoundTrip はシナリオ (6) 対応。
+// Insert で永続化した signup_url_name が Get で往復一致し、未指定（空文字）の行は
+// NULL→空文字写像で Get も空文字になることを確認する（発行元テナントへの束縛の正本 / Req 3.1）。
+func TestTenantRepository_SignupURLName_PersistRoundTrip(t *testing.T) {
+	// Arrange
+	repo, ctx, cleanup := setupTenantRepo(t)
+	defer cleanup()
+
+	// Act + Assert: signup_url_name 指定で Insert→Get が一致（永続化往復）
+	withURL := uuid.New()
+	const signupURLName = "signupUrls/C-ABC123DEF"
+	if err := repo.Insert(ctx, tenant.TenantRow{ID: withURL, Name: "With SignupURL", SignupURLName: signupURLName}); err != nil {
+		t.Fatalf("Insert(with signup_url_name): %v", err)
+	}
+	got, err := repo.Get(ctx, withURL)
+	if err != nil {
+		t.Fatalf("Get(with signup_url_name): %v", err)
+	}
+	if got.SignupURLName != signupURLName {
+		t.Errorf("Get().SignupURLName = %q; want %q（永続化往復）", got.SignupURLName, signupURLName)
+	}
+
+	// Act + Assert: signup_url_name 未指定（空文字）は NULL→空文字写像で Get も空文字
+	withoutURL := uuid.New()
+	if err := repo.Insert(ctx, tenant.TenantRow{ID: withoutURL, Name: "Without SignupURL"}); err != nil {
+		t.Fatalf("Insert(without signup_url_name): %v", err)
+	}
+	gotEmpty, err := repo.Get(ctx, withoutURL)
+	if err != nil {
+		t.Fatalf("Get(without signup_url_name): %v", err)
+	}
+	if gotEmpty.SignupURLName != "" {
+		t.Errorf("Get().SignupURLName = %q; want \"\"（NULL→空文字写像）", gotEmpty.SignupURLName)
 	}
 }
