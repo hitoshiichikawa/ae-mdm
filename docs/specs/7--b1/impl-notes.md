@@ -96,6 +96,40 @@
 > `TestHandler_Issue_NoClaims_Returns401`。cmd/api 配線回帰: `TestBuildEnrollmentHandler_WiresEnrollmentDomainNotStub`。
 > **確認事項**: なし（design/tasks との矛盾は検出せず。spec 本文は未改変）。
 
+### Task 4
+
+- **採用方針**: `repository.go`（TokenRepository）を手本に `Registrar.UpsertEnrolledDevice` を追加し、
+  ctx 由来 tenant_id を明示 bind した `INSERT ... ON CONFLICT DO UPDATE` で devices を冪等 upsert する。
+- **重要な判断**:
+  - upsert 実行を `deviceExecer` seam（`Exec(ctx, sql, args...) (pgconn.CommandTag, error)` / pgx.Tx が
+    満たす）+ `withTx` 関数 seam に分離。本番は `db.BeginTxFunc` で tenant-scoped tx を開き RLS に分離を
+    委ねる（SuperAdmin 昇格しない）。単体テストは fake execer / txRunner を注入し実 PostgreSQL 非接続で
+    bind 値・SQL・ガードを固定（既存ファイルは触らず `registration.go` 内で seam を完結 / `_Boundary:_` 遵守）。
+  - ctx 未確立は `db.FromContext` で先行ガードして DB へ触れず伝播（`BeginTxFunc` の panic 経路に載せない）。
+    この経路は非 transient（CodeTenantCtxMissing = プログラミング前提違反）で越境更新を構造的に防ぐ（NFR 2.1）。
+  - DB 失敗は exec 失敗地点で `&errors.Error{Code: CodeUnavailable, IsTransient: true}` をリテラル構築し、
+    さらに `asTransientUpsertErr`（tenant.asTransientReverseLookupErr を手本）で BeginTx/Commit 由来の
+    非 transient error も一律 transient へ正規化。DB 失敗を漏れなく nack（再処理保持 / Req 3.6）へ写像する。
+    Message は機密値を補間しない固定文言（NFR 3.1）。
+- **残存課題（task 5 / 6 への影響）**: `UpsertEnrolledDevice(ctx, amapiDeviceName, mode, complianceStatus string) error`
+  は task 5 の `notification.EnrollmentRegistrar` port を primitive 型のみで満たす契約。実 upsert の冪等性
+  （同一 amapi_device_name の 2 回通知で devices 件数 1 のまま）は本 task では単体で固定せず、task 6 の
+  実 PostgreSQL 結合テストが所有する（design 明記）。`NewRegistrar(pool)` は task 6 が呼ぶ前提で公開済み。
+
+#### AC Traceability（task 4 範囲: 3.1 / 3.4 / NFR 2.1）
+
+| Req ID | 担保テスト |
+|---|---|
+| 3.1 | `TestRegistrar_UpsertEnrolledDevice_BindsTenantFromContext`（tenant_id=ctx 由来・amapi_device_name/mode/compliance の bind 写像）/ `_MapsModeAndComplianceToBind`（fully_managed/dedicated × unknown/unsupported の値域） |
+| 3.4 | `TestRegistrar_UpsertEnrolledDevice_EmitsIdempotentOnConflictSQL`（`ON CONFLICT (tenant_id, amapi_device_name) DO UPDATE SET mode/compliance` が diff 内に存在。実冪等挙動は task 6） |
+| NFR 2.1 | `_BindsTenantFromContext`（tenant_id を ctx 由来で明示 bind）/ `_MissingTenantContext_GuardsWithoutExec`（ctx 未確立時 tx 非開始・exec 非呼出でエラー返却） |
+
+> 補助テスト（AC 非紐付け / Req 3.6・design 225 の写像根拠を固定）:
+> `TestRegistrar_UpsertEnrolledDevice_ExecError_ReturnsTransientUnavailable`（exec 失敗→CodeUnavailable +
+> IsTransient=true・Message に device 名非混入=NFR 3.1）/ `_NonTransientTxError_NormalizedToTransient`
+> （BeginTx/Commit 由来の非 transient error も transient へ正規化）。
+> **確認事項**: なし（design.md / tasks.md との矛盾は検出せず。spec 本文は未改変）。
+
 ## AC Traceability（task 1 範囲: 1.3 / 4.1 / NFR 3.1）
 
 | Req ID | 担保テスト |
