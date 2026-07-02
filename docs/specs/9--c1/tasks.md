@@ -43,7 +43,7 @@
   - `status_handler_test.go`: 全フィールド有 / 一部欠落（pointer nil）/ 空 payload・malformed → 破棄 ack / `DeviceName` 空 → 破棄 ack（同 task 内テスト / failure path / Req 7.2）
   - _Requirements: 7.1, 7.2_
   - _Boundary: notification.StatusHandler_
-- [ ] 6. device StatusApplier（write）+ 結合テスト
+- [x] 6. device StatusApplier（write）+ 結合テスト
   - `status_applier.go`: `notification.DeviceStatusWriter` を実装（`device → notification` import）。`StatusReport`→`StatusApplyInput` 写像。compliance 算出は `NonComplianceDetails` が **payload に存在**する時のみ（空→compliant / 非空→non_compliant + 理由 / 欠落→未更新 / Req 3.2・7.2）。`unsupported` は書き込まない（Open Q）。`Repository.UpdateFromStatusReport` へ委譲、`affected=0`（未登録端末）は no-op ack + WARN（Open Q）
   - `status_applier_test.go`（単体）: compliance 3 分岐、部分保持、affected=0 no-op（同 task 内テスト）
   - `backend/test/integration/device_test.go`（実 DB / Skip 可）: test-only 配線で `StatusHandler → StatusApplier → Repository` を通し、STATUS_REPORT 適用後に `Service.Get` が反映を返す read-after-write（NFR 2.1）+ 部分 payload で既存値保持（Req 7.1・7.2）
