@@ -139,9 +139,9 @@ func TestTenantRepository_Get_NotFound(t *testing.T) {
 }
 
 // TestTenantRepository_UpdateBound_AffectedAndDoubleBind はシナリオ (d) 対応。
-// pending_bind 行への初回 UpdateBound は affected=1 で bound + enterprise_name 保存、
-// 同一 id への 2 回目 UpdateBound は status が pending_bind でないため affected=0
-// （二重バインド競合の材料 / Req 2.1 / 2.2 / 2.3 / 2.5）。
+// 予約勝者（binding）への初回 UpdateBound は affected=1 で bound + enterprise_name 保存、
+// 同一 id への 2 回目 UpdateBound は status が binding でない（既に bound）ため affected=0
+// （二重バインド競合の材料 / Req 2.1 / 2.2 / 2.3 / 2.5。#52 task 3.1 で起点が binding へ変更）。
 func TestTenantRepository_UpdateBound_AffectedAndDoubleBind(t *testing.T) {
 	// Arrange
 	repo, ctx, cleanup := setupTenantRepo(t)
@@ -149,6 +149,11 @@ func TestTenantRepository_UpdateBound_AffectedAndDoubleBind(t *testing.T) {
 	id := uuid.New()
 	if err := repo.Insert(ctx, tenant.TenantRow{ID: id, Name: "Bind Target"}); err != nil {
 		t.Fatalf("Insert: %v", err)
+	}
+	// #52 task 3.1 で UpdateBound の起点が pending_bind→binding へ変わったため、確定前に
+	// ReserveBinding で binding 行（予約勝者）を作る（pending_bind→binding / affected=1）。
+	if reserved, err := repo.ReserveBinding(ctx, id); err != nil || reserved != 1 {
+		t.Fatalf("ReserveBinding(setup): affected=%d err=%v; want affected=1 err=nil", reserved, err)
 	}
 
 	// Act + Assert: 初回 bind は affected=1
@@ -171,7 +176,7 @@ func TestTenantRepository_UpdateBound_AffectedAndDoubleBind(t *testing.T) {
 		t.Errorf("Get().EnterpriseName = %q; want %q", got.EnterpriseName, "enterprises/LC0001")
 	}
 
-	// Act + Assert: 同一 id への 2 回目 bind は status!=pending_bind なので affected=0
+	// Act + Assert: 同一 id への 2 回目 bind は status!=binding（既に bound）なので affected=0
 	affected2, err := repo.UpdateBound(ctx, id, "enterprises/LC0002")
 	if err != nil {
 		t.Fatalf("UpdateBound(2): %v", err)
@@ -185,7 +190,7 @@ func TestTenantRepository_UpdateBound_AffectedAndDoubleBind(t *testing.T) {
 // 別 tenant に既存と同一の enterprise_name を bind すると部分一意 index 違反（23505）が
 // `*errors.Error{Code: CodeConflict}` に写像されること（Req 2.1）。
 func TestTenantRepository_UpdateBound_DuplicateEnterpriseName_Conflict(t *testing.T) {
-	// Arrange: 2 つの pending_bind tenant を用意し、1 つ目を bind する
+	// Arrange: 2 つの tenant を予約（binding）し、1 つ目を bind する（#52 task 3.1 で起点が binding へ）
 	repo, ctx, cleanup := setupTenantRepo(t)
 	defer cleanup()
 	idA := uuid.New()
@@ -195,6 +200,15 @@ func TestTenantRepository_UpdateBound_DuplicateEnterpriseName_Conflict(t *testin
 	}
 	if err := repo.Insert(ctx, tenant.TenantRow{ID: idB, Name: "Tenant B"}); err != nil {
 		t.Fatalf("Insert B: %v", err)
+	}
+	// #52 task 3.1 で UpdateBound の起点が binding へ変わったため、A・B 双方を予約勝者
+	// （binding）にする。B を予約しないと UpdateBound B が no-op(affected=0) となり
+	// 23505（重複 enterprise_name）に到達しないため両方に ReserveBinding を挟む。
+	if reserved, err := repo.ReserveBinding(ctx, idA); err != nil || reserved != 1 {
+		t.Fatalf("ReserveBinding A: affected=%d err=%v; want affected=1 err=nil", reserved, err)
+	}
+	if reserved, err := repo.ReserveBinding(ctx, idB); err != nil || reserved != 1 {
+		t.Fatalf("ReserveBinding B: affected=%d err=%v; want affected=1 err=nil", reserved, err)
 	}
 	const sharedEnterprise = "enterprises/SHARED01"
 	if _, err := repo.UpdateBound(ctx, idA, sharedEnterprise); err != nil {
