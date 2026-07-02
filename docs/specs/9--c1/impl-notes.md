@@ -50,6 +50,16 @@
   - `ApplyStatusReport` の戻り error は transient/permanent を再分類せず透過（ack/nack 判定は Dispatcher の責務 / design.md Postconditions）。欠落フィールドは pointer nil のまま writer へ渡し「更新しない」を表現（Req 7.2）。機密値（payload 生値）は error 文言・ログに補間せず message_id 中心のログに限定（NFR 3.1）。
 - **残存課題**: 次 task 6（device.StatusApplier）は `notification.DeviceStatusReport`（改名後の型名）を import して `DeviceStatusWriter` を実装し、`DeviceStatusReport` → `StatusApplyInput` へ写像する。`NonComplianceDetails` の nil（欠落）/ 空 `[]` / 非空 の 3 分岐で compliance 再判定する契約は task 6 側で担保する（本 task は wire-format パースと port dispatch のみ）。
 
+### Task 6
+
+- **採用方針**: `device/status_applier.go` に `StatusApplier`（`notification.DeviceStatusWriter` 実装 / 唯一の write 経路）を追加。`notification.DeviceStatusReport` → `StatusApplyInput` へ写像し `Repository.UpdateFromStatusReport`（COALESCE 部分更新）へ委譲。DB 非依存の fake `Repository` で compliance 3 分岐・部分保持・affected=0・error 透過を単体網羅し、`test/integration/device_test.go` で `StatusHandler → StatusApplier → Repository` の実 DB read-after-write / 部分保持を検証（DB 未設定は Skip）。
+- **重要な判断**:
+  - compliance 算出は `NonComplianceDetails != nil`（payload に存在）のときのみ実施し、nil（欠落）は `ComplianceStatus`/`NonComplianceDetails` とも nil のまま渡して COALESCE で既存値保持（Req 3.2・7.2）。存在時は `deriveComplianceStatus` で **空配列→compliant / 非空→non_compliant** を導出。`unsupported` は本経路で書き込まない（Open Q / design.md L285）。
+  - 空/非空判定の既定（1 行）: JSON array の長さで判定し、**空 `[]` / JSON `null` / 空白のみ / 空 bytes は compliant** に、**array として parse 不能な malformed（object 等）は安全側で non_compliant** に倒す（未検知の非準拠を見逃さないため）。`bytes.TrimSpace` + `json.Unmarshal([]json.RawMessage)` で判定。
+  - `affected==0`（未登録端末 / ENROLLMENT 未処理）は error に倒さず nil を返す no-op ack + 構造化 WARN（`amapi_device_name` のみログ / payload 生値・HW/SW 生値は補間しない / NFR 3.1）。`amapi_device_name` は logger の redact substring 非該当（identifier であり機密ではない）ことを確認済み。`Repository` の error は再分類せず透過（ack/nack 判定は Dispatcher の責務 / design.md Postconditions）。
+  - task 5 で `notification.StatusReport`（定数と衝突）→ `DeviceStatusReport` へ改名済みのため、実型名 `notification.DeviceStatusReport` を import して実装した（design.md L299 の port 表記 `notification.StatusReport` ではなく改名後の型名）。
+- **残存課題**: なし（task 6 の AC 7.1・7.2・3.2・NFR 2.1 は単体 + 結合テストで担保）。実 DB 結合テストは当環境 `DATABASE_URL` 未設定で **Skip**（compile 通過のみ確認）のため、CI / DB 有り環境で read-after-write の runtime 反映を最終確認されたい。cmd/worker の handlers map 本配線（StatusHandler ← StatusApplier 注入）は #36 の責務で本 task 対象外。
+
 ## 確認事項
 
 - **実 DB repository テストの配置（task 文面との差異）**: task 3 文面は実 DB テストを `repository_test.go` と記すが、本 codebase の実 DB harness（`requireDBURLs`/`seedDummyData`/`newAppPool`/migration）は `test/integration`（package `integration_test`）内にしか無く、design.md File Structure Plan も「実 DB 結合は `backend/test/integration/`」と規定する。したがって実 DB テストは `backend/test/integration/device_repository_test.go` に配置し、`internal/device/repository_test.go` は DB 非依存の near-neighbor 単体テスト（scan / error mapping / bind helper）に充てた。spec 本文は書き換えていない。
