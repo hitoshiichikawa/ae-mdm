@@ -29,6 +29,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"golang.org/x/oauth2"
 
+	"github.com/hitoshiichikawa/ae-mdm/internal/app"
 	"github.com/hitoshiichikawa/ae-mdm/internal/audit"
 	"github.com/hitoshiichikawa/ae-mdm/internal/auth"
 	"github.com/hitoshiichikawa/ae-mdm/internal/config"
@@ -114,7 +115,10 @@ func healthcheckURL(listenAddr string) string {
 //  10. policy domain（Repository / Service / Handler）の DI 配線 +
 //     Routers.API への `/policies` Mount（Issue #40 / B2b）。既存 amapiClient / auditSvc /
 //     tenantSvc / authorizer を再利用する（新規構築しない）
-//  11. ListenAndServe goroutine + signal.NotifyContext で graceful shutdown
+//  11. app domain（Repository / Service / Handler）の DI 配線 +
+//     Routers.API への `/play-tokens` / `/apps` / `/apps/sync` Mount（Issue #11 / D1）。既存
+//     amapiClient / auditSvc / tenantSvc / authorizer を再利用する（新規構築しない）
+//  12. ListenAndServe goroutine + signal.NotifyContext で graceful shutdown
 //
 // いずれかの初期化失敗で exit code 1 + 構造化 ERROR ログを出す（NFR 3.1 / 3.2）。
 // pool は defer で Close する（shutdown 順序: HTTP server.Shutdown → pool.Close）。
@@ -282,7 +286,26 @@ func runBootstrap(ctx context.Context) int {
 	policyHandler := buildPolicyHandler(pool, amapiClient, auditSvc, authorizer, tenantSvc, log)
 	routers.API.Mount("/policies", policyHandler)
 
-	// (11) ListenAndServe + graceful shutdown
+	// (11) app domain（D1 / Issue #11）の DI 配線 + Mount
+	//
+	// pool / log / routers は既存 bootstrap で構築済みのものを再利用する。App ドメインの共有ラッパ
+	// 依存（webToken 発行の amapiClient / 同期監査の auditSvc / enterprise_name 解決 + bind gate の
+	// tenantSvc / RBAC 判定の authorizer）も (7)(8) で構築済みのインスタンスをそのまま再利用し、
+	// 新規構築しない（NFR 2.1: AMAPI 反映は共有ラッパ経由）。
+	//   - Repository は pgxpool 経由で tenant-scoped context のまま tenant_apps へアクセスし、RLS に
+	//     テナント分離を委ねる（SuperAdmin 昇格しない）。
+	//   - Service は webTokenClient（amapiClient）/ eventRecorder（auditSvc）/ enterpriseResolver
+	//     （tenantSvc）/ logger を組み合わせて webToken 発行 / カタログ参照・同期 / 承認済み read seam を
+	//     提供する。authz は持たず Handler の責務（design Components / policy と同方針）。
+	//   - Handler は 3 endpoint が別々のトップレベルパスを持つため `Mount(routers.API)` で root 相対に
+	//     直接登録する（policy の `Mount("/prefix", h)` ではなく tenant.Handler.Mount パターン）。
+	//     `routers.API`（/api chain + TenantContextMiddleware による RLS tenant-scoped）配下で
+	//     `/api/play-tokens` / `/api/apps` / `/api/apps/sync` を稼働させ、authorizer で own-tenant
+	//     `app` RBAC を判定する（Req 4.1）。
+	appHandler := buildAppHandler(pool, amapiClient, auditSvc, authorizer, tenantSvc, log)
+	appHandler.Mount(routers.API)
+
+	// (12) ListenAndServe + graceful shutdown
 	return runHTTPServer(ctx, srv, log)
 }
 
@@ -354,6 +377,36 @@ func buildPolicyHandler(
 	policyRepo := policy.NewRepository(pool)
 	policySvc := policy.NewService(policyRepo, amapiClient, auditSvc, tenantSvc, log)
 	return policy.NewHandler(policySvc, authorizer, log)
+}
+
+// buildAppHandler は app ドメインの本番 DI（Repository → Service → Handler）を 1 箇所に束ねて
+// 構築する（Issue #11 / D1 / NFR 2.1 / Req 4.1）。
+//
+// 共有ラッパ依存（amapiClient / auditSvc / tenantSvc / authorizer）はいずれも runBootstrap (7)(8) で
+// 構築済みのインスタンスを **再利用** する前提で受け取り、本 helper 内で新規構築しない。これにより
+// App の webToken 発行 / カタログ同期反映が共有 amapi ラッパ経由（NFR 2.1）/ 同期監査が共有 audit
+// Service 経由であることを配線レベルで固定する。app.Service は authorizer を持たず（authz は Handler の
+// 責務 / design Components）、authorizer は app.NewHandler の第 2 引数へ渡す。
+//
+// app.NewService の deps 順は policy.NewService 最終形（repo, client, recorder, tenants, log）と同一で、
+// client=amapiClient（webTokenClient）/ recorder=auditSvc（eventRecorder）/ tenants=tenantSvc
+// （enterpriseResolver）を束ねる（impl-notes Task 2 / 3 の DI 順と整合）。
+//
+// 本 wiring を独立関数として切り出すのは、main の本番配線が誤って App domain の DI を落とす /
+// stub へ巻き戻していないことを `cmd/api` の単体テスト（main_test.go）で **型レベルに回帰検知**できる
+// ようにするため（`buildPolicyHandler` / `buildTenantRecorder` と同じ testability 方針）。pool は
+// app.NewRepository が接続せず保持するだけのため、テストでは nil を渡せる。
+func buildAppHandler(
+	pool *pgxpool.Pool,
+	amapiClient amapi.Client,
+	auditSvc audit.Service,
+	authorizer *authz.Authorizer,
+	tenantSvc tenant.Service,
+	log logger.Logger,
+) *app.Handler {
+	appRepo := app.NewRepository(pool)
+	appSvc := app.NewService(appRepo, amapiClient, auditSvc, tenantSvc, log)
+	return app.NewHandler(appSvc, authorizer, log)
 }
 
 // runHTTPServer は srv.ListenAndServe を goroutine で起動し、SIGINT/SIGTERM 受信時に
