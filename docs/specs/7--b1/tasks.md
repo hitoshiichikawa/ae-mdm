@@ -28,7 +28,7 @@
   - _Requirements: 2.1, 2.2, 2.3, 4.1_
   - _Depends: 2_
 
-- [ ] 4. Enrollment Registrar（devices 冪等 upsert） (P)
+- [x] 4. Enrollment Registrar（devices 冪等 upsert） (P)
   - `internal/enrollment/registration.go`: `Registrar.UpsertEnrolledDevice(ctx, amapiDeviceName, mode, complianceStatus string) error`（`notification.EnrollmentRegistrar` を structural typing で満たす / primitive 型）。ctx の `TenantContext.TenantID` を bind し `INSERT INTO devices (id, tenant_id, amapi_device_name, mode, compliance_status) VALUES (uuid.New(), <tenant>, ...) ON CONFLICT (tenant_id, amapi_device_name) DO UPDATE SET mode=EXCLUDED.mode, compliance_status=EXCLUDED.compliance_status`（冪等 / Req 3.4）。`enrolled_at`/`id` は初回値保持。tenant-scoped RLS で越境更新不可（NFR 2.1）。DB 失敗は `CodeUnavailable`+`IsTransient=true`
   - 単体テスト: mode / compliance_status の bind 値写像（`fully_managed`/`dedicated`、`unknown`/`unsupported`）と ctx 未確立時のガードを pure/mock で検証（実 upsert の冪等性は task 6 の結合テストで固定）
   - _Requirements: 3.1, 3.4, NFR 2.1_
