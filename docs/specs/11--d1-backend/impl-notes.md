@@ -74,6 +74,32 @@
   想定。task 5（Handler）は本 Service の 2 メソッドを own-tenant RBAC 配下で呼ぶ（actor は claims 由来を渡す）。
   CreatePlayToken の `actor` 引数は現状 logDeny のみで使用（監査は webToken 発行では行わない / design 確認事項 4）。
 
+### Task 3
+
+- 採用方針: policy.Service（段階拡張 interface / consumer-defines-interface / record helper）と同一規約で
+  App Service にカタログ同期 `SyncApps` と `app_sync` 監査を追加。NewService を task 2 learning どおり
+  `(repo, client, recorder, tenants, log)`（policy 最終形と同順）へ拡張し recorder を挿入。
+- 重要な判断:
+  - **監査 helper は単一 `record`**: policy は event 種別が複数（create/update/delete/assign）で record/emitAudit を
+    分割するが、App は `app_sync` 単一種別のため helper を 1 本に集約（投機的に emitAudit を分けない）。
+  - **SyncedAt は `time.Now()` 直接**: app package に clock seam は無く、seam 新設は本 task `_Boundary`（service.go /
+    service_test.go）外の新規ファイルになるため避けた。テストは `IsZero()` の tolerant assert で決定的に検証。
+  - **enterprise_name は bind gate 専用**: SyncApps は client-relayed 承認結果を Upsert するため resolver の
+    戻り値（enterprise_name）は使わず破棄。未バインドのみを弾く gate として機能させ、Detail/ログにも載せない（NFR 3.2）。
+  - **空 package_name/title は 400 ガード**: `_Requirements:_` に紐付く numeric AC は無いが、tenant_apps.title の
+    NOT NULL 制約違反を未然に防ぐ入力ガードとして実装（Req 3.1 の「有効な承認結果を反映」の異常系）。Upsert 未呼び出し + 失敗監査。
+- AC 担保テスト（`internal/app/service_test.go` / `TestService_SyncApps`）:
+  - Req 3.1: 「正常同期…Upsert へ委譲」（apps relay + count）/ 「package_name が空→400」「title が空→400」（入力ガード異常系）
+  - Req 3.3: 「正常同期…反映件数と非 zero の同期時刻」/「正常同期…成功監査」
+  - Req 3.4: 「空リスト同期…count 0 を正常応答」
+  - Req 3.5: 「未バインド…Upsert を呼ばず error 伝達 + 失敗監査」
+  - Req 3.6: 「Repository が error…count 0 で伝達 + 失敗監査」
+  - NFR 3.1: 「成功監査記録」/「Record 失敗でも成功結果を覆さず WARN」（成否両経路で record）
+  - NFR 3.2: 「監査 Detail に enterprise_name 等の機密値を含めない」（Detail key は count/result のみ）
+  - Red→Green: bind gate 除去 / 空検査除去 / Record 失敗時 WARN 抑止の各ミューテーションで対応テスト FAIL を確認済（revert 済）。
+- 残存課題: task 4（CheckAppsApproved）で interface を第 4 メソッドへ拡張する想定（本 task では `var _ Service` は 3 メソッド）。
+  Handler（task 5）は SyncApps を ActionUpdate + own-tenant RBAC 配下で呼び、`{synced_at, count}` を返す。
+
 ## 確認事項
 
 - design.md / requirements.md との矛盾は認めなかった。design の確認事項（Option A の
