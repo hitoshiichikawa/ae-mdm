@@ -31,9 +31,9 @@ import (
 
 // ---- fake Service（integration_test パッケージ用の tenant.Service テストダブル） ----
 
-// fakeTenantService は tenant.Service interface（6 メソッド）を満たす最小のテストダブル。
-// ガード通過後に Handler へ到達したか（List 呼出有無）を記録し、ガード拒否ケースでは Service が
-// 一切呼ばれないこと（Req 6.5 の存在露出防止 / 認可は guard 層で完結）を併せて検証できる。
+// fakeTenantService は tenant.Service interface（#39 の逆引き追加で 7 メソッド）を満たす最小の
+// テストダブル。ガード通過後に Handler へ到達したか（List 呼出有無）を記録し、ガード拒否ケースでは
+// Service が一切呼ばれないこと（Req 6.5 の存在露出防止 / 認可は guard 層で完結）を併せて検証できる。
 type fakeTenantService struct {
 	mu       sync.Mutex
 	listCall int
@@ -65,6 +65,12 @@ func (f *fakeTenantService) List(_ context.Context) ([]tenant.TenantView, error)
 
 func (f *fakeTenantService) EnterpriseNameForTenant(_ context.Context, _ uuid.UUID) (string, error) {
 	return "", nil
+}
+
+// TenantIDByEnterpriseName は tenant.Service 契約（#39 で追加された逆引きメソッド）を満たすための
+// テストダブル実装。本ガードテストは逆引きを駆動しないため未割当（found=false）を返す。
+func (f *fakeTenantService) TenantIDByEnterpriseName(_ context.Context, _ string) (uuid.UUID, bool, error) {
+	return uuid.Nil, false, nil
 }
 
 func (f *fakeTenantService) listCalls() int {

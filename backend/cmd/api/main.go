@@ -33,6 +33,7 @@ import (
 	"github.com/hitoshiichikawa/ae-mdm/internal/auth"
 	"github.com/hitoshiichikawa/ae-mdm/internal/config"
 	"github.com/hitoshiichikawa/ae-mdm/internal/logger"
+	"github.com/hitoshiichikawa/ae-mdm/internal/notification"
 	"github.com/hitoshiichikawa/ae-mdm/internal/platform/amapi"
 	"github.com/hitoshiichikawa/ae-mdm/internal/platform/authz"
 	"github.com/hitoshiichikawa/ae-mdm/internal/platform/db"
@@ -108,10 +109,12 @@ func healthcheckURL(listenAddr string) string {
 //     Routers.API / Routers.Admin への `/audit-logs` Mount（Issue #5 / A5）
 //  8. tenant domain（Repository / Service / Handler）の DI 配線 +
 //     Routers.Admin への `/tenants` Mount（Issue #38 / A4b）
-//  9. policy domain（Repository / Service / Handler）の DI 配線 +
+//  9. notification domain（UnassignedQueue / AdminHandler）の DI 配線 +
+//     Routers.Admin への `/notifications/unassigned` Mount（Issue #39 / A6b）
+//  10. policy domain（Repository / Service / Handler）の DI 配線 +
 //     Routers.API への `/policies` Mount（Issue #40 / B2b）。既存 amapiClient / auditSvc /
 //     tenantSvc / authorizer を再利用する（新規構築しない）
-//  10. ListenAndServe goroutine + signal.NotifyContext で graceful shutdown
+//  11. ListenAndServe goroutine + signal.NotifyContext で graceful shutdown
 //
 // いずれかの初期化失敗で exit code 1 + 構造化 ERROR ログを出す（NFR 3.1 / 3.2）。
 // pool は defer で Close する（shutdown 順序: HTTP server.Shutdown → pool.Close）。
@@ -246,7 +249,24 @@ func runBootstrap(ctx context.Context) int {
 	tenantHandler := tenant.NewHandler(tenantSvc, log)
 	tenantHandler.Mount(routers.Admin)
 
-	// (9) policy domain（B2b / Issue #40）の DI 配線 + Mount
+	// (9) notification domain（A6b / Issue #39）の退避キュー閲覧 API の DI 配線 + Mount
+	//
+	// cfg / pool / log は既存 bootstrap で構築済みのものを再利用する（新規構築しない）。
+	// UnassignedQueue は pgxpool 経由で SuperAdmin context 下に cross-tenant infra テーブル
+	// `unassigned_notifications` へアクセスし、退避済み通知の List を担う（既存スキーマ 0010 /
+	// 0011 を消費）。AdminHandler を `routers.Admin`（/api/admin chain +
+	// RequireAdminConsoleAndSuperAdmin ガード継承）へ Mount し、`/api/admin/notifications/unassigned`
+	// を稼働させる（admin-console / SuperAdmin 専用の退避キュー閲覧 / Req 4.1 / 4.2）。401（Req 4.3）/
+	// 403（Req 4.4）は固定ガード middleware が担い、handler は filter parse（400 / Req 4.5）と
+	// 200 / 503 に集中する（audit/tenant の (7)(8) 配線ブロックと同パターン）。
+	//
+	// Dispatcher 本体（worker 経路）の wire-in は #35 の責務であり本 Issue scope 外。本 api
+	// entrypoint では退避キュー閲覧 API のみを配線する（design.md Overview / Non-Goals と整合）。
+	unassignedQueue := notification.NewUnassignedQueue(pool)
+	notificationAdminHandler := notification.NewAdminHandler(unassignedQueue, log)
+	routers.Admin.Mount("/notifications/unassigned", notificationAdminHandler)
+
+	// (10) policy domain（B2b / Issue #40）の DI 配線 + Mount
 	//
 	// pool / log / routers は既存 bootstrap で構築済みのものを再利用する。Policy ドメインの
 	// 共有ラッパ依存（AMAPI 反映の amapiClient / 監査記録の auditSvc / enterprise_name 解決の
@@ -262,7 +282,7 @@ func runBootstrap(ctx context.Context) int {
 	policyHandler := buildPolicyHandler(pool, amapiClient, auditSvc, authorizer, tenantSvc, log)
 	routers.API.Mount("/policies", policyHandler)
 
-	// (10) ListenAndServe + graceful shutdown
+	// (11) ListenAndServe + graceful shutdown
 	return runHTTPServer(ctx, srv, log)
 }
 

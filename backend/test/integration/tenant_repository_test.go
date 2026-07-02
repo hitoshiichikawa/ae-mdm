@@ -318,3 +318,64 @@ func TestTenantRepository_NonSuperAdminContext_TenantIsolation(t *testing.T) {
 		t.Errorf("SuperAdmin Get().ID = %v; want %v", got.ID, createdID)
 	}
 }
+
+// TestTenantRepository_TenantIDByEnterpriseName は Issue #39 (A6b) task 1.1 の逆引き
+// （enterprise_name → tenant_id）に対する integration test。bound 解決 / 未 bound・不在は
+// found=false の経路を実 DB で検証する（Req 3.1 / 3.2）。DATABASE_URL 未設定環境では
+// requireDBURLs が t.Skip するため DB 不在でも false-fail しない（helpers_test.go の規約）。
+//
+// 検証シナリオ:
+//
+//	(a) bound テナントの enterprise_name で逆引きすると当該 tenant_id + found=true（Req 3.1）
+//	(b) pending_bind テナント（未 bound）の検索では found=false（Req 3.2）
+//	(c) 存在しない enterprise_name の検索では found=false（Req 3.2）
+func TestTenantRepository_TenantIDByEnterpriseName(t *testing.T) {
+	// Arrange: bound テナント 1 件と pending_bind テナント 1 件を用意する。
+	repo, ctx, cleanup := setupTenantRepo(t)
+	defer cleanup()
+
+	const boundEnterprise = "enterprises/LC0042"
+	boundID := uuid.New()
+	pendingID := uuid.New()
+	if err := repo.Insert(ctx, tenant.TenantRow{ID: boundID, Name: "Bound Tenant"}); err != nil {
+		t.Fatalf("Insert(bound): %v", err)
+	}
+	if err := repo.Insert(ctx, tenant.TenantRow{ID: pendingID, Name: "Pending Tenant"}); err != nil {
+		t.Fatalf("Insert(pending): %v", err)
+	}
+	if _, err := repo.UpdateBound(ctx, boundID, boundEnterprise); err != nil {
+		t.Fatalf("UpdateBound(bound): %v", err)
+	}
+
+	// Act + Assert (a): bound テナントの enterprise_name で逆引きできる（Req 3.1）。
+	gotID, found, err := repo.TenantIDByEnterpriseName(ctx, boundEnterprise)
+	if err != nil {
+		t.Fatalf("TenantIDByEnterpriseName(bound): %v", err)
+	}
+	if !found {
+		t.Fatalf("TenantIDByEnterpriseName(bound) found = false; want true（bound 解決）")
+	}
+	if gotID != boundID {
+		t.Errorf("TenantIDByEnterpriseName(bound) id = %v; want %v", gotID, boundID)
+	}
+
+	// Act + Assert (b): pending_bind テナント（未 bound）は enterprise_name が NULL で
+	// status!='bound' のため解決できず found=false（Req 3.2）。
+	// pending_bind 行の enterprise_name は NULL なので、空文字 / 任意文字列のいずれでも 0 件になる。
+	_, foundPending, err := repo.TenantIDByEnterpriseName(ctx, "enterprises/PENDING-NONE")
+	if err != nil {
+		t.Fatalf("TenantIDByEnterpriseName(pending): %v", err)
+	}
+	if foundPending {
+		t.Errorf("TenantIDByEnterpriseName(未 bound) found = true; want false（未割当 / Req 3.2）")
+	}
+
+	// Act + Assert (c): 存在しない enterprise_name は found=false（Req 3.2）。
+	_, foundAbsent, err := repo.TenantIDByEnterpriseName(ctx, "enterprises/DOES-NOT-EXIST")
+	if err != nil {
+		t.Fatalf("TenantIDByEnterpriseName(absent): %v", err)
+	}
+	if foundAbsent {
+		t.Errorf("TenantIDByEnterpriseName(不在) found = true; want false（未割当 / Req 3.2）")
+	}
+}
