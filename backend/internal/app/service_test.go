@@ -93,7 +93,7 @@ func (r *fakeResolver) callCount() int {
 	return r.calls
 }
 
-// ---- Fake Repository（カタログ参照 Req 2.1 / 同期 Upsert Req 3.x の委譲を検証。ApprovedPackages は task 4 で検証する） ----
+// ---- Fake Repository（カタログ参照 Req 2.1 / 同期 Upsert Req 3.x / 承認済み ApprovedPackages Req 5.x の委譲を検証） ----
 
 type fakeAppRepository struct {
 	mu        sync.Mutex
@@ -107,6 +107,12 @@ type fakeAppRepository struct {
 	upsertApps  []SyncApp
 	upsertCount int
 	upsertErr   error
+
+	// ApprovedPackages の注入設定と呼び出し捕捉（task 4 / Req 5.1 / 5.2）。
+	approvedCalls    int
+	approvedPackages []string
+	approvedSet      map[string]struct{}
+	approvedErr      error
 }
 
 func (r *fakeAppRepository) List(_ context.Context, _ uuid.UUID) ([]TenantAppRow, error) {
@@ -134,9 +140,22 @@ func (r *fakeAppRepository) Upsert(_ context.Context, _ uuid.UUID, apps []SyncAp
 	return r.upsertCount, nil
 }
 
-// ApprovedPackages は Repository interface を満たすためのスタブ（task 4 で検証する）。
-func (r *fakeAppRepository) ApprovedPackages(_ context.Context, _ uuid.UUID, _ []string) (map[string]struct{}, error) {
-	return make(map[string]struct{}), nil
+// ApprovedPackages は注入された approvedSet / approvedErr を返し、渡された packageNames と呼び出し
+// 回数を捕捉する（Req 5.1 / 5.2）。呼び出し回数は空入力で Repository へ触れないことの検証に用いる。
+func (r *fakeAppRepository) ApprovedPackages(_ context.Context, _ uuid.UUID, packageNames []string) (map[string]struct{}, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.approvedCalls++
+	r.approvedPackages = append([]string(nil), packageNames...)
+	if r.approvedErr != nil {
+		return nil, r.approvedErr
+	}
+	// 実 Repository は 0 件でも非 nil 空 map を返す契約のため、それに倣って注入集合を複製して返す。
+	out := make(map[string]struct{}, len(r.approvedSet))
+	for pkg := range r.approvedSet {
+		out[pkg] = struct{}{}
+	}
+	return out, nil
 }
 
 func (r *fakeAppRepository) listCallCount() int {
@@ -156,6 +175,20 @@ func (r *fakeAppRepository) upsertLastApps() []SyncApp {
 	defer r.mu.Unlock()
 	out := make([]SyncApp, len(r.upsertApps))
 	copy(out, r.upsertApps)
+	return out
+}
+
+func (r *fakeAppRepository) approvedCallCount() int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.approvedCalls
+}
+
+func (r *fakeAppRepository) approvedLastPackages() []string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	out := make([]string, len(r.approvedPackages))
+	copy(out, r.approvedPackages)
 	return out
 }
 
@@ -795,6 +828,118 @@ func TestService_SyncApps(t *testing.T) {
 		}
 		if h.recorder.detailLeaks(testEnterpriseName) {
 			t.Errorf("enterprise_name leaked into audit Detail: %+v", ev.Detail)
+		}
+	})
+}
+
+// ===== CheckAppsApproved: 承認済みアプリ read seam（全承認 / 未承認 / 越境 / 空入力 / DB error）（Req 5.1 / 5.2） =====
+
+func TestService_CheckAppsApproved(t *testing.T) {
+	t.Run("全 package が承認済みのとき nil を返し ApprovedPackages へ委譲する", func(t *testing.T) {
+		// Arrange: 要求 package が全て自テナントの承認済み集合に含まれる（Req 5.1）。
+		h := newAppServiceHarness()
+		tenantID := uuid.New()
+		packages := []string{"com.example.a", "com.example.b"}
+		h.repo.approvedSet = map[string]struct{}{"com.example.a": {}, "com.example.b": {}}
+
+		// Act
+		err := h.svc.CheckAppsApproved(context.Background(), tenantID, packages)
+
+		// Assert: nil を返し、Repository へ委譲し、渡した packageNames が捕捉される（Req 5.1）。
+		if err != nil {
+			t.Fatalf("expected nil for all-approved packages, got %v", err)
+		}
+		if h.repo.approvedCallCount() != 1 {
+			t.Fatalf("expected Repository.ApprovedPackages called once, got %d", h.repo.approvedCallCount())
+		}
+		got := h.repo.approvedLastPackages()
+		if len(got) != 2 || got[0] != "com.example.a" || got[1] != "com.example.b" {
+			t.Errorf("expected packageNames relayed to ApprovedPackages, got %+v", got)
+		}
+	})
+
+	t.Run("1 件が未承認のとき ErrAppNotApproved(422) を返す", func(t *testing.T) {
+		// Arrange: 2 件中 1 件のみ承認済み（Req 5.2 異常系）。
+		h := newAppServiceHarness()
+		tenantID := uuid.New()
+		packages := []string{"com.example.a", "com.example.b"}
+		h.repo.approvedSet = map[string]struct{}{"com.example.a": {}}
+
+		// Act
+		err := h.svc.CheckAppsApproved(context.Background(), tenantID, packages)
+
+		// Assert: sentinel ErrAppNotApproved（Code=CodeBusinessRule / 422）を返す（Req 5.2）。
+		if !stderrors.Is(err, ErrAppNotApproved) {
+			t.Errorf("expected ErrAppNotApproved for unapproved package, got %v", err)
+		}
+		if got := codeOf(t, err); got != pkgerrors.CodeBusinessRule {
+			t.Errorf("expected CodeBusinessRule (422), got %s", got)
+		}
+	})
+
+	t.Run("越境 package（自テナント承認済み集合に含まれない）のとき未承認扱いで拒否する", func(t *testing.T) {
+		// Arrange: 越境 package は tenant-scoped Repository の承認済み集合に現れない（RLS / Req 5.2 / Req 4.x）。
+		h := newAppServiceHarness()
+		tenantID := uuid.New()
+		packages := []string{"com.other-tenant.app"}
+		h.repo.approvedSet = map[string]struct{}{} // 他テナント承認分は自テナント集合に含まれない
+
+		// Act
+		err := h.svc.CheckAppsApproved(context.Background(), tenantID, packages)
+
+		// Assert: 越境 package は未承認扱いで ErrAppNotApproved（422）。存在有無を露出しない（Req 4.2）。
+		if !stderrors.Is(err, ErrAppNotApproved) {
+			t.Errorf("expected cross-tenant package treated as unapproved, got %v", err)
+		}
+		if got := codeOf(t, err); got != pkgerrors.CodeBusinessRule {
+			t.Errorf("expected CodeBusinessRule (422), got %s", got)
+		}
+	})
+
+	t.Run("空入力のとき nil を返し ApprovedPackages を呼ばない", func(t *testing.T) {
+		// Arrange: 境界値（nil / 空 slice は検証対象なし）。
+		cases := []struct {
+			name     string
+			packages []string
+		}{
+			{name: "nil", packages: nil},
+			{name: "空 slice", packages: []string{}},
+		}
+		for _, tc := range cases {
+			t.Run(tc.name, func(t *testing.T) {
+				h := newAppServiceHarness()
+				tenantID := uuid.New()
+
+				// Act
+				err := h.svc.CheckAppsApproved(context.Background(), tenantID, tc.packages)
+
+				// Assert: nil を返し、Repository を一切呼ばない（不要な DB 往復を避ける）。
+				if err != nil {
+					t.Fatalf("expected nil for empty input, got %v", err)
+				}
+				if h.repo.approvedCallCount() != 0 {
+					t.Errorf("expected Repository.ApprovedPackages NOT called for empty input, got %d", h.repo.approvedCallCount())
+				}
+			})
+		}
+	})
+
+	t.Run("Repository が error を返すとき ErrAppNotApproved へ握り潰さず伝達する", func(t *testing.T) {
+		// Arrange: DB 不通（CodeUnavailable / 503）。承認判定不能を 422 に化けさせない（Req 5.1 異常系）。
+		h := newAppServiceHarness()
+		tenantID := uuid.New()
+		approvedErr := pkgerrors.New(pkgerrors.CodeUnavailable, "tenant_apps approved query failed")
+		h.repo.approvedErr = approvedErr
+
+		// Act
+		err := h.svc.CheckAppsApproved(context.Background(), tenantID, []string{"com.example.a"})
+
+		// Assert: Repository error をそのまま伝達し 503 を保持する。
+		if !stderrors.Is(err, approvedErr) {
+			t.Errorf("expected repository error propagated, got %v", err)
+		}
+		if got := codeOf(t, err); got != pkgerrors.CodeUnavailable {
+			t.Errorf("expected CodeUnavailable (503) propagated, not swallowed to 422, got %s", got)
 		}
 	})
 }

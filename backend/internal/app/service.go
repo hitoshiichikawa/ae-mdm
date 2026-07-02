@@ -16,10 +16,9 @@ import (
 // Service は App ドメインのユースケース（webToken 発行 / カタログ参照・同期 / 承認済み read seam）の
 // 単一所有者（design.md「App Service」節 / internal/policy.Service に倣う）。
 //
-// **段階拡張 interface（本 task 3 では 3 メソッド）**: webToken 発行（CreatePlayToken）と
-// カタログ参照（ListApps）に加え、本 task でカタログ同期（SyncApps）を追加する。承認済み read seam
-// （CheckAppsApproved / task 4）は後続 task で本 interface へ追加する（policy が task 間で interface を
-// 段階拡張したのと同方針。投機的に先取り定義しない）。
+// **本 interface の 4 メソッド**: webToken 発行（CreatePlayToken）/ カタログ参照（ListApps）/
+// カタログ同期（SyncApps）/ 承認済み read seam（CheckAppsApproved）。policy が task 間で interface を
+// 段階拡張したのと同方針で task 2〜4 に分けて実装した（投機的に先取り定義しない）。
 //
 // authz は持たない: 認可（own-tenant RBAC）は Handler（task 5）の責務（design Components / policy と同方針）。
 type Service interface {
@@ -60,6 +59,19 @@ type Service interface {
 	// 記録する（NFR 3.1）。監査 Detail / 構造化ログに資格情報・OAuth トークン生値・enterprise_name 等の
 	// 機密値を一切載せない（NFR 3.2）。actor は監査イベントの実行者識別子、tenantID は claims 由来の所有テナント。
 	SyncApps(ctx context.Context, actor, tenantID uuid.UUID, in SyncRequest) (SyncResult, error)
+
+	// CheckAppsApproved は packageNames が全て自テナントの承認済みカタログに存在するかを検証する
+	// read seam（Req 5.1 / 5.2）。Policy Service（#40）がポリシー編集時の承認済み不変条件判定に
+	// 消費する（本 seam を Policy が呼ぶ enforcement 配線は #40 側 / 本 Issue 外 / design 確認事項 3）。
+	//
+	//   - packageNames が空のときは Repository を呼ばず nil を返す（検証対象なし）。
+	//   - Repository.ApprovedPackages で自テナントの承認済み package 集合を取得する（Req 5.1）。
+	//     tenant-scoped（RLS + tenant_id 述語）のため越境 package は集合に含まれず未承認扱いになる。
+	//     Repository の error（DB 失敗 = CodeUnavailable/503 等）はそのまま伝達し握り潰さない。
+	//   - packageNames に承認済み集合へ含まれない package が 1 件でもあれば ErrAppNotApproved（422）を
+	//     返す（Req 5.2）。全件承認済みなら nil。
+	//   - read seam のため監査記録は行わない（ListApps と同じ read 方針）。tenantID は claims 由来の所有テナント。
+	CheckAppsApproved(ctx context.Context, tenantID uuid.UUID, packageNames []string) error
 }
 
 // webTokenClient は Service が webToken 発行に用いる最小ポート（consumer-defines-interface / NFR 2.1）。
@@ -223,6 +235,32 @@ func (s *service) SyncApps(ctx context.Context, actor, tenantID uuid.UUID, in Sy
 	return SyncResult{SyncedAt: time.Now(), Count: count}, nil
 }
 
+// CheckAppsApproved は Service.CheckAppsApproved の実装。
+func (s *service) CheckAppsApproved(ctx context.Context, tenantID uuid.UUID, packageNames []string) error {
+	// 1. 空入力は検証対象が無いため Repository を呼ばず nil を返す（実 Repository も空入力で pool へ
+	//    触れない契約と整合 / 不要な DB 往復を避ける）。
+	if len(packageNames) == 0 {
+		return nil
+	}
+
+	// 2. 自テナントの承認済み package 集合を取得する（Req 5.1）。tenant-scoped（RLS + tenant_id 述語）
+	//    のため越境 package は集合に含まれず、後続の欠落判定で自動的に未承認扱いになる（Req 4.x）。
+	//    DB 失敗（CodeUnavailable / 503）は握り潰さずそのまま伝達する（承認判定不能を 422 へ化けさせない）。
+	approved, err := s.repo.ApprovedPackages(ctx, tenantID, packageNames)
+	if err != nil {
+		return err
+	}
+
+	// 3. packageNames を走査し、承認済み集合に 1 件でも欠けていれば ErrAppNotApproved（422 / Req 5.2）を
+	//    返す。sentinel は read-only に扱い再代入しない。全件承認済みなら nil。
+	for _, pkg := range packageNames {
+		if _, ok := approved[pkg]; !ok {
+			return ErrAppNotApproved
+		}
+	}
+	return nil
+}
+
 // rowToView は tenant_apps の DB 行（TenantAppRow）を API 表現（TenantAppView）へ写像する
 // （List 経路 / Req 2.1）。id / tenant_id 等の内部 field は外部へ露出せず、package_name / title /
 // icon_url（nullable は null のまま）/ approved_at のみを返す。
@@ -273,7 +311,7 @@ func (s *service) record(ctx context.Context, actor, tenantID uuid.UUID, result 
 	}
 }
 
-// 型 assertion 用に service が Service interface（本 task 3 の 3 メソッド: CreatePlayToken / ListApps /
-// SyncApps）を満たすことを compile-time で確認する。後続 task で interface が拡張されると本 check が
-// 乖離を検出する。
+// 型 assertion 用に service が Service interface（4 メソッド: CreatePlayToken / ListApps / SyncApps /
+// CheckAppsApproved）を満たすことを compile-time で確認する。interface と実装が乖離すると本 check が
+// build 失敗として検出する。
 var _ Service = (*service)(nil)
