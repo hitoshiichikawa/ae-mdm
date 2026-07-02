@@ -19,7 +19,7 @@ import (
 //   - StatusBound:        Enterprise バインド済み（enterprise_name 確定）
 //   - StatusDisabled:     無効化済み（終端 / 本 Issue では再有効化遷移を持たない）
 //
-// DB 側 `tenant_status` enum（migration 0001 + 0017 で binding 追加）と文字列値を一致させる。
+// DB 側 `tenant_status` enum（migration 0001 + 0018 で binding 追加）と文字列値を一致させる。
 type Status string
 
 const (

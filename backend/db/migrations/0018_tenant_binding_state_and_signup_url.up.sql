@@ -1,4 +1,4 @@
--- 0017_tenant_binding_state_and_signup_url.up.sql
+-- 0018_tenant_binding_state_and_signup_url.up.sql
 -- Issue #52 (#38 follow-up) Req 4.1 / Req 3.1
 --
 -- Tenant Bind の競合制御強化（バインド予約状態）と signup_url_name 紐付けのため、
@@ -12,7 +12,7 @@
 --     pending_bind → binding の原子遷移に成功した勝者のみ CreateEnterprise へ進み、
 --     AMAPI 上に未紐付けの Enterprise（orphan）が残らないようにする。
 --     PostgreSQL 12+ では ALTER TYPE ... ADD VALUE をトランザクション内で実行でき、
---     追加した値を同じ migration 内で参照しない限り制約に抵触しない（0017 は値追加 +
+--     追加した値を同じ migration 内で参照しない限り制約に抵触しない（0018 は値追加 +
 --     列追加のみで 'binding' を参照する DML を含まない）。IF NOT EXISTS で再適用に耐える。
 --   - signup_url_name 列（Req 3.1）: テナント作成時に発行する signup_url_name を発行元
 --     テナントに永続化し、bind 時の正本として束縛するための列。NULL 許容（既存行・create

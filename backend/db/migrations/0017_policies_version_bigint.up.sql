@@ -1,0 +1,21 @@
+-- 0017_policies_version_bigint.up.sql
+-- Issue #40 (B2b) Req 1.3 / NFR 2.1（PR #60 review round 4）
+--
+-- policies.version を integer（int32）から bigint（int64）へ広げる。
+--
+-- 理由:
+--   Policy snapshot の version は AMAPI が払い出す Policy バージョン番号で、共有 AMAPI クライアント
+--   ラッパ（#34）が `amapi.PolicyBody.Version int64` として返す。Policy Service / Repository の
+--   `PolicyRow.Version` も int64 で、Insert / UpdateSnapshotSerialized は AMAPI 反映済みの int64
+--   version を本列へ書き込む。しかし本列は 0005 で `integer`（int32）で作成されており、Go 側
+--   int64 と DB 側 int32 で型幅が食い違っていた。
+--
+--   int32 範囲外の version を書き込もうとすると INSERT / UPDATE が "integer out of range" で
+--   実行時失敗し、AMAPI 反映後の snapshot 永続化が成立しない（Req 1.3）/ AMAPI と DB snapshot が
+--   乖離する経路が生じ得る。NFR 2.1「型安全な永続化（型不整合を実行時エラーまで遅延させない）」に
+--   反するため、DB 列型を Go / AMAPI 側の int64 に合わせて bigint へ広げ、型幅の不整合を解消する。
+--
+-- 安全性: integer → bigint は値域を広げる無損失変換で、PostgreSQL は既存データを保持したまま
+--   列型を変更する。FK / UNIQUE 制約（(id, tenant_id)）は version 列を参照しないため影響しない。
+
+ALTER TABLE policies ALTER COLUMN version TYPE bigint;

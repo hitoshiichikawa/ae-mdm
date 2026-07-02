@@ -310,3 +310,35 @@ func TestShouldAck_NilLogger_NoPanic(t *testing.T) {
 		t.Fatalf("ack = true, want false")
 	}
 }
+
+// TestIsTransient_MatchesShouldAck は IsTransient が ShouldAck の nack 判定と常に一致する
+// （`IsTransient(err) == !ShouldAck(err, nil)`）ことを各 error 種別で固定する。両者が drift すると、
+// 「一時的失敗のときだけ副作用を取り消す」呼び出し側（notification dispatcher の claim release 等）が
+// ack/nack 写像と食い違うため、不変条件としてテストで縛る。
+func TestIsTransient_MatchesShouldAck(t *testing.T) {
+	cases := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{name: "nil は一時的失敗ではない", err: nil, want: false},
+		{name: "transient な独自 Error は true", err: &Error{Code: CodeUnavailable, Message: "down", IsTransient: true}, want: true},
+		{name: "恒常的な独自 Error は false", err: &Error{Code: CodeBusinessRule, Message: "rule", IsTransient: false}, want: false},
+		{name: "独自型外の error は true（CodeInternal/Transient 相当）", err: stdErrors.New("unexpected"), want: true},
+	}
+
+	for _, tt := range cases {
+		t.Run(tt.name, func(t *testing.T) {
+			// Act
+			got := IsTransient(tt.err)
+
+			// Assert: 期待値と、ShouldAck の nack 判定（!ack）の双方に一致する。
+			if got != tt.want {
+				t.Errorf("IsTransient(%v) = %v; want %v", tt.err, got, tt.want)
+			}
+			if ack := ShouldAck(tt.err, nil); got != !ack {
+				t.Errorf("IsTransient(%v)=%v は !ShouldAck=%v と一致すべき", tt.err, got, !ack)
+			}
+		})
+	}
+}

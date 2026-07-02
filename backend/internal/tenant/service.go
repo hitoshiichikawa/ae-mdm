@@ -120,6 +120,20 @@ type Service interface {
 	//
 	// actor は回収イベントの実行者識別子（admin_users.id）。olderThan は中断とみなす経過時間しきい値。
 	RecoverStaleBindings(ctx context.Context, actor uuid.UUID, olderThan time.Duration) (int, error)
+
+	// TenantIDByEnterpriseName は enterprise_name から bound テナントの id を逆引きする
+	// （Notification Dispatcher #39 / Req 3.1 / 3.2 / 3.4）。`EnterpriseNameForTenant` の対称メソッド。
+	//
+	//   - enterprise_name が空白 trim 後に空のとき: DB を叩かず `found=false` を即返す。空 /
+	//     欠落 enterprise_name はテナント未割当として退避経路に流す（Req 3.4）。
+	//   - 非空のとき: Repository.TenantIDByEnterpriseName で bound テナントを逆引きする。一意に
+	//     解決できれば `(id, true, nil)`、解決できない（未 bound / 不在）なら `(uuid.Nil, false, nil)`
+	//     を返す（Req 3.1 / 3.2）。DB 失敗（CodeUnavailable / IsTransient=true）はそのまま伝達する。
+	//
+	// 本メソッドは notification の TenantResolver IF（逆引きの最小契約 / design.md 採用案 a）を
+	// 満たす。Repository は内部で SuperAdmin context を確立し全 tenants 行を可視化する。拒否
+	// （空入力）経路は構造化ログを出す（NFR 3.1）。
+	TenantIDByEnterpriseName(ctx context.Context, enterpriseName string) (uuid.UUID, bool, error)
 }
 
 // service は Service interface の本番実装。
@@ -554,6 +568,29 @@ func (s *service) EnterpriseNameForTenant(ctx context.Context, id uuid.UUID) (st
 		s.logDeny(tc.AdminUserID, id, "tenant state is invalid")
 		return "", ErrInvalidState
 	}
+}
+
+// TenantIDByEnterpriseName は Service.TenantIDByEnterpriseName の実装（#39 / Req 3.1 / 3.2 / 3.4）。
+//
+// enterprise_name → tenant_id の逆引き。空入力は DB を叩かず found=false を即返し（Req 3.4 の
+// 退避経路）、非空は Repository へ委譲する。Repository は SuperAdmin context で bound 行のみを
+// 解決し、一意解決できなければ found=false（エラーではない / Req 3.2）を返す。
+func (s *service) TenantIDByEnterpriseName(ctx context.Context, enterpriseName string) (uuid.UUID, bool, error) {
+	// 空 / 欠落 enterprise_name はテナント未割当として DB を叩かず即 found=false を返す（Req 3.4）。
+	// 空文字を SELECT 条件に渡しても 0 件で同結果になるが、無駄な DB アクセスを避けつつ退避経路の
+	// 意図を明示する。拒否（未割当扱い）の観測のため構造化ログを出す（NFR 3.1）。
+	if strings.TrimSpace(enterpriseName) == "" {
+		s.logDeny(uuid.Nil, uuid.Nil, "enterprise name is empty for tenant reverse lookup")
+		return uuid.Nil, false, nil
+	}
+
+	// 非空は Repository で bound テナントを逆引きする。DB 失敗（CodeUnavailable / IsTransient=true）は
+	// そのまま伝達し、worker の nack（再処理保持 / Req 1.4）に委ねる。
+	id, found, err := s.repo.TenantIDByEnterpriseName(ctx, enterpriseName)
+	if err != nil {
+		return uuid.Nil, false, err
+	}
+	return id, found, nil
 }
 
 // record は監査イベントを EventRecorder へ渡す helper（Req 1.5 / NFR 2.1）。

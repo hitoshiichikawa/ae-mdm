@@ -158,6 +158,7 @@ type fakeRepoCalls struct {
 	recoverStaleBindings int
 	updateBound          int
 	updateDisabled       int
+	tenantIDByEntName    int
 }
 
 type fakeRepository struct {
@@ -186,6 +187,11 @@ type fakeRepository struct {
 	updateDisabledAffected int64
 	updateDisabledErr      error
 
+	// TenantIDByEnterpriseName（逆引き）の制御（#39）。
+	tenantIDResult uuid.UUID
+	tenantIDFound  bool
+	tenantIDErr    error
+
 	// 記録された入力
 	calls                fakeRepoCalls
 	lastInsertRow        TenantRow
@@ -197,6 +203,7 @@ type fakeRepository struct {
 	lastUpdateBoundName  string
 	lastUpdateDisabledID uuid.UUID
 	lastDisabledActor    uuid.UUID
+	lastEntNameLookup    string
 }
 
 func (r *fakeRepository) Insert(_ context.Context, t TenantRow) error {
@@ -294,6 +301,19 @@ func (r *fakeRepository) UpdateDisabled(_ context.Context, id uuid.UUID, actor u
 		return 0, r.updateDisabledErr
 	}
 	return r.updateDisabledAffected, nil
+}
+
+// TenantIDByEnterpriseName は enterprise_name → tenant_id の逆引きを模擬する（#39）。
+// 解決結果（id / found）と error を設定可能にし、呼出回数・入力（enterprise_name）を記録する。
+func (r *fakeRepository) TenantIDByEnterpriseName(_ context.Context, enterpriseName string) (uuid.UUID, bool, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.calls.tenantIDByEntName++
+	r.lastEntNameLookup = enterpriseName
+	if r.tenantIDErr != nil {
+		return uuid.Nil, false, r.tenantIDErr
+	}
+	return r.tenantIDResult, r.tenantIDFound, nil
 }
 
 // ---- Fake EventRecorder ----
@@ -1800,6 +1820,144 @@ func TestService_Disable(t *testing.T) {
 		}
 		if _, ok := h.log.warnWithDenyReason(); !ok {
 			t.Errorf("expected a WARN log entry with deny_reason field (NFR 2.2)")
+		}
+	})
+}
+
+// ===== TenantIDByEnterpriseName（enterprise_name → tenant_id 逆引き / #39） =====
+
+func TestService_TenantIDByEnterpriseName(t *testing.T) {
+	t.Run("bound テナントの enterprise_name を解決できるとき (id, true, nil) を返す（Req 3.1）", func(t *testing.T) {
+		// Arrange
+		h := newServiceHarness()
+		want := uuid.New()
+		h.repo.tenantIDResult = want
+		h.repo.tenantIDFound = true
+
+		// Act
+		id, found, err := h.svc.TenantIDByEnterpriseName(context.Background(), testEnterpriseName)
+
+		// Assert
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if !found {
+			t.Fatalf("expected found=true for a bound enterprise_name")
+		}
+		if id != want {
+			t.Errorf("expected id %s, got %s", want, id)
+		}
+		if h.repo.calls.tenantIDByEntName != 1 {
+			t.Errorf("expected Repository lookup to be called once, got %d", h.repo.calls.tenantIDByEntName)
+		}
+		if h.repo.lastEntNameLookup != testEnterpriseName {
+			t.Errorf("Repository must receive the enterprise_name %q, got %q", testEnterpriseName, h.repo.lastEntNameLookup)
+		}
+	})
+
+	t.Run("未 bound / 不在で一意解決できないとき (uuid.Nil, false, nil) を返す（Req 3.2）", func(t *testing.T) {
+		// Arrange: Repository が 0 件（found=false）を返す経路を模す。
+		h := newServiceHarness()
+		h.repo.tenantIDFound = false
+
+		// Act
+		id, found, err := h.svc.TenantIDByEnterpriseName(context.Background(), "enterprises/UNKNOWN")
+
+		// Assert: 一意解決不能は退避経路でありエラーにしない（Req 3.2）。
+		if err != nil {
+			t.Fatalf("unresolvable enterprise_name must not be an error, got %v", err)
+		}
+		if found {
+			t.Errorf("expected found=false for an unresolvable enterprise_name")
+		}
+		if id != uuid.Nil {
+			t.Errorf("expected uuid.Nil on not-found, got %s", id)
+		}
+		if h.repo.calls.tenantIDByEntName != 1 {
+			t.Errorf("expected Repository lookup to be called once, got %d", h.repo.calls.tenantIDByEntName)
+		}
+	})
+
+	t.Run("enterprise_name が空文字のとき DB を叩かず (uuid.Nil, false, nil) を即返す（Req 3.4 / 境界値）", func(t *testing.T) {
+		// Arrange: Repository が誤って found=true を返しても、空入力では呼ばれないことを担保する。
+		h := newServiceHarness()
+		h.repo.tenantIDResult = uuid.New()
+		h.repo.tenantIDFound = true
+
+		// Act
+		id, found, err := h.svc.TenantIDByEnterpriseName(context.Background(), "")
+
+		// Assert: 空 enterprise_name は退避経路へ流す（Req 3.4）。DB アクセスは行わない。
+		if err != nil {
+			t.Fatalf("empty enterprise_name must not be an error, got %v", err)
+		}
+		if found {
+			t.Errorf("expected found=false for empty enterprise_name")
+		}
+		if id != uuid.Nil {
+			t.Errorf("expected uuid.Nil on empty input, got %s", id)
+		}
+		if h.repo.calls.tenantIDByEntName != 0 {
+			t.Errorf("Repository must not be called on empty enterprise_name (no DB access), got %d", h.repo.calls.tenantIDByEntName)
+		}
+		// 退避（未割当扱い）の観測のため構造化ログを出す（NFR 3.1）。
+		if _, ok := h.log.warnWithDenyReason(); !ok {
+			t.Errorf("expected a WARN log entry with deny_reason field on empty input (NFR 3.1)")
+		}
+	})
+
+	t.Run("enterprise_name が空白のみのとき DB を叩かず found=false を返す（Req 3.4 / 空入力）", func(t *testing.T) {
+		// Arrange
+		h := newServiceHarness()
+		h.repo.tenantIDFound = true
+
+		// Act
+		_, found, err := h.svc.TenantIDByEnterpriseName(context.Background(), "   ")
+
+		// Assert
+		if err != nil {
+			t.Fatalf("whitespace-only enterprise_name must not be an error, got %v", err)
+		}
+		if found {
+			t.Errorf("expected found=false for whitespace-only enterprise_name")
+		}
+		if h.repo.calls.tenantIDByEntName != 0 {
+			t.Errorf("Repository must not be called on whitespace-only enterprise_name, got %d", h.repo.calls.tenantIDByEntName)
+		}
+	})
+
+	t.Run("Repository が DB 失敗（CodeUnavailable / IsTransient=true）を返すときその error を伝達する（Req 1.4 / 異常系）", func(t *testing.T) {
+		// Arrange: DB 失敗を transient として写像した error を Repository から返す。
+		h := newServiceHarness()
+		dbErr := &pkgerrors.Error{
+			Code:        pkgerrors.CodeUnavailable,
+			Message:     "tenant reverse lookup failed",
+			IsTransient: true,
+		}
+		h.repo.tenantIDErr = dbErr
+
+		// Act
+		id, found, err := h.svc.TenantIDByEnterpriseName(context.Background(), testEnterpriseName)
+
+		// Assert: error をそのまま伝達し、worker の nack（再処理保持）に委ねる。
+		if !stderrors.Is(err, dbErr) {
+			t.Fatalf("expected the repository db error to be propagated, got %v", err)
+		}
+		var de *pkgerrors.Error
+		if !stderrors.As(err, &de) {
+			t.Fatalf("expected *errors.Error, got %T", err)
+		}
+		if de.Code != pkgerrors.CodeUnavailable {
+			t.Errorf("expected CodeUnavailable, got %s", de.Code)
+		}
+		if !de.IsTransient {
+			t.Errorf("expected IsTransient=true so the worker nacks and retries (Req 1.4)")
+		}
+		if found {
+			t.Errorf("expected found=false on db error")
+		}
+		if id != uuid.Nil {
+			t.Errorf("expected uuid.Nil on db error, got %s", id)
 		}
 	})
 }
