@@ -70,7 +70,7 @@
   - _Boundary: AppService_
   - _Depends: 3_
 
-- [ ] 5. App Handler — 3 endpoint + RBAC + エラー写像
+- [x] 5. App Handler — 3 endpoint + RBAC + エラー写像
   - `internal/app/handler.go`: `Mount(r chi.Router)` で `POST /play-tokens`（ActionRead）/ `GET /apps`（ActionRead）/
     `POST /apps/sync`（ActionUpdate）を登録（`tenant.Handler.Mount` パターン）。`AuthClaimsFromContext` →
     `authz.Authorizer.AuthorizeAndLog`（`ResourceApp`, `AudienceTenantConsole`, `TargetTenantID=claims.TenantID`）で
