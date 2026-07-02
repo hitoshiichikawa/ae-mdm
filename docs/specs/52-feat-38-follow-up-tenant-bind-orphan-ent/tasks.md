@@ -79,7 +79,7 @@
   - _Depends: 5.2_
 
 - [ ] 7. integration test（RLS 下の予約・解放・回収・束縛・可逆性）
-- [ ] 7.1 tenant_repository_test.go に予約/解放/回収/署名束縛の競合テストを追加
+- [x] 7.1 tenant_repository_test.go に予約/解放/回収/署名束縛の競合テストを追加
   - 本 task は先行 task 3.1（Req 1.1/1.4/1.5）・task 3.2（Req 2.1）で `_Requirements_partial:_` 明示した deferred test を解消する dedicated regression test task（スコープは実 PostgreSQL を要する affected rows / sweep 挙動の integration test に限定）
   - ReserveBinding 並行: 同一 id 2 回で affected 1/0（Req 1.1 / NFR 2.1、orphan 防止の DB 層証跡）
   - ReleaseBinding: binding→pending_bind affected=1、pending_bind 行は affected=0（Req 1.5）
