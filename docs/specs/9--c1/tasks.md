@@ -6,7 +6,7 @@
 > `cmd/worker/main.go` は変更しない（handlers map 登録は #36 の責務 / design.md Risks）。
 > 依存方向: `device → notification`（StatusReport 型 / port を参照）。逆は発生させない。
 
-- [ ] 1. データモデル拡張（migration 0018）(P)
+- [x] 1. データモデル拡張（migration 0018）(P)
   - `backend/db/migrations/0018_devices_applied_policy_name_and_compliance_index.up.sql`:
     `ALTER TABLE devices ADD COLUMN IF NOT EXISTS applied_policy_name text`（nullable / STATUS_REPORT 報告値 / Req 7.1・2.1）
   - 同 up: `CREATE INDEX IF NOT EXISTS idx_devices_tenant_compliance ON devices(tenant_id, compliance_status)`（分類フィルタ一覧 p95<1s / NFR 1.1）
