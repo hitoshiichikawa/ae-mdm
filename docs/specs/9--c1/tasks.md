@@ -36,7 +36,7 @@
   - `service_test.go`: `isSyncDelayed` 境界（超過/ちょうど/NULL / Req 4.1・4.2・4.3）、詳細写像の空属性（Req 2.5）、overview 畳み込みと空集計（Req 6.4）（同 task 内テスト）
   - _Requirements: 1.7, 2.1, 2.2, 2.3, 2.5, 3.1, 3.2, 3.3, 4.1, 4.2, 4.3, 6.1, 6.4_
   - _Depends: 3_
-- [ ] 5. notification StatusHandler + DeviceStatusWriter port + payload parse + 単体テスト (P)
+- [x] 5. notification StatusHandler + DeviceStatusWriter port + payload parse + 単体テスト (P)
   - `backend/internal/notification/status_handler.go`: `DeviceStatusWriter` port・`StatusReport` 値オブジェクト（任意フィールドを pointer / `*json.RawMessage` で保持 / Req 7.2）・`StatusHandler`（`NotificationHandler` 実装）・`NewStatusHandler(w DeviceStatusWriter, log)` を定義
   - `Handle`: `Envelope.Payload` の AMAPI Device JSON を `StatusReport` へパースし `DeviceName`（=amapi_device_name）を抽出、`w.ApplyStatusReport` を 1 回呼ぶ。空 payload / malformed JSON / `DeviceName` 空は `*errors.Error{IsTransient:false}`（破棄 ack / Verifier 分類方針と整合）。機密値を error 文言・ログに補間しない（NFR 3.1）
   - `notification` は device を import しない（doc.go 不変条件を維持）。tenant ctx は Dispatcher が確立済み前提
