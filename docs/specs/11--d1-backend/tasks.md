@@ -26,7 +26,7 @@
   - _Requirements: 2.2, 2.3, 3.2, 3.4, 5.1_
   - _Boundary: AppRepository, AppService_
 
-- [ ] 2. App Service — webToken 発行とカタログ参照（CreatePlayToken / ListApps）
+- [x] 2. App Service — webToken 発行とカタログ参照（CreatePlayToken / ListApps）
   - `internal/app/service.go`: `Service` interface（本タスクでは `CreatePlayToken` / `ListApps` を定義）+
     consumer-defines-interface（`webTokenClient`＝amapi.Client / `enterpriseResolver`＝tenant.Service）+ `NewService` DI。
     authz は持たない（Handler の責務 / `policy/service.go` と同方針）
