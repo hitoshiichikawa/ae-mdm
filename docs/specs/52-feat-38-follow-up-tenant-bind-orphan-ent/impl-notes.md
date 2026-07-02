@@ -218,22 +218,28 @@ per-task ループで実装を進める。本ファイルは各 task の learnin
     `migrations_reversible_test`（0017 込みの全 down→up / task 7.1 boundary 外・変更禁止）が担保済み。
     本ファイルの各テストが 0017 適用済みスキーマ上で `binding` enum 値と `signup_url_name` 列を
     実際に往復させることで Req 4.1 の実挙動証跡を兼ねる（tasks.md L90 の整理）。
-  - **既存テストは追記のみ・非改変**: prompt の「追記のみ / assertion 非改変」に従い、既存
-    `TestTenantRepository_*` は一切書き換えていない（下記残存課題の #38 テスト破損もこの制約により
-    本 task では修正せず flag に留めた）。
-- **残存課題（要 Architect / PM 判断・flag）**: task 3.1 が `UpdateBound` の WHERE を
+  - **既存 UpdateBound テストの fixture 追従（coordinator 承認済み）**: task 3.1 の
+    `UpdateBound` WHERE 変更（`pending_bind`→`binding`）で破損する #38 由来の既存 2 件を、
+    coordinator 承認のもと boundary（`tenant_repository_test.go`）内で新契約へ追従させた
+    （下記残存課題参照）。assert 本体は非改変で ARRANGE への `ReserveBinding` 追加のみ。
+- **残存課題（対応済み）**: task 3.1 が `UpdateBound` の WHERE を
   `status='pending_bind'`→`status='binding'` へ変更した結果、#38 由来の既存 integration test
-  `TestTenantRepository_UpdateBound_AffectedAndDoubleBind`（L144）と
-  `TestTenantRepository_UpdateBound_DuplicateEnterpriseName_Conflict`（L186）が **実 DB では破損**する
-  （いずれも `Insert`（pending_bind）直後に `UpdateBound` を呼び affected=1 / bound を期待するが、
-  新 WHERE では affected=0 となり両テストが fail する）。本 task の `_Boundary:_` は当ファイルだが
-  prompt が「既存テストの assertion を弱めたり書き換えたりしない（追記のみ）」を明示するため、
-  ARRANGE 修正（`ReserveBinding` を挟んで binding 行にする fixture 追従）を本 task では実施していない。
-  自動 verify（DB env 未設定で self-skip）は green だが実 DB CI では red になるため、これら 2 件の
-  ARRANGE を新契約（binding 起点）へ追従させる修正の要否を Architect / PM / Reviewer に確認したい
-  （新 `TestTenantRepository_UpdateBound_BindingRowConfirmsBound` が正しい binding→bound 正常系を
-  既にカバーしており、旧 2 件は fixture 追従 or 統廃合の判断対象）。spec 本文（tasks.md / design.md /
-  requirements.md）は書き換えていない。
+  `TestTenantRepository_UpdateBound_AffectedAndDoubleBind` と
+  `TestTenantRepository_UpdateBound_DuplicateEnterpriseName_Conflict` が実 DB で破損する
+  （`Insert`（pending_bind）直後に `UpdateBound` を呼び affected=1 / bound / 23505 を期待するが、
+  新 WHERE では affected=0 となり fail する）ことを検出し、当初は「追記のみ」制約により flag に
+  留めていた。**coordinator の承認（design.md で `UpdateBound WHERE status='binding'` は確定済みであり、
+  fixture 追従は task 5.1 が Create テストを新挙動へ追従させた前例と同じ扱い）を受け、boundary 内で
+  fixture 追従を完了**した:
+  - `AffectedAndDoubleBind`: 初回 UpdateBound の前に `ReserveBinding`（affected=1）を挟み binding 行に
+    してから確定。2 回目 UpdateBound は既に bound（binding でない）で affected=0（既存 assert 維持）。
+  - `DuplicateEnterpriseName_Conflict`: A・B 双方に `ReserveBinding`（各 affected=1）を挟む。B を予約
+    しないと UpdateBound B が no-op(affected=0) で 23505 に到達しないため両方を binding にしてから
+    重複 enterprise_name 投入 → CodeConflict（既存 assert 維持）。
+  いずれも assert は緩めず ARRANGE への `ReserveBinding` 追加のみ（＋起点変更を示す inline / doc コメント
+  更新）。旧 2 件は「二重 bind idempotency」「重複 enterprise_name→23505/CodeConflict」という新規
+  `BindingRowConfirmsBound` では代替できない観点を持つため統廃合せず温存。spec 本文（tasks.md /
+  design.md / requirements.md）は書き換えていない。
 
 ## 確認事項
 
