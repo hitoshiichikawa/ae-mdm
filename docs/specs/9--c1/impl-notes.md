@@ -31,6 +31,16 @@
   - `UpdateFromStatusReport` は design 記載どおり `WHERE amapi_device_name=$1`（(tenant_id, amapi_device_name) UNIQUE + RLS で高々 1 行）。全カラム `COALESCE($n, col)` で欠落=既存値保持。affected=0（未登録端末）は error に倒さず `(0, nil)`。
 - **残存課題**: enum/jsonb の実 DB bind/scan 検証は `test/integration/device_repository_test.go`（+ `seedDevice` の enum/jsonb cast INSERT）が担保するが、当環境は `DATABASE_URL` 未設定で **t.Skip**（compile のみ確認）。CI / DB 有り環境で実行し bind/scan の runtime 妥当性を最終確認されたい。NFR 1.1（index 妥当性 EXPLAIN）は task 8.1 の deferred。
 
+### Task 4
+
+- **採用方針**: `service.go` に read 系 `Service`（`List`/`Get`/`Overview` の 3 メソッド）を実装。DB 非依存の fake `Repository`/`Clock` で列挙全 AC を網羅する単体テストを近傍（`service_test.go`）に追加した。
+- **重要な判断**:
+  - コンストラクタは `NewService(repo, clock, syncDelayThresholdHours int)` とし、config 型全体ではなく閾値 int を注入（Service を config から独立させ fake clock + 任意閾値で境界テストしやすくする / Req 4.2）。閾値は `time.Duration(hours)*time.Hour` へ換算し、`syncCutoff = Clock.Now() - 閾値` を List/Get で 1 回算出して filter・per-row `SyncDelayed` に共用（Repository.ListByTenant と同一 cutoff を渡す）。
+  - `isSyncDelayed` は `lastStatusAt != nil && lastStatusAt.Before(cutoff)`（strict `<` / 閾値ちょうど・NULL は非遅延 / design.md 設計判断・Req 4.1・4.3）。Repository.ListByTenant の SQL 意味論（`last_status_at < cutoff` / NULL 非遅延）と一致。
+  - jsonb 空属性は `rawOrDefault`（`len==0` 判定）で HW/SW→`{}`、非準拠理由/installed_apps→`[]` を補填し null を返さない（Req 2.5）。`applied_policy_name` NULL→`""`。`compliance_status` は stored 値をそのまま返却（再判定しない / Req 3.1・3.3）。`Get` は Repository が写像済みの `ErrDeviceNotFound` をそのまま伝達。
+  - `Overview` は flat `[]TenantComplianceCount` を slice + index map で畳み込み、tenant 出現順（Repository の tenant_id 順）を保ちつつ `Breakdown` を 4 分類 0 埋め初期化してから加算。`DeviceCount` は当該 tenant の count 合計。全体 0 件は非 nil 空 slice（Req 6.1・6.4）。`Service` interface に write メソッドを持たせず Req 7.3 を型担保。
+- **残存課題**: なし（Handler/AdminHandler は task 7/8、`Service.Overview` の tenant_id 絞り込み Req 6.3 は Repository/AdminHandler 側で担保）。
+
 ## 確認事項
 
 - **実 DB repository テストの配置（task 文面との差異）**: task 3 文面は実 DB テストを `repository_test.go` と記すが、本 codebase の実 DB harness（`requireDBURLs`/`seedDummyData`/`newAppPool`/migration）は `test/integration`（package `integration_test`）内にしか無く、design.md File Structure Plan も「実 DB 結合は `backend/test/integration/`」と規定する。したがって実 DB テストは `backend/test/integration/device_repository_test.go` に配置し、`internal/device/repository_test.go` は DB 非依存の near-neighbor 単体テスト（scan / error mapping / bind helper）に充てた。spec 本文は書き換えていない。
