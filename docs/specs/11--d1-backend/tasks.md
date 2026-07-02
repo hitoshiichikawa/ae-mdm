@@ -5,7 +5,7 @@
 > （`docs/specs/11--d1-backend/requirements.md`）の numeric ID を指す。参照モデルは `internal/policy/`。
 > 各タスクは対応する co-located `*_test.go` を同一タスク内に含む（テスト後続 deferred は 6.1 のみ）。
 
-- [ ] 1. App Repository とパッケージ雛形（tenant_apps 永続化層）
+- [x] 1. App Repository とパッケージ雛形（tenant_apps 永続化層）
   - `internal/app/doc.go`: パッケージ doc + 依存方向ルール（`policy/doc.go` に倣い、cmd を import しない /
     Handler のみ httpserver を import / amapi・tenant・audit・authz・errors・logger のみ許可）
   - `internal/app/service_types.go`: `PlayTokenRequest{parent_frame_url}` / `PlayTokenView{value}` /
