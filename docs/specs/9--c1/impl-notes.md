@@ -70,6 +70,16 @@
   - **存在差非露出（Req 2.4/5.1/5.2）**: 不在・越境とも Service が同一 sentinel `ErrDeviceNotFound` を返し `WriteHTTP` が同一 `{code, message}` body + 404 に写像。別 device ID の 2 要求で body 完全一致を確認するテストで Req 5.2 を担保。
 - **残存課題**: cmd/api 配線（`buildDeviceHandler` + `routers.API.Mount("/devices", ...)`）は task 8 の責務で本 task 対象外（`doRequest`/spy は task 8 の handler test でも流用可）。
 
+### Task 8
+
+- **採用方針**: `admin_handler.go` に admin-console 横断 overview の `device.AdminHandler`（内包 chi.Router / `NewAdminHandler` / `ServeHTTP` / GET `/` のみ登録）を `audit.AdminHandler` に忠実に写経し、`cmd/api/main.go` に `buildDeviceService` / `buildDeviceHandler` / `buildDeviceAdminHandler` helper を追加して `routers.API.Mount("/devices", ...)` + `routers.Admin.Mount("/devices/overview", ...)` を既存 (7)〜(12) ブロックと同パターンで配線した。
+- **重要な判断**:
+  - **cross-tenant authz の probe-tenant 方式**: SuperAdmin の `SessionTenantID` は `uuid.Nil` であり、design の字面どおり `TargetTenantID=claims.TenantID`（=Nil）を渡すと authz が fail-closed で無条件 deny し全テナントビューが 403 に化ける（`audit.AdminHandler` L89-99 が同じ罠を記録）。そのため tenant_id 無指定時は非 nil の sentinel `crossTenantAuthzProbeTenantID`（`ffffffff-...`）を TargetTenantID に渡し、許可マトリクスの cross-tenant `device read`（SuperAdmin のみ許可 / `permissions.go:90`）で non-SuperAdmin を 403 に落とす二重防御を成立させた（Req 6.2）。probe は authz 判定専用で tenantFilter には設定しない。
+  - **helper の Service 共有**: `buildDeviceHandler` / `buildDeviceAdminHandler` は各々 `buildDeviceService(pool, cfg)` を呼んで独立 `device.Service` を構築する（Service は stateless で pool を接続せず保持するのみ / 二重構築は無害）。task 文面の「pool/authorizer/config/log を再利用」に忠実に、両 helper が pool/authorizer/cfg/log を引数で受け取る形にした（`buildAppHandler` 手本）。閾値は `cfg.DeviceSyncDelayThresholdHours`（既定 24h / `config/env.go:191`）を注入。
+  - **空集計 `[]` の担保（Req 6.4）**: `Service.Overview` は非 nil 空 slice を返す（task 4 の `foldOverview`）が、防御的に handler 側でも `overviews == nil` を空 slice へ正規化してから `writeJSON` し、JSON が `null` ではなく `[]` になることを二重で保証した。
+  - **「tenant-console aud → 403」の検証位置**: handler は authz を `AudienceAdminConsole` 固定で呼ぶため、tenant-console aud の物理排除は本来 `RequireAdminConsoleAndSuperAdmin` 固定ガードの責務（unit では不在）。unit テストでは tenant-console ユーザー（Viewer / 自テナント）も非 SuperAdmin として cross-tenant deny 経由で 403 になることを確認し、Req 6.2 の 403 を handler-level で網羅した（`audit.AdminHandler` の 403 テストと同趣旨）。
+- **残存課題**: なし（task 8 の AC 6.1〜6.4 は単体 + 配線回帰で担保）。実 DB 経由の overview 集計（`AggregateOverview` の SuperAdmin RLS 挙動）は task 3/4 の integration テスト（`DATABASE_URL` 未設定で Skip）が担保する。deferrable な task 8.1（NFR 1.1 index EXPLAIN / 一覧 E2E 補完）は `- [ ]*` で本 task 対象外。
+
 ## 確認事項
 
 - **実 DB repository テストの配置（task 文面との差異）**: task 3 文面は実 DB テストを `repository_test.go` と記すが、本 codebase の実 DB harness（`requireDBURLs`/`seedDummyData`/`newAppPool`/migration）は `test/integration`（package `integration_test`）内にしか無く、design.md File Structure Plan も「実 DB 結合は `backend/test/integration/`」と規定する。したがって実 DB テストは `backend/test/integration/device_repository_test.go` に配置し、`internal/device/repository_test.go` は DB 非依存の near-neighbor 単体テスト（scan / error mapping / bind helper）に充てた。spec 本文は書き換えていない。
