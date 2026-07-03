@@ -54,7 +54,7 @@
   - `handler_test.go`: parseListFilter 400（Req 1.6）、未認証 401 / deny 403、不在・越境 404 が同一応答（Req 5.1・5.2）、GET のみで write route 不在（Req 7.3）（同 task 内テスト / parse failure・existence-hiding）
   - _Requirements: 1.1, 1.6, 2.1, 2.4, 3.4, 5.1, 5.2, 7.3_
   - _Depends: 4_
-- [ ] 8. device AdminHandler（overview）+ cmd/api 配線 + テスト
+- [x] 8. device AdminHandler（overview）+ cmd/api 配線 + テスト
   - `admin_handler.go`: `GET /api/admin/devices/overview`。`RequireAdminConsoleAndSuperAdmin` 配下 Mount 前提 + `authz` cross-tenant `ResourceDevice read` 二重防御（`audit.AdminHandler` probe-tenant 手本 / Req 6.2）。SuperAdmin `TenantContext` を `db.WithTenantContext` で確立してから `Service.Overview`。`tenant_id` query 任意（不正書式 400 / Req 6.3）。空集計は `[]` で 200（Req 6.4）
   - `cmd/api/main.go`: `buildDeviceHandler` / `buildDeviceAdminHandler` helper を追加し（pool/authorizer/config/log は既存構築済みを再利用）、`routers.API.Mount("/devices", ...)` と `routers.Admin.Mount("/devices/overview", ...)` を配線（既存 (7)〜(10) ブロックと同パターン）
   - `admin_handler_test.go`: 非 SuperAdmin / tenant-console aud → 403（Req 6.2）、tenant_id 絞り込み（Req 6.3）、空集計 200（Req 6.4）。`cmd/api/main_test.go`: `buildDeviceHandler` 型レベル回帰（`buildPolicyHandler` 手本）（同 task 内テスト）
