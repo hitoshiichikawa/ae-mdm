@@ -46,6 +46,11 @@ func rawPtr(s string) *json.RawMessage {
 	return &r
 }
 
+// boolPtr は bool を *bool 化するテスト helper（policyCompliant の存在有無を表現する）。
+func boolPtr(b bool) *bool {
+	return &b
+}
+
 // TestStatusApplier_EmptyNonComplianceDetailsMarksCompliant は、非準拠理由が空配列で payload に
 // 存在するとき compliant を導出し、non_compliance_details を渡すことを検証する（Req 3.2）。
 func TestStatusApplier_EmptyNonComplianceDetailsMarksCompliant(t *testing.T) {
@@ -160,6 +165,79 @@ func TestStatusApplier_ComplianceDerivationDefaults(t *testing.T) {
 				t.Errorf("compliance 導出 = %v; want %q", repo.captured.ComplianceStatus, tt.want)
 			}
 		})
+	}
+}
+
+// TestStatusApplier_PolicyCompliantTrueMarksCompliant は、policyCompliant:true が payload に存在し
+// nonComplianceDetails が欠落しているとき compliant を導出することを検証する（Req 7.1 回帰）。
+// 既存の non_compliant を保持し続ける退行（policyCompliant を無視するバグ）を捕捉する。
+func TestStatusApplier_PolicyCompliantTrueMarksCompliant(t *testing.T) {
+	// Arrange: policyCompliant:true のみ（nonComplianceDetails 欠落）。
+	repo := &fakeStatusRepo{affected: 1}
+	a := NewStatusApplier(repo, nil)
+	report := notification.DeviceStatusReport{
+		DeviceName:      "enterprises/X/devices/d1",
+		PolicyCompliant: boolPtr(true),
+	}
+
+	// Act
+	if err := a.ApplyStatusReport(context.Background(), report); err != nil {
+		t.Fatalf("正常系で error を返すべきでない: %v", err)
+	}
+
+	// Assert: nonComplianceDetails 欠落でも policyCompliant:true で compliant へ更新する。
+	if repo.captured.ComplianceStatus == nil || *repo.captured.ComplianceStatus != ComplianceStatusCompliant {
+		t.Errorf("policyCompliant:true は compliant を導出すべき: got %v", repo.captured.ComplianceStatus)
+	}
+	// nonComplianceDetails は欠落なので列更新しない（COALESCE で既存値保持 / Req 7.2）。
+	if repo.captured.NonComplianceDetails != nil {
+		t.Errorf("nonComplianceDetails 欠落時は non_compliance_details を更新すべきでない: got %v", repo.captured.NonComplianceDetails)
+	}
+}
+
+// TestStatusApplier_PolicyCompliantFalseMarksNonCompliant は、policyCompliant:false が存在し
+// nonComplianceDetails が欠落しているとき non_compliant を導出することを検証する（Req 7.1）。
+func TestStatusApplier_PolicyCompliantFalseMarksNonCompliant(t *testing.T) {
+	// Arrange
+	repo := &fakeStatusRepo{affected: 1}
+	a := NewStatusApplier(repo, nil)
+	report := notification.DeviceStatusReport{
+		DeviceName:      "enterprises/X/devices/d1",
+		PolicyCompliant: boolPtr(false),
+	}
+
+	// Act
+	if err := a.ApplyStatusReport(context.Background(), report); err != nil {
+		t.Fatalf("正常系で error を返すべきでない: %v", err)
+	}
+
+	// Assert
+	if repo.captured.ComplianceStatus == nil || *repo.captured.ComplianceStatus != ComplianceStatusNonCompliant {
+		t.Errorf("policyCompliant:false は non_compliant を導出すべき: got %v", repo.captured.ComplianceStatus)
+	}
+}
+
+// TestStatusApplier_PolicyCompliantTrueWithNonEmptyDetailsFallsBackToNonCompliant は、
+// policyCompliant:true と非空 nonComplianceDetails が矛盾するとき、未検知の非準拠を見逃さないよう
+// 安全側 non_compliant に倒すことを検証する（境界 / 安全側フォールバック）。
+func TestStatusApplier_PolicyCompliantTrueWithNonEmptyDetailsFallsBackToNonCompliant(t *testing.T) {
+	// Arrange: policyCompliant:true だが理由が残る矛盾 payload。
+	repo := &fakeStatusRepo{affected: 1}
+	a := NewStatusApplier(repo, nil)
+	report := notification.DeviceStatusReport{
+		DeviceName:           "enterprises/X/devices/d1",
+		PolicyCompliant:      boolPtr(true),
+		NonComplianceDetails: rawPtr(`[{"settingName":"passwordPolicies"}]`),
+	}
+
+	// Act
+	if err := a.ApplyStatusReport(context.Background(), report); err != nil {
+		t.Fatalf("正常系で error を返すべきでない: %v", err)
+	}
+
+	// Assert: 非空理由がある限り安全側 non_compliant。
+	if repo.captured.ComplianceStatus == nil || *repo.captured.ComplianceStatus != ComplianceStatusNonCompliant {
+		t.Errorf("policyCompliant:true でも非空理由があれば non_compliant に倒すべき: got %v", repo.captured.ComplianceStatus)
 	}
 }
 

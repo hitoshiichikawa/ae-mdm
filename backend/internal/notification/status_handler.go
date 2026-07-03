@@ -43,6 +43,12 @@ type DeviceStatusReport struct {
 	LastStatusReportTime *time.Time `json:"lastStatusReportTime"`
 	// AppliedPolicyName は端末に適用中のポリシー名（報告値）。nil = 欠落。
 	AppliedPolicyName *string `json:"appliedPolicyName"`
+	// PolicyCompliant は AMAPI Device.policyCompliant（端末がポリシーに準拠しているかの
+	// authoritative な boolean）。nil = payload 欠落（compliance を再判定しない）。true =
+	// 準拠 / false = 非準拠。nonComplianceDetails が欠落していても本フラグが存在すれば
+	// compliance_status を更新する（Req 7.1。AMAPI Device schema 参照:
+	// https://developers.google.com/android/management/reference/rest/v1/enterprises.devices）。
+	PolicyCompliant *bool `json:"policyCompliant"`
 	// NonComplianceDetails は非準拠理由。nil = 欠落 / 非 nil（[] 含む）で compliance 再判定対象。
 	NonComplianceDetails *json.RawMessage `json:"nonComplianceDetails"`
 	// HardwareInfo はハードウェア情報。nil = 欠落。

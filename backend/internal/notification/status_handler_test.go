@@ -25,6 +25,7 @@ const fullStatusReportPayload = `{
   "name": "enterprises/LC0123abcd/devices/dev-1",
   "lastStatusReportTime": "2026-06-29T12:00:00Z",
   "appliedPolicyName": "enterprises/LC0123abcd/policies/policy-1",
+  "policyCompliant": false,
   "nonComplianceDetails": [{"settingName":"passwordPolicies"}],
   "hardwareInfo": {"brand":"Google","model":"Pixel"},
   "softwareInfo": {"androidVersion":"14"},
@@ -72,6 +73,9 @@ func TestHandle_FullPayloadMapsAllFields(t *testing.T) {
 	if got.AppliedPolicyName == nil || *got.AppliedPolicyName != "enterprises/LC0123abcd/policies/policy-1" {
 		t.Errorf("AppliedPolicyName mismatch: got %v", got.AppliedPolicyName)
 	}
+	if got.PolicyCompliant == nil || *got.PolicyCompliant != false {
+		t.Errorf("PolicyCompliant は payload の boolean（false）を非 nil で写像すべき: got %v", got.PolicyCompliant)
+	}
 	if got.NonComplianceDetails == nil {
 		t.Error("NonComplianceDetails は非 nil で写像されるべき")
 	}
@@ -113,6 +117,9 @@ func TestHandle_PartialPayloadKeepsMissingFieldsNil(t *testing.T) {
 	}
 	if got.HardwareInfo != nil {
 		t.Error("欠落した hardwareInfo は nil のままであるべき（更新しない / Req 7.2）")
+	}
+	if got.PolicyCompliant != nil {
+		t.Error("欠落した policyCompliant は nil のままであるべき（compliance を再判定しない / Req 7.2）")
 	}
 	if got.NonComplianceDetails != nil {
 		t.Error("欠落した nonComplianceDetails は nil のままであるべき（更新しない / Req 7.2）")

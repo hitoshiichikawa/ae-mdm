@@ -49,7 +49,8 @@ func TestDeviceStatusApply_ReadAfterWrite(t *testing.T) {
 	  "appliedPolicyName": "enterprises/X/policies/p1",
 	  "nonComplianceDetails": [{"settingName":"passwordPolicies"}],
 	  "hardwareInfo": {"brand":"Google"},
-	  "softwareInfo": {"androidVersion":"14"}
+	  "softwareInfo": {"androidVersion":"14"},
+	  "applicationReports": [{"packageName":"com.example.app"}]
 	}`)
 	env := notification.Envelope{
 		MessageID:        "msg-apply-1",
@@ -81,6 +82,10 @@ func TestDeviceStatusApply_ReadAfterWrite(t *testing.T) {
 	}
 	if !jsonEqual(t, got.HardwareInfo, `{"brand":"Google"}`) {
 		t.Errorf("hardware_info が反映されていない: %s", got.HardwareInfo)
+	}
+	// installed_apps（applicationReports）の DB 更新 → Service.Get 返却まで検証（Req 7.1 / 2.2）。
+	if !jsonEqual(t, got.InstalledApps, `[{"packageName":"com.example.app"}]`) {
+		t.Errorf("installed_apps が反映されていない: %s", got.InstalledApps)
 	}
 }
 
@@ -146,5 +151,51 @@ func TestDeviceStatusApply_PartialPayloadPreservesExisting(t *testing.T) {
 	}
 	if !jsonEqual(t, got.NonComplianceDetails, `[{"r":"old"}]`) {
 		t.Errorf("non_compliance_details が保持されていない: %s", got.NonComplianceDetails)
+	}
+}
+
+// TestDeviceStatusApply_PolicyCompliantClearsNonCompliant はシナリオ (Req 7.1) 対応。
+// 既存 non_compliant な端末に policyCompliant:true（nonComplianceDetails 欠落）の STATUS_REPORT を
+// 適用すると、compliance_status が compliant へ更新され Service.Get に反映されることを検証する。
+// policyCompliant を無視して stale な non_compliant を保持し続ける退行を実 DB で捕捉する。
+func TestDeviceStatusApply_PolicyCompliantClearsNonCompliant(t *testing.T) {
+	// Arrange: 既存 non_compliant な端末を投入する。
+	repo, pool, ids, ctxA, cleanup := setupDeviceRepo(t)
+	defer cleanup()
+
+	target := uuid.New()
+	const amapiName = "enterprises/X/devices/APPLY3"
+	seedDevice(t, ctxA, pool, seedDeviceInput{
+		id: target, tenantID: ids.tenantAID, amapiName: amapiName,
+		mode: string(device.DeviceModeFullyManaged), compliance: string(device.ComplianceStatusNonCompliant),
+		nonComplianceDetails: `[{"settingName":"passwordPolicies"}]`,
+	})
+
+	applier := device.NewStatusApplier(repo, nil)
+	handler := notification.NewStatusHandler(applier, nil)
+
+	// policyCompliant:true のみ（nonComplianceDetails 欠落）の STATUS_REPORT。
+	payload := []byte(`{"name":"` + amapiName + `","policyCompliant":true}`)
+	env := notification.Envelope{
+		MessageID:        "msg-apply-compliant",
+		NotificationType: notification.StatusReport,
+		EnterpriseName:   "enterprises/X",
+		Payload:          payload,
+		PublishTime:      time.Now(),
+	}
+
+	// Act
+	if err := handler.Handle(ctxA, env); err != nil {
+		t.Fatalf("STATUS_REPORT Handle(policyCompliant): %v", err)
+	}
+
+	// Assert: compliance_status が compliant へ更新される（Req 7.1）。
+	svc := device.NewService(repo, device.SystemClock{}, 24)
+	got, err := svc.Get(ctxA, ids.tenantAID, target)
+	if err != nil {
+		t.Fatalf("Service.Get: %v", err)
+	}
+	if got.ComplianceStatus != device.ComplianceStatusCompliant {
+		t.Errorf("compliance_status = %q; want compliant（policyCompliant:true で更新）", got.ComplianceStatus)
 	}
 }

@@ -34,9 +34,11 @@ func NewStatusApplier(repo Repository, log logger.Logger) *StatusApplier {
 //
 // notification.DeviceStatusReport を StatusApplyInput へ写像し、Repository.UpdateFromStatusReport へ
 // 委譲する。任意フィールドは pointer / *json.RawMessage をそのまま渡し、nil（payload 欠落）は
-// COALESCE で既存値保持される（Req 7.2）。compliance_status / non_compliance_details は
-// NonComplianceDetails が payload に存在（非 nil）するときのみ算出・更新する（欠落時は未更新 /
-// Req 3.2・7.2）。unsupported は本経路で書き込まない（Open Questions / design.md L285）。
+// COALESCE で既存値保持される（Req 7.2）。compliance_status は PolicyCompliant（AMAPI Device の
+// authoritative な boolean）または NonComplianceDetails のいずれかが payload に存在するときに
+// 算出・更新する（両方欠落なら未更新 / Req 3.2・7.1・7.2）。non_compliance_details 列は
+// NonComplianceDetails が存在するときのみ更新する（欠落時は COALESCE で既存値保持）。
+// unsupported は本経路で書き込まない（Open Questions / design.md L285）。
 //
 // Repository の戻り error は再分類せず透過する（ack/nack 判定は Dispatcher の責務 / design.md
 // Postconditions）。affected=0（未登録端末 / ENROLLMENT 未処理）は error に倒さず nil を返して
@@ -51,10 +53,12 @@ func (a *StatusApplier) ApplyStatusReport(ctx context.Context, r notification.De
 		SoftwareInfo:         r.SoftwareInfo,
 		InstalledApps:        r.InstalledApps,
 	}
-	// NonComplianceDetails が payload に存在する時のみ compliance を算出して更新する（Req 3.2）。
-	if r.NonComplianceDetails != nil {
+	// PolicyCompliant または NonComplianceDetails が payload に存在する時のみ compliance を算出して
+	// 更新する（Req 3.2・7.1）。両方欠落なら compliance_status は未更新（COALESCE で既存値保持 / Req 7.2）。
+	// non_compliance_details 列は payload に存在する時のみ渡す（欠落時は nil で既存値保持）。
+	if r.PolicyCompliant != nil || r.NonComplianceDetails != nil {
 		input.NonComplianceDetails = r.NonComplianceDetails
-		status := deriveComplianceStatus(*r.NonComplianceDetails)
+		status := deriveComplianceStatus(r.PolicyCompliant, r.NonComplianceDetails)
 		input.ComplianceStatus = &status
 	}
 
@@ -70,26 +74,42 @@ func (a *StatusApplier) ApplyStatusReport(ctx context.Context, r notification.De
 	return nil
 }
 
-// deriveComplianceStatus は payload に存在する非準拠理由（NonComplianceDetails）から
-// コンプライアンス分類を導出する（空 → compliant / 非空 → non_compliant / Req 3.2）。
+// deriveComplianceStatus は payload に存在する compliance シグナル（policyCompliant / 非準拠理由）
+// からコンプライアンス分類を導出する（Req 3.2・7.1）。呼び出し側は policyCompliant または
+// nonComplianceDetails のいずれかが存在するときのみ本関数を呼ぶ。
 //
-// 判定は JSON array として解釈した長さで行う。空 / 空白のみ / JSON null は「空 = compliant」に
-// 倒す。AMAPI 契約上 array のはずだが array として解釈できない異常系は、安全側に倒して
-// 「非空 = non_compliant」を既定とする（未検知の非準拠を見逃さないため / impl-notes 参照）。
+// 判定順（安全側 non_compliant を優先）:
+//  1. policyCompliant:false は AMAPI Device の authoritative な非準拠シグナル → non_compliant。
+//  2. 非空 nonComplianceDetails も非準拠を示す（policyCompliant:true と矛盾しても未検知の非準拠を
+//     見逃さないため安全側 non_compliant に倒す）→ non_compliant。
+//  3. 上記いずれでもない（policyCompliant:true、または空 nonComplianceDetails）→ compliant。
+//
 // unsupported は本経路で導出しない（read の第 4 分類 / 書込み契機は Open Questions）。
-func deriveComplianceStatus(raw json.RawMessage) ComplianceStatus {
+func deriveComplianceStatus(policyCompliant *bool, details *json.RawMessage) ComplianceStatus {
+	if policyCompliant != nil && !*policyCompliant {
+		return ComplianceStatusNonCompliant
+	}
+	if details != nil && hasNonComplianceDetails(*details) {
+		return ComplianceStatusNonCompliant
+	}
+	return ComplianceStatusCompliant
+}
+
+// hasNonComplianceDetails は非準拠理由 jsonb が「非空の非準拠理由を持つ」かを判定する。
+//
+// 判定は JSON array として解釈した長さで行う。空配列 / 空白のみ / JSON null は false（非準拠理由
+// なし）。AMAPI 契約上 array のはずだが array として解釈できない異常系は、安全側に倒して true
+// （非準拠あり扱い）を既定とする（未検知の非準拠を見逃さないため / impl-notes 参照）。
+func hasNonComplianceDetails(raw json.RawMessage) bool {
 	trimmed := bytes.TrimSpace(raw)
 	if len(trimmed) == 0 || string(trimmed) == "null" {
-		return ComplianceStatusCompliant
+		return false
 	}
 	var details []json.RawMessage
 	if err := json.Unmarshal(trimmed, &details); err != nil {
-		return ComplianceStatusNonCompliant
+		return true
 	}
-	if len(details) == 0 {
-		return ComplianceStatusCompliant
-	}
-	return ComplianceStatusNonCompliant
+	return len(details) > 0
 }
 
 // 型 assertion: StatusApplier が notification.DeviceStatusWriter を満たすことを compile-time で確認する。
