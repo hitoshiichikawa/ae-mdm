@@ -34,6 +34,7 @@ import (
 	"github.com/hitoshiichikawa/ae-mdm/internal/audit"
 	"github.com/hitoshiichikawa/ae-mdm/internal/auth"
 	"github.com/hitoshiichikawa/ae-mdm/internal/config"
+	"github.com/hitoshiichikawa/ae-mdm/internal/device"
 	"github.com/hitoshiichikawa/ae-mdm/internal/enrollment"
 	"github.com/hitoshiichikawa/ae-mdm/internal/logger"
 	"github.com/hitoshiichikawa/ae-mdm/internal/notification"
@@ -124,7 +125,10 @@ func healthcheckURL(listenAddr string) string {
 //  12. app domain（Repository / Service / Handler）の DI 配線 +
 //     Routers.API への `/play-tokens` / `/apps` / `/apps/sync` Mount（Issue #11 / D1）。既存
 //     amapiClient / auditSvc / tenantSvc / authorizer を再利用する（新規構築しない）
-//  13. ListenAndServe goroutine + signal.NotifyContext で graceful shutdown
+//  13. device domain（Repository / Service / Handler / AdminHandler）の DI 配線 +
+//     Routers.API への `/devices` / Routers.Admin への `/devices/overview` Mount（Issue #9 / C1）。
+//     既存 pool / authorizer / cfg / log を再利用する（新規構築しない）
+//  14. ListenAndServe goroutine + signal.NotifyContext で graceful shutdown
 //
 // いずれかの初期化失敗で exit code 1 + 構造化 ERROR ログを出す（NFR 3.1 / 3.2）。
 // pool は defer で Close する（shutdown 順序: HTTP server.Shutdown → pool.Close）。
@@ -332,7 +336,30 @@ func runBootstrap(ctx context.Context) int {
 	appHandler := buildAppHandler(pool, amapiClient, auditSvc, authorizer, tenantSvc, log)
 	appHandler.Mount(routers.API)
 
-	// (13) ListenAndServe + graceful shutdown
+	// (13) device domain（C1 / Issue #9）の DI 配線 + Mount
+	//
+	// pool / authorizer / cfg / log は既存 bootstrap で構築済みのものを再利用する（新規構築しない）。
+	// device ドメインは STATUS_REPORT 反映を除く read 系（一覧 / 詳細 / 横断 overview）を提供する。
+	//   - Repository は pgxpool 経由で tenant-scoped context のまま devices へアクセスし、RLS に
+	//     テナント分離を委ねる（SuperAdmin 昇格しない）。overview のみ AdminHandler が SuperAdmin
+	//     TenantContext を確立して cross-tenant 集計する。
+	//   - Service（read）は Repository / Clock（本番 SystemClock）/ 同期遅延閾値
+	//     （cfg.DeviceSyncDelayThresholdHours / 既定 24h / Req 4.2）を組み合わせて List / Get / Overview を
+	//     提供する。write メソッドを持たない（HTTP 直接書込み不可 / Req 7.3 の型担保）。
+	//   - tenant-console Handler を `routers.API`（/api chain）へ `/devices` で Mount し、own-tenant
+	//     `device` RBAC を判定する（Req 1.x / 2.x）。
+	//   - admin-console AdminHandler を `routers.Admin`（/api/admin chain + RequireAdminConsoleAndSuperAdmin
+	//     ガード継承）へ `/devices/overview` で Mount し、cross-tenant `device read` 二重防御 + SuperAdmin
+	//     TenantContext で全テナント横断集計する（Req 6.x）。
+	//
+	// STATUS_REPORT 反映（notification.StatusHandler ← device.StatusApplier 注入）は worker 経路であり、
+	// cmd/worker の handlers map 本配線は #36 の責務（本 api entrypoint では配線しない / design.md Risks）。
+	deviceHandler := buildDeviceHandler(pool, authorizer, cfg, log)
+	deviceAdminHandler := buildDeviceAdminHandler(pool, authorizer, cfg, log)
+	routers.API.Mount("/devices", deviceHandler)
+	routers.Admin.Mount("/devices/overview", deviceAdminHandler)
+
+	// (14) ListenAndServe + graceful shutdown
 	return runHTTPServer(ctx, srv, log)
 }
 
@@ -509,6 +536,61 @@ func buildAppHandler(
 	appRepo := app.NewRepository(pool)
 	appSvc := app.NewService(appRepo, amapiClient, auditSvc, tenantSvc, log)
 	return app.NewHandler(appSvc, authorizer, log)
+}
+
+// buildDeviceService は device ドメインの本番 DI（Repository → read Service）を構築する
+// （Issue #9 / C1 / Req 1.x / 2.x / 4.2 / 6.x）。
+//
+// pool / cfg は runBootstrap で構築済みのインスタンスを **再利用** する前提で受け取り、本 helper 内で
+// 新規構築しない。Repository は pgxpool 経由で tenant-scoped context のまま devices へアクセスし RLS に
+// テナント分離を委ねる（SuperAdmin 昇格しない）。Service（read）は Clock（本番 SystemClock）と同期遅延
+// 閾値（cfg.DeviceSyncDelayThresholdHours / 既定 24h / Req 4.2）を注入する。device.Service は write
+// メソッドを持たず HTTP 直接書込み不可を型で担保する（Req 7.3）。device.NewRepository は pool を接続せず
+// 保持するだけのため、テストでは nil を渡せる（buildPolicyService と同方針 / live DB 非依存）。
+//
+// 戻り値の device.Service は buildDeviceHandler（tenant-console）と buildDeviceAdminHandler
+// （admin-console overview）の双方の構築に用いられる。
+func buildDeviceService(pool *pgxpool.Pool, cfg config.Config) device.Service {
+	deviceRepo := device.NewRepository(pool)
+	return device.NewService(deviceRepo, device.SystemClock{}, cfg.DeviceSyncDelayThresholdHours)
+}
+
+// buildDeviceHandler は device ドメインの tenant-console read Handler（GET /api/devices, /{id}）を
+// 構築する（Issue #9 / C1 / Req 1.x / 2.x）。
+//
+// pool / authorizer / cfg / log は runBootstrap で構築済みのインスタンスを **再利用** する前提で受け取り、
+// 本 helper 内で新規構築しない。Service は buildDeviceService で組み立て、authorizer は own-tenant
+// `device` RBAC 判定のため device.NewHandler の第 2 引数へ渡す。
+//
+// 本 wiring を独立関数として切り出すのは、main の本番配線が誤って device domain の DI を落とす /
+// stub へ巻き戻していないことを `cmd/api` の単体テスト（main_test.go）で **型レベルに回帰検知** できる
+// ようにするため（buildPolicyHandler / buildAppHandler と同じ testability 方針）。
+func buildDeviceHandler(
+	pool *pgxpool.Pool,
+	authorizer *authz.Authorizer,
+	cfg config.Config,
+	log logger.Logger,
+) *device.Handler {
+	return device.NewHandler(buildDeviceService(pool, cfg), authorizer, log)
+}
+
+// buildDeviceAdminHandler は device ドメインの admin-console 横断 overview Handler
+// （GET /api/admin/devices/overview）を構築する（Issue #9 / C1 / Req 6.x）。
+//
+// pool / authorizer / cfg / log は runBootstrap で構築済みのインスタンスを **再利用** する前提で受け取り、
+// 本 helper 内で新規構築しない。Service は buildDeviceHandler と同じ buildDeviceService で組み立て、
+// authorizer は cross-tenant `device read` の二重防御判定のため device.NewAdminHandler の第 2 引数へ渡す
+// （SuperAdmin TenantContext 確立 + probe-tenant authz / Req 6.2）。
+//
+// 本 wiring を独立関数として切り出すのは、buildDeviceHandler と同じく本番配線の退行（device admin domain の
+// DI 欠落）を main_test.go で型レベルに回帰検知できるようにするため（buildPolicyHandler と同じ testability 方針）。
+func buildDeviceAdminHandler(
+	pool *pgxpool.Pool,
+	authorizer *authz.Authorizer,
+	cfg config.Config,
+	log logger.Logger,
+) *device.AdminHandler {
+	return device.NewAdminHandler(buildDeviceService(pool, cfg), authorizer, log)
 }
 
 // runHTTPServer は srv.ListenAndServe を goroutine で起動し、SIGINT/SIGTERM 受信時に

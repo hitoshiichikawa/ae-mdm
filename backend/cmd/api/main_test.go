@@ -11,6 +11,7 @@ import (
 	"github.com/hitoshiichikawa/ae-mdm/internal/app"
 	"github.com/hitoshiichikawa/ae-mdm/internal/audit"
 	"github.com/hitoshiichikawa/ae-mdm/internal/config"
+	"github.com/hitoshiichikawa/ae-mdm/internal/device"
 	"github.com/hitoshiichikawa/ae-mdm/internal/enrollment"
 	"github.com/hitoshiichikawa/ae-mdm/internal/platform/amapi"
 	"github.com/hitoshiichikawa/ae-mdm/internal/platform/authz"
@@ -297,5 +298,61 @@ func TestBuildEnrollmentHandler_WiresEnrollmentDomainNotStub(t *testing.T) {
 	if _, ok := any(h).(*enrollment.Handler); !ok {
 		t.Fatalf("buildEnrollmentHandler の戻り値型 = %T, want *enrollment.Handler（enrollment domain 配線が"+
 			"stub/interim へ退行した疑い / Req 2.1 / 4.1）", h)
+	}
+}
+
+// TestBuildDeviceHandler_WiresDeviceDomainNotStub は、main の本番 DI が device ドメインの
+// tenant-console read Handler（Repository / Service / Handler）を pool / authorizer / cfg から確実に
+// 組み立て、stub / interim へ退行していないことを型レベルに回帰検知する（Issue #9 / C1 / Req 1.x / 2.x）。
+//
+// buildPolicyHandler / buildAppHandler の testability 方針に倣う: アダプタ単体テスト
+// （internal/device/*_test.go）は device.NewHandler を直接生成して契約を検証するが、main wiring が
+// 誤って device 配線を落とす / stub へ巻き戻しても失敗しない。main が実際に呼ぶ buildDeviceHandler の
+// 戻り値を assert することで、本番配線の退行（device domain の DI 欠落）を捕捉する。
+//
+// pool は device.NewRepository(nil) が接続せず保持するだけなので nil で足りる（buildAppHandler テストと
+// 同方針 / live DB 非依存）。log=nil は device.NewHandler が logger.Default() を補完するため panic しない。
+func TestBuildDeviceHandler_WiresDeviceDomainNotStub(t *testing.T) {
+	// Arrange: 本番 DI（main.go runBootstrap (13)）と同じ実型で依存を構築する。
+	authorizer := authz.New()
+	cfg := config.Config{DeviceSyncDelayThresholdHours: 24}
+
+	// Act: main が実際に呼ぶ wiring helper を通して device tenant-console Handler を構築する。
+	h := buildDeviceHandler(nil, authorizer, cfg, nil)
+
+	// Assert: device domain が確実に配線され、非 nil の *device.Handler であること
+	// （stub / interim へ退行していないこと）。
+	if h == nil {
+		t.Fatalf("buildDeviceHandler の戻り値が nil（device domain の DI が欠落した疑い / Req 1.x / 2.x）")
+	}
+	if _, ok := any(h).(*device.Handler); !ok {
+		t.Fatalf("buildDeviceHandler の戻り値型 = %T, want *device.Handler（device domain 配線が"+
+			"stub/interim へ退行した疑い / Req 1.x / 2.x）", h)
+	}
+}
+
+// TestBuildDeviceAdminHandler_WiresDeviceAdminDomainNotStub は、main の本番 DI が device ドメインの
+// admin-console 横断 overview Handler（Repository / Service / AdminHandler）を pool / authorizer / cfg から
+// 確実に組み立て、stub / interim へ退行していないことを型レベルに回帰検知する（Issue #9 / C1 / Req 6.x）。
+//
+// buildDeviceHandler と同じ testability 方針。main が実際に呼ぶ buildDeviceAdminHandler の戻り値を
+// assert することで、本番配線の退行（device admin domain の DI 欠落）を捕捉する。pool=nil / log=nil の
+// 扱いは buildDeviceHandler テストと同じ（live DB 非依存 / logger.Default() 補完で panic しない）。
+func TestBuildDeviceAdminHandler_WiresDeviceAdminDomainNotStub(t *testing.T) {
+	// Arrange: 本番 DI（main.go runBootstrap (13)）と同じ実型で依存を構築する。
+	authorizer := authz.New()
+	cfg := config.Config{DeviceSyncDelayThresholdHours: 24}
+
+	// Act: main が実際に呼ぶ wiring helper を通して device admin-console AdminHandler を構築する。
+	h := buildDeviceAdminHandler(nil, authorizer, cfg, nil)
+
+	// Assert: device admin domain が確実に配線され、非 nil の *device.AdminHandler であること
+	// （stub / interim へ退行していないこと）。
+	if h == nil {
+		t.Fatalf("buildDeviceAdminHandler の戻り値が nil（device domain の DI が欠落した疑い / Req 6.x）")
+	}
+	if _, ok := any(h).(*device.AdminHandler); !ok {
+		t.Fatalf("buildDeviceAdminHandler の戻り値型 = %T, want *device.AdminHandler（device domain 配線が"+
+			"stub/interim へ退行した疑い / Req 6.x）", h)
 	}
 }
